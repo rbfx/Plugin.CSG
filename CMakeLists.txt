@@ -1,0 +1,25 @@
+# Copyright (c) 2025-2026 the rbfx project.
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
+
+cmake_minimum_required(VERSION 3.21)
+
+project(RbfxCsg LANGUAGES CXX)
+
+# C++17 is required for this project.
+set (CMAKE_CXX_STANDARD 17)
+
+# Setup output directories.
+set (CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set (CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+find_package(Urho3D REQUIRED)
+create_symlink(${Urho3D_PACKAGE_ROOT}/bin/CoreData ${CMAKE_BINARY_DIR}/../CoreData)
+create_symlink(${Urho3D_PACKAGE_ROOT}/bin/Data ${CMAKE_BINARY_DIR}/../Data)
+create_symlink(${Urho3D_PACKAGE_ROOT}/bin/EditorData ${CMAKE_BINARY_DIR}/../EditorData)
+create_symlink(${RbfxCsg_SOURCE_DIR}/Project/Data ${CMAKE_BINARY_DIR}/../ProjectData)
+
+# CSG plugin.
+add_subdirectory(Source/Urho3D/CSG)
+
