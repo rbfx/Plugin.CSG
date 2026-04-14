@@ -1431,6 +1431,26 @@ static bool MergeByFullEdgesToFixpoint(ea::vector<CsgPolygon>& group, float epsi
     }
 
     ea::vector<unsigned char> dirty(group.size(), 1);
+    const auto markAdjacentPolygonsDirty = [&](unsigned polyIndex)
+    {
+        if (polyIndex >= dirty.size())
+            return;
+
+        dirty[polyIndex] = 1;
+        for (const auto& edge : edgesByPoly[polyIndex])
+        {
+            const uint64_t revKey = PackDirectedEdgeKey(edge.toId_, edge.fromId_);
+            const auto it = edgesByDirected.find(revKey);
+            if (it == edgesByDirected.end())
+                continue;
+
+            for (const EdgeRef& ref : it->second)
+            {
+                if (ref.polyIndex_ < dirty.size())
+                    dirty[ref.polyIndex_] = 1;
+            }
+        }
+    };
 
     for (;;)
     {
@@ -1487,8 +1507,8 @@ static bool MergeByFullEdgesToFixpoint(ea::vector<CsgPolygon>& group, float epsi
                     mergedEver = true;
                     mergedThisRound = true;
 
-                    // Conservative correctness: after merge, any polygon may become eligible (mirrors rebuild+rescan).
-                    ea::fill(dirty.begin(), dirty.end(), 1);
+                    // Only the merged polygon and its edge-adjacent neighbors can gain new merge opportunities.
+                    markAdjacentPolygonsDirty(pi);
                     break;
                 }
 
@@ -1517,17 +1537,22 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
         *outPasses = 0;
 
     BoundingBox bbox;
+    unsigned totalVertices = 0;
     for (const auto& poly : polygons)
+    {
+        totalVertices += poly.vertices_.size();
         for (const auto& v : poly.vertices_)
             bbox.Merge(v.GetPosition());
+    }
 
     if (!bbox.Defined())
         return insertedTotal;
 
     const Vector3 size = bbox.Size();
     const float maxDim = ea::max(size.x_, ea::max(size.y_, size.z_));
-    float cellSize = maxDim > 0.0f ? maxDim / 20.0f : 1.0f;
-    cellSize = ea::max(cellSize, epsilon * 10.0f);
+    const float cellsPerAxis = Clamp(Sqrt(static_cast<float>(ea::max(totalVertices, 1u))), 20.0f, 128.0f);
+    float cellSize = maxDim > 0.0f ? maxDim / cellsPerAxis : 1.0f;
+    cellSize = ea::max(cellSize, epsilon * 8.0f);
 
     VertexGrid grid;
     grid.Init(cellSize);
@@ -1540,6 +1565,7 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
     unsigned pass = 0;
 
     ea::fixed_vector<Vector3, 32, true> candidates;
+    ea::hash_set<IntVector3> seenCandidates;
 
     const float invEps = 1.0f / ea::max(epsilon, 1e-6f);
 
@@ -1603,6 +1629,8 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
 
                 edgeDir /= edgeLen;
                 grid.Query(p0, p1, candidates);
+                seenCandidates.clear();
+                seenCandidates.reserve(candidates.size());
 
                 float bestT = edgeLen;
                 Vector3 bestPos;
@@ -1610,6 +1638,9 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
 
                 for (const auto& pos : candidates)
                 {
+                    if (!seenCandidates.insert(QuantizePosition(pos, invEps)).second)
+                        continue;
+
                     const Vector3 vec = pos - p0;
                     const float t = vec.DotProduct(edgeDir);
 
