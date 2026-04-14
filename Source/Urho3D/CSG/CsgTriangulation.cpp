@@ -17,6 +17,62 @@
 namespace Urho3D
 {
 
+namespace
+{
+
+double SignedArea2D(const ea::vector<Vector2>& vertices)
+{
+    const unsigned count = vertices.size();
+    if (count < 3)
+        return 0.0;
+
+    double area2 = 0.0;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const Vector2& a = vertices[i];
+        const Vector2& b = vertices[(i + 1u) % count];
+        area2 += static_cast<double>(a.x_) * static_cast<double>(b.y_) - static_cast<double>(b.x_) * static_cast<double>(a.y_);
+    }
+    return 0.5 * area2;
+}
+
+double Orient2D(const Vector2& a, const Vector2& b, const Vector2& c)
+{
+    return static_cast<double>(b.x_ - a.x_) * static_cast<double>(c.y_ - a.y_)
+        - static_cast<double>(b.y_ - a.y_) * static_cast<double>(c.x_ - a.x_);
+}
+
+double ComputeOrientationEpsilon(const ea::vector<Vector2>& vertices)
+{
+    if (vertices.empty())
+        return 1e-12;
+
+    Vector2 minPoint = vertices.front();
+    Vector2 maxPoint = vertices.front();
+    for (const Vector2& point : vertices)
+    {
+        minPoint.x_ = ea::min(minPoint.x_, point.x_);
+        minPoint.y_ = ea::min(minPoint.y_, point.y_);
+        maxPoint.x_ = ea::max(maxPoint.x_, point.x_);
+        maxPoint.y_ = ea::max(maxPoint.y_, point.y_);
+    }
+
+    const double scaleX = static_cast<double>(maxPoint.x_ - minPoint.x_);
+    const double scaleY = static_cast<double>(maxPoint.y_ - minPoint.y_);
+    const double scale = ea::max(1.0, ea::max(scaleX, scaleY));
+    return scale * scale * 1e-12;
+}
+
+bool IsPointInTriangle(const Vector2& point, const Vector2& a, const Vector2& b, const Vector2& c, double windingSign, double orientEps)
+{
+    const double ab = Orient2D(a, b, point) * windingSign;
+    const double bc = Orient2D(b, c, point) * windingSign;
+    const double ca = Orient2D(c, a, point) * windingSign;
+    return ab >= -orientEps && bc >= -orientEps && ca >= -orientEps;
+}
+
+} // namespace
+
 bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndices)
 {
     const unsigned numVertices = poly.vertices_.size();
@@ -24,155 +80,93 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         return false;
 
     outIndices.clear();
-    if (numVertices == 3)
-    {
-        outIndices = {0, 1, 2};
-        return true;
-    }
-
-    // Project to 2D for robustness
+    // Project to 2D for robust ear clipping in polygon plane.
     Vector3 axisU, axisV;
-    {
-        MakeAxesFromNormal(poly.plane_.normal_, axisU, axisV);
-    }
+    MakeAxesFromNormal(poly.plane_.normal_, axisU, axisV);
 
     ea::vector<Vector2> verts2D(numVertices);
     for (unsigned i = 0; i < numVertices; ++i)
     {
-        Vector3 p = poly.vertices_[i].GetPosition();
+        const Vector3 p = poly.vertices_[i].GetPosition();
         verts2D[i] = {p.DotProduct(axisU), p.DotProduct(axisV)};
     }
+
+    const double orientEps = ComputeOrientationEpsilon(verts2D);
+    const double signedArea = SignedArea2D(verts2D);
+    if (Abs(signedArea) <= orientEps)
+        return false;
+    const double windingSign = signedArea > 0.0 ? 1.0 : -1.0;
 
     ea::vector<unsigned> indices(numVertices);
     for (unsigned i = 0; i < numVertices; ++i)
         indices[i] = i;
 
     unsigned count = numVertices;
-    int maxIterations = static_cast<int>(count * 2);
+    unsigned maxIterations = count * count;
 
-    while (count > 2)
+    while (count > 3)
     {
-        if (maxIterations-- <= 0)
-            break;
+        if (maxIterations-- == 0)
+            return false;
 
         bool earFound = false;
-
-        // Pass 1: Look for a valid ear
         for (unsigned i = 0; i < count; ++i)
         {
-            unsigned prev = (i + count - 1) % count;
-            unsigned next = (i + 1) % count;
+            const unsigned prev = (i + count - 1u) % count;
+            const unsigned next = (i + 1u) % count;
 
-            unsigned u = indices[prev];
-            unsigned v = indices[i];
-            unsigned w = indices[next];
-
-            // Check convexity using 3D normal
-            const Vector3& p0_3d = poly.vertices_[u].GetPosition();
-            const Vector3& p1_3d = poly.vertices_[v].GetPosition();
-            const Vector3& p2_3d = poly.vertices_[w].GetPosition();
-            Vector3 e1_3d = p1_3d - p0_3d;
-            Vector3 e2_3d = p2_3d - p1_3d;
-
-            if (e1_3d.CrossProduct(e2_3d).DotProduct(poly.plane_.normal_) < -M_EPSILON)
-                continue; // Reflex
+            const unsigned u = indices[prev];
+            const unsigned v = indices[i];
+            const unsigned w = indices[next];
 
             const Vector2& p0 = verts2D[u];
             const Vector2& p1 = verts2D[v];
             const Vector2& p2 = verts2D[w];
+            const double earOrient = Orient2D(p0, p1, p2) * windingSign;
+            if (earOrient <= orientEps)
+                continue;
 
-            // Check if any other vertex is inside the triangle
             bool containsVertex = false;
             for (unsigned j = 0; j < count; ++j)
             {
                 if (j == prev || j == i || j == next)
                     continue;
 
-                const Vector2& p = verts2D[indices[j]];
-
-                Vector2 v0 = p2 - p0;
-                Vector2 v1 = p1 - p0;
-                Vector2 v2 = p - p0;
-
-                float dot00 = v0.DotProduct(v0);
-                float dot01 = v0.DotProduct(v1);
-                float dot02 = v0.DotProduct(v2);
-                float dot11 = v1.DotProduct(v1);
-                float dot12 = v1.DotProduct(v2);
-
-                float denom = dot00 * dot11 - dot01 * dot01;
-                if (Abs(denom) < M_EPSILON)
-                    continue;
-
-                float invDenom = 1.0f / denom;
-                float u_bary = (dot11 * dot02 - dot01 * dot12) * invDenom;
-                float v_bary = (dot00 * dot12 - dot01 * dot02) * invDenom;
-
-                if (u_bary >= -1e-5f && v_bary >= -1e-5f && (u_bary + v_bary) <= 1.0f + 1e-5f)
+                const Vector2& point = verts2D[indices[j]];
+                if (IsPointInTriangle(point, p0, p1, p2, windingSign, orientEps))
                 {
                     containsVertex = true;
                     break;
                 }
             }
 
-            if (!containsVertex)
-            {
-                outIndices.push_back(u);
-                outIndices.push_back(v);
-                outIndices.push_back(w);
+            if (containsVertex)
+                continue;
 
-                indices.erase(indices.begin() + i);
-                --count;
-                earFound = true;
-                break;
-            }
-        }
-
-        // Pass 2: Force clip first convex ear
-        if (!earFound)
-        {
-            for (unsigned i = 0; i < count; ++i)
-            {
-                unsigned prev = (i + count - 1) % count;
-                unsigned next = (i + 1) % count;
-                unsigned u = indices[prev];
-                unsigned v = indices[i];
-                unsigned w = indices[next];
-
-                const Vector3& p0_3d = poly.vertices_[u].GetPosition();
-                const Vector3& p1_3d = poly.vertices_[v].GetPosition();
-                const Vector3& p2_3d = poly.vertices_[w].GetPosition();
-                Vector3 e1_3d = p1_3d - p0_3d;
-                Vector3 e2_3d = p2_3d - p1_3d;
-
-                if (e1_3d.CrossProduct(e2_3d).DotProduct(poly.plane_.normal_) >= -M_EPSILON)
-                {
-                    outIndices.push_back(u);
-                    outIndices.push_back(v);
-                    outIndices.push_back(w);
-                    indices.erase(indices.begin() + i);
-                    --count;
-                    earFound = true;
-                    break;
-                }
-            }
-        }
-
-        // Pass 3: Force clip any ear
-        if (!earFound)
-        {
-            unsigned i = 0;
-            unsigned prev = (i + count - 1) % count;
-            unsigned next = (i + 1) % count;
             outIndices.push_back(indices[prev]);
             outIndices.push_back(indices[i]);
             outIndices.push_back(indices[next]);
             indices.erase(indices.begin() + i);
             --count;
+            earFound = true;
+            break;
         }
+
+        if (!earFound)
+            return false;
     }
 
-    return true;
+    if (count != 3)
+        return false;
+
+    const double finalOrient = Orient2D(verts2D[indices[0]], verts2D[indices[1]], verts2D[indices[2]]) * windingSign;
+    if (finalOrient <= orientEps)
+        return false;
+
+    outIndices.push_back(indices[0]);
+    outIndices.push_back(indices[1]);
+    outIndices.push_back(indices[2]);
+    return outIndices.size() == (numVertices - 2u) * 3u;
 }
 
 bool CsgTriangulateGeometry(
@@ -234,7 +228,11 @@ bool CsgTriangulateGeometry(
             continue;
 
         if (!CsgTriangulatePolygon(poly, triIndices))
-            continue;
+        {
+            outVertices.clear();
+            outIndexData.clear();
+            return false;
+        }
 
         for (const unsigned polyVertexIndex : triIndices)
             outIndexData.push_back(getOrCreateVertexIndex(poly.vertices_[polyVertexIndex]));
@@ -267,15 +265,17 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(ea::vector<CsgPolygon> po
         auto& polys = groups[sharedKey];
 
         CsgSimplifyPolygons(polys, epsilon);
+        if (polys.empty())
+            continue;
 
         CsgTriangulatedModel::Geometry geometry;
         geometry.shared_ = sharedKey;
 
         if (!CsgTriangulateGeometry(polys, epsilon, geometry.vertices_, geometry.indexData_))
-            continue;
+            return {};
 
         if (geometry.vertices_.empty() || geometry.indexData_.empty())
-            continue;
+            return {};
 
         for (const auto& v : geometry.vertices_)
         {
