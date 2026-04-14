@@ -6,6 +6,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgBsp.h"
+#include "Urho3D/CSG/CsgOptimization.h"
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -891,6 +892,13 @@ bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x
 static ea::vector<CsgPolygon> EvaluateBooleanPolygons(
     ea::vector<CsgPolygon> a, ea::vector<CsgPolygon> b, CsgOperation op, float epsilon)
 {
+    const auto simplifyResult = [epsilon](ea::vector<CsgPolygon>&& polygons)
+    {
+        if (polygons.size() > 1)
+            CsgSimplifyPolygons(polygons, epsilon);
+        return polygons;
+    };
+
     // Handle empty operands explicitly to avoid treating "empty BSP" as a hard failure.
     if (a.empty() && b.empty())
         return {};
@@ -899,7 +907,7 @@ static ea::vector<CsgPolygon> EvaluateBooleanPolygons(
     {
         switch (op)
         {
-        case CsgOperation::Union: return b;
+        case CsgOperation::Union: return simplifyResult(ea::move(b));
         case CsgOperation::DifferenceAB: return {};
         case CsgOperation::Intersection: return {};
         }
@@ -909,8 +917,8 @@ static ea::vector<CsgPolygon> EvaluateBooleanPolygons(
     {
         switch (op)
         {
-        case CsgOperation::Union: return a;
-        case CsgOperation::DifferenceAB: return a;
+        case CsgOperation::Union: return simplifyResult(ea::move(a));
+        case CsgOperation::DifferenceAB: return simplifyResult(ea::move(a));
         case CsgOperation::Intersection: return {};
         }
     }
@@ -922,7 +930,7 @@ static ea::vector<CsgPolygon> EvaluateBooleanPolygons(
     if (!bspA || !bspB)
         return {};
 
-    return CsgBooleanOperation(bspA, bspB, op, epsilon);
+    return simplifyResult(CsgBooleanOperation(bspA, bspB, op, epsilon));
 }
 
 void CsgRoot::EvaluateOperationTree(const BrushStep& step, ea::vector<CsgPolygon>& currentPolygons, float epsilon)
