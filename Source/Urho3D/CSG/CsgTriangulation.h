@@ -21,8 +21,8 @@ class PLUGIN_RBFXCSG_API CsgTriangulatedModel : public RefCounted
 public:
 	struct Geometry
 	{
-		/// `(sourceMeshId << 16) | sourceGeometryIndex` copied from `CsgPolygon::shared_`.
-		/// Used on the main thread to resolve source vertex layout and output material.
+		/// Canonical `(sourceMeshId << 16) | sourceGeometryIndex` representative copied from `CsgPolygon::shared_`.
+		/// Used on the main thread to resolve the shared output vertex layout and material.
 		unsigned shared_{};
 
 		/// Triangulated vertex stream in unpacked `ModelVertex` format.

@@ -24,7 +24,7 @@ enum class CsgClipMode
 struct PLUGIN_RBFXCSG_API CsgPolygon
 {
     ea::vector<ModelVertex> vertices_;
-    unsigned shared_{};  // (sourceMeshId << 16) | sourceGeometryIndex
+    unsigned shared_{};  // Canonical representative of a compatible (sourceMeshId << 16) | sourceGeometryIndex group.
     Plane plane_;
 
     CsgPolygon();

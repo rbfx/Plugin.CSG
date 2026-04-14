@@ -6,6 +6,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgBsp.h"
+#include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
 #include <Urho3D/Core/WorkQueue.h>
@@ -13,6 +14,7 @@
 #include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/Graphics/VertexBuffer.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Scene/Node.h>
@@ -53,6 +55,136 @@ struct CsgRoot::BuildJob
 
 namespace
 {
+
+inline unsigned PackSourceGeometryKey(unsigned meshId, unsigned geometryIndex)
+{
+    return (meshId << 16u) | (geometryIndex & 0xFFFFu);
+}
+
+bool IsSupportedCsgVertexElement(const VertexElement& element)
+{
+    if (element.stepRate_ != 0)
+        return false;
+
+    switch (element.semantic_)
+    {
+    case SEM_POSITION:
+    case SEM_NORMAL:
+    case SEM_BINORMAL:
+    case SEM_TANGENT:
+    case SEM_TEXCOORD:
+    case SEM_COLOR: return true;
+
+    case SEM_BLENDWEIGHTS:
+    case SEM_BLENDINDICES:
+    case SEM_OBJECTINDEX:
+    default: return false;
+    }
+}
+
+ea::vector<VertexElement> GetSupportedCsgVertexElements(const Model* sourceModel, unsigned geometryIndex)
+{
+    Geometry* sourceGeometry = sourceModel ? sourceModel->GetGeometry(geometryIndex, 0) : nullptr;
+    ea::vector<VertexElement> elements;
+
+    if (sourceGeometry)
+    {
+        unsigned vertexSize = 0;
+        unsigned indexSize = 0;
+        const unsigned char* vertexData = nullptr;
+        const unsigned char* indexData = nullptr;
+        const ea::vector<VertexElement>* sourceElements = nullptr;
+        sourceGeometry->GetRawData(vertexData, vertexSize, indexData, indexSize, sourceElements);
+
+        if (sourceElements)
+        {
+            elements.reserve(sourceElements->size());
+            ea::copy_if(sourceElements->begin(), sourceElements->end(), ea::back_inserter(elements), IsSupportedCsgVertexElement);
+        }
+    }
+
+    if (elements.empty())
+        elements.emplace_back(TYPE_VECTOR3, SEM_POSITION, 0);
+
+    VertexBuffer::UpdateOffsets(elements);
+    return elements;
+}
+
+bool AreVertexLayoutsCompatible(const ea::vector<VertexElement>& lhs, const ea::vector<VertexElement>& rhs)
+{
+    if (lhs.size() != rhs.size())
+        return false;
+
+    for (unsigned i = 0; i < lhs.size(); ++i)
+    {
+        const VertexElement& a = lhs[i];
+        const VertexElement& b = rhs[i];
+        if (a.type_ != b.type_ || a.semantic_ != b.semantic_ || a.index_ != b.index_ || a.stepRate_ != b.stepRate_
+            || a.offset_ != b.offset_)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+struct SharedKeyCompatibilityGroup
+{
+    unsigned representativeShared_{};
+    ea::string materialName_;
+    ea::vector<VertexElement> elements_;
+};
+
+ea::hash_map<unsigned, unsigned> BuildCanonicalSharedKeyMap(
+    const ea::vector<SharedPtr<Model>>& sourceModels, const ea::vector<ResourceRefList>& sourceMaterials)
+{
+    ea::hash_map<unsigned, unsigned> canonicalSharedKeys;
+    ea::vector<SharedKeyCompatibilityGroup> groups;
+
+    for (unsigned meshId = 0; meshId < sourceModels.size(); ++meshId)
+    {
+        const Model* sourceModel = sourceModels[meshId];
+        if (!sourceModel)
+            continue;
+
+        const ResourceRefList* materialList = meshId < sourceMaterials.size() ? &sourceMaterials[meshId] : nullptr;
+        const unsigned numGeometries = sourceModel->GetNumGeometries();
+        for (unsigned geometryIndex = 0; geometryIndex < numGeometries; ++geometryIndex)
+        {
+            const unsigned shared = PackSourceGeometryKey(meshId, geometryIndex);
+            const ea::string materialName =
+                materialList && geometryIndex < materialList->names_.size() ? materialList->names_[geometryIndex] : ea::string{};
+            const ea::vector<VertexElement> elements = GetSupportedCsgVertexElements(sourceModel, geometryIndex);
+
+            unsigned representativeShared = shared;
+            for (const SharedKeyCompatibilityGroup& group : groups)
+            {
+                if (group.materialName_ == materialName && AreVertexLayoutsCompatible(group.elements_, elements))
+                {
+                    representativeShared = group.representativeShared_;
+                    break;
+                }
+            }
+
+            canonicalSharedKeys[shared] = representativeShared;
+            if (representativeShared == shared)
+                groups.push_back({shared, materialName, elements});
+        }
+    }
+
+    return canonicalSharedKeys;
+}
+
+void CanonicalizeSharedKeys(ea::vector<CsgPolygon>& polygons, const ea::hash_map<unsigned, unsigned>& canonicalSharedKeys)
+{
+    for (CsgPolygon& polygon : polygons)
+    {
+        const auto it = canonicalSharedKeys.find(polygon.shared_);
+        if (it != canonicalSharedKeys.end())
+            polygon.shared_ = it->second;
+    }
+}
 
 Node* GetOrCreateTemporaryChild(Node* parent, const ea::string& name)
 {
@@ -547,6 +679,16 @@ void CsgRoot::Rebuild()
         rebuildDirty_ = false;
         return;
     }
+
+    const ea::hash_map<unsigned, unsigned> canonicalSharedKeys =
+        BuildCanonicalSharedKeyMap(job->sourceModels_, job->sourceMaterials_);
+    const auto canonicalizeStep = [&](auto&& self, BrushStep& step) -> void
+    {
+        CanonicalizeSharedKeys(step.polygons_, canonicalSharedKeys);
+        for (BrushStep& child : step.children_)
+            self(self, child);
+    };
+    canonicalizeStep(canonicalizeStep, job->rootStep_);
 
     WorkQueue* workQueue = GetSubsystem<WorkQueue>();
     rebuildInFlight_ = true;
