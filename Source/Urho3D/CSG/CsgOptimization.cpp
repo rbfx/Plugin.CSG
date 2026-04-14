@@ -452,7 +452,8 @@ static bool IsSimplePolygonInPlane(const CsgPolygon& poly, float epsilon, const 
         return false;
 
     const float eps = ea::max(epsilon, 1e-6f);
-    const float intersectionEps = ea::max(1e-9f, eps * 1e-5f);
+    // Keep self-intersection tolerance aligned with the vertex quantization epsilon used elsewhere.
+    const float intersectionEps = eps;
     const float invEps = 1.0f / eps;
 
     ea::hash_map<IntVector3, unsigned> unique;
@@ -497,7 +498,8 @@ static bool IsSimplePolygonInPlane(
         return false;
 
     const float eps = ea::max(epsilon, 1e-6f);
-    const float intersectionEps = ea::max(1e-9f, eps * 1e-5f);
+    // Keep self-intersection tolerance aligned with the vertex quantization epsilon used elsewhere.
+    const float intersectionEps = eps;
     const float invEps = 1.0f / eps;
 
     ea::hash_map<IntVector3, unsigned> unique;
