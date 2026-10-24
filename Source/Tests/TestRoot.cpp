@@ -7,6 +7,8 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
+#include "Urho3D/CSG/CsgRootInternal.h"
+#include "Urho3D/CSG/CsgSolid.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -23,6 +25,9 @@
 #include <Urho3D/Scene/Scene.h>
 
 #include <catch2/catch_amalgamated.hpp>
+
+#include <cmath>
+#include <limits>
 
 using namespace Urho3D;
 
@@ -118,6 +123,31 @@ unsigned CountIndices(const Model* model)
     return count;
 }
 
+/// Build a box minus a box with a root that has the given scale. Return the bounds of the output model.
+BoundingBox BuildDifferenceBounds(Context* context, Scene* scene, WorkQueue* workQueue, const ea::string& nodeName,
+    const Vector3& rootScale)
+{
+    Node* rootNode = scene->CreateChild(nodeName);
+    rootNode->SetScale(rootScale);
+    auto* root = rootNode->CreateComponent<CsgRoot>();
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxA.mdl"));
+    root->SetDeferredDelaySec(0.0f);
+
+    Node* brushNode = rootNode->CreateChild("Brush");
+    brushNode->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+    auto* brush = brushNode->CreateComponent<CsgBrush>();
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+    brush->SetOperation(CsgOperation::DifferenceAB);
+
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+    auto* output = rootNode->GetComponent<StaticModel>();
+    REQUIRE(output);
+    REQUIRE(output->GetModel());
+    return output->GetModel()->GetBoundingBox();
+}
+
 } // namespace
 
 TEST_CASE("CsgRoot builds a model from a root and a brush")
@@ -150,4 +180,82 @@ TEST_CASE("CsgRoot builds a model from a root and a brush")
     REQUIRE(model);
     CHECK(model->GetNumGeometries() >= 1);
     CHECK(CountIndices(model) > 36);
+}
+
+TEST_CASE("CsgRoot output is in node space for a scaled root", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    const BoundingBox expected = BuildDifferenceBounds(context, scene, workQueue, "Unscaled", Vector3::ONE);
+    const BoundingBox scaled = BuildDifferenceBounds(context, scene, workQueue, "Scaled", Vector3(2.0f, 1.0f, 1.0f));
+
+    CHECK(scaled.min_.Equals(expected.min_, 1e-3f));
+    CHECK(scaled.max_.Equals(expected.max_, 1e-3f));
+    CHECK(expected.max_.x_ - expected.min_.x_ > 1.0f);
+}
+
+TEST_CASE("CsgInternal::GetMetricScale replaces degenerate axes", "[root]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    CHECK(CsgInternal::GetMetricScale(Vector3(0.0f, nan, -1.0f)) == Vector3::ONE);
+    CHECK(CsgInternal::GetMetricScale(Vector3(inf, 2.0f, 1e-7f)) == Vector3(1.0f, 2.0f, 1.0f));
+    CHECK(CsgInternal::GetMetricScale(Vector3(2.0f, 3.0f, 0.5f)) == Vector3(2.0f, 3.0f, 0.5f));
+}
+
+TEST_CASE("CsgInternal::ToNodeSpace applies the inverse scale", "[root]")
+{
+    auto model = MakeShared<CsgTriangulatedModel>();
+    CsgTriangulatedModel::Geometry geometry;
+    ModelVertex vertex{};
+    vertex.SetPosition(Vector3(4.0f, 2.0f, 6.0f));
+    vertex.SetNormal(Vector3(1.0f, 1.0f, 0.0f).Normalized());
+    vertex.tangent_ = Vector4(1.0f, 0.0f, 0.0f, -1.0f);
+    geometry.vertices_.push_back(vertex);
+    model->geometries_.push_back(geometry);
+    model->boundingBox_ = BoundingBox(Vector3(-4.0f, -2.0f, -6.0f), Vector3(4.0f, 2.0f, 6.0f));
+    model->hasAnyVertex_ = true;
+
+    CsgInternal::ToNodeSpace(*model, Vector3(2.0f, 1.0f, 1.0f));
+
+    const ModelVertex& result = model->geometries_[0].vertices_[0];
+    CHECK(result.GetPosition().Equals(Vector3(2.0f, 2.0f, 6.0f), 1e-5f));
+    CHECK(result.GetNormal().Length() == Catch::Approx(1.0f).margin(1e-5f));
+    CHECK(result.GetNormal().x_ > result.GetNormal().y_);
+    CHECK(result.tangent_.w_ == -1.0f);
+    CHECK(result.GetTangent().Length() == Catch::Approx(1.0f).margin(1e-5f));
+    CHECK(model->boundingBox_.min_.Equals(Vector3(-2.0f, -2.0f, -6.0f), 1e-5f));
+    CHECK(model->boundingBox_.max_.Equals(Vector3(2.0f, 2.0f, 6.0f), 1e-5f));
+}
+
+TEST_CASE("CsgSolid from an empty operand is empty and works in a boolean", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    SharedPtr<Model> box = AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+
+    SharedPtr<CsgSolid> empty = CsgSolid::FromOperand({}, 1e-4f);
+    REQUIRE(empty);
+    CHECK(empty->FaceCount() == 0);
+
+    SharedPtr<CsgSolid> solid = CsgSolid::FromOperand(CsgBuildPolygonsFromModel(box, Matrix3x4::IDENTITY, 0), 1e-4f);
+    REQUIRE(solid);
+    REQUIRE(solid->FaceCount() != 0);
+
+    for (const CsgOperation op : {CsgOperation::Union, CsgOperation::DifferenceAB, CsgOperation::Intersection})
+    {
+        SharedPtr<const CsgSolid> result = CsgBooleanOperation(empty.Get(), solid.Get(), op, 1e-4f);
+        REQUIRE(result);
+        CHECK((result->FaceCount() != 0) == (op == CsgOperation::Union));
+        result = CsgBooleanOperation(solid.Get(), empty.Get(), op, 1e-4f);
+        REQUIRE(result);
+        CHECK((result->FaceCount() != 0) == (op != CsgOperation::Intersection));
+    }
 }

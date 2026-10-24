@@ -36,6 +36,7 @@ set (SOURCE_FILES
     CsgFaceBvh.h
     CsgOptimization.h
     CsgRoot.h
+    CsgRootInternal.h
     CsgSimd.h
     CsgTriangulation.h
 )

@@ -5,8 +5,9 @@
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
-#include "Urho3D/CSG/CsgBsp.h"
-#include "Urho3D/CSG/CsgOptimization.h"
+#include "Urho3D/CSG/CsgCorefine.h"
+#include "Urho3D/CSG/CsgRootInternal.h"
+#include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -21,6 +22,7 @@
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
 
+#include <cmath>
 #include <memory>
 
 namespace Urho3D
@@ -35,6 +37,8 @@ struct CsgRoot::BrushStep
     unsigned meshId_{};
     CsgOperation op_{};
     WeakPtr<CsgBrush> brush_;
+    /// Brush to root frame transform.
+    Matrix3x4 transform_{Matrix3x4::IDENTITY};
     ea::vector<BrushStep> children_;
 };
 
@@ -45,6 +49,10 @@ struct CsgRoot::BuildJob
     unsigned buildId_{};
     unsigned componentId_{};
     float epsilon_{};
+    /// World scale of the root. The root frame carries this scale.
+    Vector3 metricScale_{Vector3::ONE};
+    /// True if an operand has a coordinate that the exact math cannot handle.
+    bool outOfRange_{};
 
     SharedPtr<Model> baseModel_;
     ResourceRefList baseMaterials_;
@@ -616,6 +624,66 @@ void CsgRoot::DeferredRebuildTick(unsigned scheduleToken, WorkQueue* queue)
     });
 }
 
+namespace CsgInternal
+{
+
+Vector3 GetMetricScale(const Vector3& worldScale)
+{
+    const auto axis = [](float value) { return std::isfinite(value) && value > 1e-6f ? value : 1.0f; };
+    return Vector3(axis(worldScale.x_), axis(worldScale.y_), axis(worldScale.z_));
+}
+
+void ToNodeSpace(CsgTriangulatedModel& model, const Vector3& scale)
+{
+    if (scale == Vector3::ONE)
+        return;
+
+    const Vector3 inverse(1.0f / scale.x_, 1.0f / scale.y_, 1.0f / scale.z_);
+    for (CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+    {
+        for (ModelVertex& vertex : geometry.vertices_)
+        {
+            vertex.SetPosition(vertex.GetPosition() * inverse);
+            // Normals use the inverse transpose of the position transform. Surface directions use it directly.
+            if (vertex.HasNormal())
+                vertex.SetNormal((vertex.GetNormal() * scale).NormalizedOrDefault(vertex.GetNormal()));
+            if (vertex.HasTangent())
+            {
+                const Vector3 tangent = (vertex.GetTangent() * inverse).NormalizedOrDefault(vertex.GetTangent());
+                vertex.tangent_ = tangent.ToVector4(vertex.tangent_.w_);
+            }
+            if (vertex.HasBinormal())
+            {
+                const Vector3 binormal = vertex.binormal_.ToVector3();
+                vertex.binormal_ = (binormal * inverse).NormalizedOrDefault(binormal).ToVector4(vertex.binormal_.w_);
+            }
+        }
+    }
+    if (model.hasAnyVertex_)
+        model.boundingBox_ = BoundingBox(model.boundingBox_.min_ * inverse, model.boundingBox_.max_ * inverse);
+}
+
+} // namespace CsgInternal
+
+namespace
+{
+
+/// Set the flag if a bound of the solid is at or beyond the limit of the exact math.
+void CheckSolidRange(const CsgSolid& solid, bool& outOfRange)
+{
+    if (solid.FaceCount() == 0)
+        return;
+    for (const Vector3* bound : {&solid.GetBoundsMin(), &solid.GetBoundsMax()})
+    {
+        if (!(Abs(bound->x_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT && Abs(bound->y_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT
+                && Abs(bound->z_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT))
+            outOfRange = true;
+    }
+}
+
+} // namespace
+
+
 void CsgRoot::Rebuild()
 {
     if (!node_)
@@ -654,6 +722,7 @@ void CsgRoot::Rebuild()
     job->buildId_ = rebuildRequestId_;
     job->componentId_ = GetID();
     job->epsilon_ = epsilon_;
+    job->metricScale_ = CsgInternal::GetMetricScale(node_->GetWorldScale());
     job->baseModel_ = tempBase->GetModel();
     job->baseMaterials_ = tempBase->GetMaterialsAttr();
 
@@ -664,15 +733,18 @@ void CsgRoot::Rebuild()
     job->sourceModels_.push_back(job->baseModel_);
     job->sourceMaterials_.push_back(job->baseMaterials_);
 
-    // Extract base polygons in CsgRoot local space on the main thread.
+    // Extract base polygons in the root frame on the main thread.
+    // The root frame has the world scale of the root but not its rotation or position.
     job->rootStep_.model_ = job->baseModel_;
     job->rootStep_.materials_ = job->baseMaterials_;
     job->rootStep_.meshId_ = 0;
-    job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(job->baseModel_.Get(), Matrix3x4::IDENTITY, 0);
+    job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
+        job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
 
     // Build operation tree recursively starting from root node.
-    const Matrix3x4 invRootWorld = node_->GetWorldTransform().Inverse();
-    if (!BuildOperationTree(job->rootStep_, node_, invRootWorld, tempB, job->sourceModels_, job->sourceMaterials_))
+    const Matrix3x4 rootFrame = Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_) *
+        node_->GetWorldTransform().Inverse();
+    if (!BuildOperationTree(job->rootStep_, node_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
     {
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
@@ -697,20 +769,27 @@ void CsgRoot::Rebuild()
     rebuildDirty_ = false;
 
     workQueue->PostTask([job](unsigned threadIndex, WorkQueue* queue) { ExecuteBuildJob(threadIndex, queue, job); },
-        TaskPriority::High);
+        TaskPriority::Medium);
 }
 
 void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job)
 {
     (void)threadIndex;
 
-    ea::vector<CsgPolygon> resultPolygons = job->rootStep_.polygons_;
-
     HiresTimer timer;
-    EvaluateOperationTree(job->rootStep_, resultPolygons, job->epsilon_);
+    SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
+    CheckSolidRange(*solid, job->outOfRange_);
+    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->outOfRange_);
+
     SharedPtr<CsgTriangulatedModel> triangulated;
-    if (!resultPolygons.empty())
-        triangulated = CsgTriangulatePolygons(ea::move(resultPolygons), job->epsilon_);
+    if (solid && solid->FaceCount() != 0)
+    {
+        triangulated = CsgTriangulateSolid(*solid, job->epsilon_);
+        if (triangulated)
+            CsgInternal::ToNodeSpace(*triangulated, job->metricScale_);
+    }
+    if (!triangulated)
+        triangulated = MakeShared<CsgTriangulatedModel>();
     URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, timer.GetUSec() / 1000, timer.GetUSec() % 1000);
 
     queue->PostDelayedTaskForMainThread([job, triangulated = ea::move(triangulated)](unsigned, WorkQueue*) mutable
@@ -735,6 +814,13 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         if (root->rebuildDirty_)
             root->Rebuild();
         return;
+    }
+
+    if (job->outOfRange_)
+    {
+        URHO3D_LOGWARNING("CsgRoot ({}:{}): an operand has a coordinate at or beyond 65536 units; "
+                          "the exact math is not reliable",
+            root->GetNode() ? root->GetNode()->GetName() : EMPTY_STRING, root->GetNode() ? root->GetNode()->GetID() : 0u);
     }
 
     ResourceRefList materials;
@@ -827,7 +913,7 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
     return SetupOperandStaticModel(staticModel, brush->GetModelAttr(), brush->GetMaterialsAttr());
 }
 
-bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& invRootWorld, StaticModel* tempModel,
+bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& rootFrame, StaticModel* tempModel,
     ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials)
 {
 
@@ -871,78 +957,37 @@ bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x
             sourceModels.push_back(step.model_);
             sourceMaterials.push_back(step.materials_);
 
-            // Extract polygons in CsgRoot local space (main thread).
-            const Matrix3x4 brushToRoot = invRootWorld * child->GetWorldTransform();
-            step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), brushToRoot, step.meshId_);
+            // Extract polygons in the root frame (main thread).
+            step.transform_ = rootFrame * child->GetWorldTransform();
+            step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
 
             // Recurse into the brush subtree.
-            BuildOperationTree(step, child, invRootWorld, tempModel, sourceModels, sourceMaterials);
+            BuildOperationTree(step, child, rootFrame, tempModel, sourceModels, sourceMaterials);
             rootStep.children_.push_back(ea::move(step));
         }
         else
         {
             // Recurse into nodes without brushes.
-            BuildOperationTree(rootStep, child, invRootWorld, tempModel, sourceModels, sourceMaterials);
+            BuildOperationTree(rootStep, child, rootFrame, tempModel, sourceModels, sourceMaterials);
         }
     }
 
     return !rootStep.children_.empty();
 }
 
-static ea::vector<CsgPolygon> EvaluateBooleanPolygons(
-    ea::vector<CsgPolygon> a, ea::vector<CsgPolygon> b, CsgOperation op, float epsilon)
-{
-    const auto simplifyResult = [epsilon](ea::vector<CsgPolygon>&& polygons)
-    {
-        if (polygons.size() > 1)
-            CsgSimplifyPolygons(polygons, epsilon);
-        return polygons;
-    };
-
-    // Handle empty operands explicitly to avoid treating "empty BSP" as a hard failure.
-    if (a.empty() && b.empty())
-        return {};
-
-    if (a.empty())
-    {
-        switch (op)
-        {
-        case CsgOperation::Union: return simplifyResult(ea::move(b));
-        case CsgOperation::DifferenceAB: return {};
-        case CsgOperation::Intersection: return {};
-        }
-    }
-
-    if (b.empty())
-    {
-        switch (op)
-        {
-        case CsgOperation::Union: return simplifyResult(ea::move(a));
-        case CsgOperation::DifferenceAB: return simplifyResult(ea::move(a));
-        case CsgOperation::Intersection: return {};
-        }
-    }
-
-    CsgBsp bspA;
-    bspA.Build(ea::move(a), epsilon);
-    CsgBsp bspB;
-    bspB.Build(ea::move(b), epsilon);
-    if (!bspA || !bspB)
-        return {};
-
-    return simplifyResult(CsgBooleanOperation(bspA, bspB, op, epsilon));
-}
-
-void CsgRoot::EvaluateOperationTree(const BrushStep& step, ea::vector<CsgPolygon>& currentPolygons, float epsilon)
+void CsgRoot::EvaluateOperationTree(
+    const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon, bool& outOfRange)
 {
     for (const BrushStep& child : step.children_)
     {
-        ea::vector<CsgPolygon> childPolygons = child.polygons_;
+        SharedPtr<const CsgSolid> childSolid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(child.polygons_), epsilon);
+        CheckSolidRange(*childSolid, outOfRange);
         if (!child.children_.empty())
-            EvaluateOperationTree(child, childPolygons, epsilon);
+            EvaluateOperationTree(child, childSolid, epsilon, outOfRange);
 
-        currentPolygons =
-            EvaluateBooleanPolygons(ea::move(currentPolygons), ea::move(childPolygons), child.op_, epsilon);
+        // A null result is an empty solid.
+        SharedPtr<const CsgSolid> result = CsgBooleanOperation(currentSolid.Get(), childSolid.Get(), child.op_, epsilon);
+        currentSolid = result ? result : SharedPtr<const CsgSolid>(CsgSolid::FromOperand({}, epsilon));
     }
 }
 

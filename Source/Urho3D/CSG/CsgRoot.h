@@ -20,6 +20,7 @@ namespace Urho3D
 {
 
 class CsgBrush;
+class CsgSolid;
 class Material;
 class Model;
 class StaticModel;
@@ -39,6 +40,14 @@ class WorkQueue;
 ///   for after the quiet period; setting delay to 0 triggers immediate rebuild.
 /// - Results are de-staled: if multiple rebuilds are requested while a build is in-flight, older
 ///   results are discarded and a fresh rebuild is scheduled.
+///
+/// Root frame and coordinates:
+/// - The build runs in the root frame. The root frame carries the world scale of the root, but not
+///   its rotation or position. Brushes keep their relative transform in this frame.
+/// - An axis with a scale that is not finite or not greater than 1e-6 uses the scale 1.
+/// - The result returns to node space. The output model has the same frame as the node of the root.
+/// - The build uses exact math on solids. An operand coordinate at or beyond 65536 units
+///   makes the root log a warning.
 ///
 /// Brush registration:
 /// - Brushes register/unregister themselves with the nearest root (see `CsgBrush`).
@@ -102,12 +111,13 @@ private:
     StaticModel* GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache);
     bool SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* brush) const;
     bool SetupOperandStaticModel(StaticModel* staticModel, const ResourceRef& modelAttr, const ResourceRefList& materialsAttr) const;
-    bool BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& invRootWorld, StaticModel* tempModel,
+    bool BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& rootFrame, StaticModel* tempModel,
         ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials);
 
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
-    static void EvaluateOperationTree(const BrushStep& step, ea::vector<CsgPolygon>& currentPolygons, float epsilon);
+    static void EvaluateOperationTree(
+        const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon, bool& outOfRange);
     static void AcknowledgeBrushes(const BrushStep& step);
 
     float deferredDelaySec_{0.1f};
