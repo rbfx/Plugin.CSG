@@ -10,7 +10,6 @@ set (SOURCE_FILES
     Csg.cpp
     CsgBrush.cpp
     CsgBoolean.cpp
-    CsgBsp.cpp
     CsgPolygon.cpp
     CsgSolid.cpp
     CsgCommon.cpp
@@ -24,7 +23,6 @@ set (SOURCE_FILES
     Csg.h
     CsgBoolean.h
     CsgBrush.h
-    CsgBsp.h
     CsgPolygon.h
     CsgSolid.h
     CsgCommon.h

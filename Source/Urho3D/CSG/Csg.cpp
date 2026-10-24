@@ -5,7 +5,6 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoolean.h"
 #include "Urho3D/CSG/CsgBrush.h"
-#include "Urho3D/CSG/CsgBsp.h"
 #include "Urho3D/CSG/CsgCommon.h"
 #include "Urho3D/CSG/CsgComponent.h"
 #include "Urho3D/CSG/CsgRoot.h"
@@ -271,64 +270,6 @@ ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(const Model* model, const Matri
     }
 
     return polygons;
-}
-
-ea::vector<CsgPolygon> CsgBooleanOperation(const CsgBsp& bspA, const CsgBsp& bspB, CsgOperation op, float epsilon)
-{
-    ea::vector<CsgPolygon> resultPolys;
-
-    switch (op)
-    {
-    case CsgOperation::Union:
-    {
-        auto aOutB = bspB.Clip(bspA.AllPolygons(), CsgClipMode::ClipToOutside, epsilon);
-        auto bOutA = bspA.Clip(bspB.AllPolygons(), CsgClipMode::ClipToOutside, epsilon);
-
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(aOutB.begin()), std::make_move_iterator(aOutB.end()));
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(bOutA.begin()), std::make_move_iterator(bOutA.end()));
-        break;
-    }
-    case CsgOperation::DifferenceAB:
-    {
-        auto aOutB = bspB.Clip(bspA.AllPolygons(), CsgClipMode::ClipToOutside, epsilon);
-        auto bInA = bspA.Clip(bspB.AllPolygonsInverted(), CsgClipMode::ClipToInside, epsilon);
-
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(aOutB.begin()), std::make_move_iterator(aOutB.end()));
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(bInA.begin()), std::make_move_iterator(bInA.end()));
-        break;
-    }
-    case CsgOperation::Intersection:
-    {
-        auto aInB = bspB.Clip(bspA.AllPolygons(), CsgClipMode::ClipToInside, epsilon);
-        auto bInA = bspA.Clip(bspB.AllPolygons(), CsgClipMode::ClipToInside, epsilon);
-
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(aInB.begin()), std::make_move_iterator(aInB.end()));
-        resultPolys.insert(
-            resultPolys.end(), std::make_move_iterator(bInA.begin()), std::make_move_iterator(bInA.end()));
-        break;
-    }
-    }
-
-    return resultPolys;
-}
-
-CsgBsp CsgBuildBspFromModel(const Model* model, const Matrix3x4& worldTransform, unsigned meshId, float epsilon)
-{
-    if (!model)
-        return {};
-
-    auto polygons = CsgBuildPolygonsFromModel(model, worldTransform, meshId);
-    if (polygons.empty())
-        return {};
-
-    CsgBsp result;
-    result.Build(ea::move(polygons), epsilon);
-    return result;
 }
 
 SharedPtr<CsgSolid> CsgBuildSolidFromModel(

@@ -27,7 +27,6 @@ set (CSG_DIR ${CMAKE_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
     ${CSG_DIR}/Csg.cpp
     ${CSG_DIR}/CsgBrush.cpp
-    ${CSG_DIR}/CsgBsp.cpp
     ${CSG_DIR}/CsgComponent.cpp
     ${CSG_DIR}/CsgRoot.cpp
     ${CSG_DIR}/CsgBoolean.cpp

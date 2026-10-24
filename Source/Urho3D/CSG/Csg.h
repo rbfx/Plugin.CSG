@@ -18,7 +18,6 @@ namespace Urho3D
 {
 
 class Context;
-class CsgBsp;
 class CsgSolid;
 class CsgTriangulatedModel;
 class Model;
@@ -38,12 +37,6 @@ static const char* CsgOperationNames[] = {
     "Intersection",
     nullptr
 };
-
-/// Compute CSG boolean operation between two BSP operands and return resulting polygons.
-///
-/// `epsilon` is used consistently for BSP clipping in this operation.
-PLUGIN_RBFXCSG_API ea::vector<CsgPolygon> CsgBooleanOperation(
-    const CsgBsp& a, const CsgBsp& b, CsgOperation op, float epsilon = CSG_DEFAULT_EPSILON);
 
 /// Compute CSG boolean operation between two solids and return the resulting solid.
 ///
@@ -68,17 +61,6 @@ PLUGIN_RBFXCSG_API ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(
 /// Returns an empty solid if extraction fails.
 PLUGIN_RBFXCSG_API SharedPtr<CsgSolid> CsgBuildSolidFromModel(
     const Model* model, const Matrix3x4& worldTransform, unsigned meshId = 0, float epsilon = CSG_DEFAULT_EPSILON);
-
-/// Build BSP tree from a `Model` operand.
-///
-/// `worldTransform` is applied to vertex positions (and normals/tangents) during extraction.
-/// `meshId` is encoded into `CsgPolygon::shared_` as (meshId << 16) | geometryIndex.
-/// Returns empty BSP if extraction fails.
-PLUGIN_RBFXCSG_API CsgBsp CsgBuildBspFromModel(
-    const Model* model,
-    const Matrix3x4& worldTransform,
-    unsigned meshId = 0,
-    float epsilon = CSG_DEFAULT_EPSILON);
 
 /// Triangulate polygons into CPU representation of CSG output.
 PLUGIN_RBFXCSG_API SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(
