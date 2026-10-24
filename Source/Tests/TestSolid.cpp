@@ -367,3 +367,370 @@ TEST_CASE("Solid of an open mesh with an infinite corner is stable", "[solid]")
             CHECK(first.GetFaceComponents()[face] == second.GetFaceComponents()[face]);
     }
 }
+
+namespace
+{
+
+/// Return the box faces without the faces in the mask. The bit i of the mask removes the face i.
+ea::vector<CsgPolygon> MakeBoxWithoutFaces(const Vector3& center, const Vector3& halfSize, unsigned mask)
+{
+    const auto box = MakeBoxPolygons(center, halfSize, 1);
+    ea::vector<CsgPolygon> result;
+    for (unsigned i = 0; i < box.size(); ++i)
+    {
+        if ((mask & (1u << i)) == 0)
+            result.push_back(box[i]);
+    }
+    return result;
+}
+
+/// Make a box of half size one. The +x face is a frame around a square hole. The hole has the side holeSize.
+ea::vector<CsgPolygon> MakeBoxWithPinhole(float holeSize)
+{
+    ea::vector<CsgPolygon> result = MakeBoxWithoutFaces(Vector3::ZERO, Vector3::ONE, 1u);
+    const float h = holeSize * 0.5f;
+    const Vector3 outer[4] = {Vector3(1, -1, -1), Vector3(1, 1, -1), Vector3(1, 1, 1), Vector3(1, -1, 1)};
+    const Vector3 inner[4] = {Vector3(1, -h, -h), Vector3(1, h, -h), Vector3(1, h, h), Vector3(1, -h, h)};
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        const unsigned j = (i + 1) % 4;
+        const Vector3 trapezoid[4] = {outer[i], outer[j], inner[j], inner[i]};
+        result.push_back(MakeTestPolygon(trapezoid));
+    }
+    return result;
+}
+
+/// Make a box of which the +x face is two quads. The split points are on the edges of the two neighbor faces.
+ea::vector<CsgPolygon> MakeBoxWithSplitFace()
+{
+    ea::vector<CsgPolygon> result = MakeBoxWithoutFaces(Vector3::ZERO, Vector3::ONE, 1u);
+    const Vector3 lower[4] = {Vector3(1, -1, -1), Vector3(1, 1, -1), Vector3(1, 1, 0), Vector3(1, -1, 0)};
+    const Vector3 upper[4] = {Vector3(1, -1, 0), Vector3(1, 1, 0), Vector3(1, 1, 1), Vector3(1, -1, 1)};
+    result.push_back(MakeTestPolygon(lower));
+    result.push_back(MakeTestPolygon(upper));
+    return result;
+}
+
+/// Make an L shape of three unit cubes. All walls between the cubes are left out.
+ea::vector<CsgPolygon> MakeLShape()
+{
+    // Cube A1 touches A2 at +x and touches B at +y. The faces are +x, +y, +z, -x, -y, -z.
+    ea::vector<CsgPolygon> result = MakeBoxWithoutFaces(Vector3(0.5f, 0.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 0b000011);
+    Append(result, MakeBoxWithoutFaces(Vector3(1.5f, 0.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 0b001000));
+    Append(result, MakeBoxWithoutFaces(Vector3(0.5f, 1.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 0b010000));
+    return result;
+}
+
+/// Return the distance from the box surface with a sign. The value is negative inside the box.
+float BoxDistance(const Vector3& point, const Vector3& center, const Vector3& halfSize)
+{
+    const Vector3 d = point - center;
+    return ea::max(ea::max(Abs(d.x_) - halfSize.x_, Abs(d.y_) - halfSize.y_), Abs(d.z_) - halfSize.z_);
+}
+
+} // namespace
+
+TEST_CASE("Solid of a box is closed", "[solid]")
+{
+    const CsgSolid solid(MakeBoxPolygons(Vector3(1.0f, 2.0f, 3.0f), Vector3(0.5f, 1.0f, 1.5f), 1));
+    CHECK(solid.IsClosed());
+    CHECK_FALSE(solid.HasOpenEdges());
+    CHECK(solid.OpenEdgeLength() == 0.0f);
+}
+
+TEST_CASE("Solid of a sphere is closed", "[solid]")
+{
+    const CsgSolid solid(MakeSpherePolygons(Vector3(1.0f, 2.0f, 3.0f), 2.0f, 8, 12, 1));
+    CHECK(solid.IsClosed());
+    CHECK_FALSE(solid.HasOpenEdges());
+}
+
+TEST_CASE("Solid of nothing is closed and contains nothing", "[solid]")
+{
+    const CsgSolid solid(ea::span<const CsgPolygon>{});
+    CHECK(solid.IsClosed());
+    CHECK_FALSE(solid.HasOpenEdges());
+    CHECK_FALSE(solid.ContainsPoint(Vector3::ZERO));
+}
+
+TEST_CASE("Solid of a box without a face is open", "[solid]")
+{
+    const CsgSolid solid(MakeBoxWithoutFaces(Vector3::ZERO, Vector3::ONE, 1u << 2));
+    CHECK_FALSE(solid.IsClosed());
+    CHECK(solid.HasOpenEdges());
+    // The hole has four edges of length two.
+    CHECK(solid.OpenEdgeLength() == Catch::Approx(8.0f).margin(1e-3f));
+}
+
+TEST_CASE("Solid of a box with a face of two quads is closed", "[solid]")
+{
+    // The split points lie on the long edges of the two neighbor faces. These are T-junctions.
+    const auto polygons = MakeBoxWithSplitFace();
+    REQUIRE(polygons.size() == 7);
+    CHECK_FALSE(IsEdgeClosed(polygons, 1e-4f));
+
+    const CsgSolid solid(polygons);
+    CHECK(solid.FaceCount() == 7);
+    CHECK(solid.ComponentCount() == 1);
+    CHECK(solid.IsClosed());
+    CHECK_FALSE(solid.HasOpenEdges());
+    CHECK(solid.ContainsPoint(Vector3(0.2f, 0.3f, 0.4f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(1.5f, 0.3f, 0.4f)));
+}
+
+TEST_CASE("Solid crack budget", "[solid]")
+{
+    // A hole of the side 0.004 has the edge length 0.016. That is below 200 epsilons, which is 0.02.
+    const CsgSolid small(MakeBoxWithPinhole(0.004f), 1e-4f);
+    CHECK(small.IsClosed());
+    CHECK(small.HasOpenEdges());
+    CHECK(small.OpenEdgeLength() == Catch::Approx(0.016f).margin(1e-5f));
+    // The parity tolerates the crack.
+    CHECK(small.ContainsPoint(Vector3(0.1f, 0.2f, 0.3f)));
+    CHECK_FALSE(small.ContainsPoint(Vector3(2.0f, 0.2f, 0.3f)));
+
+    // A hole of the side 0.006 has the edge length 0.024. That is above 200 epsilons (0.02).
+    // The total edge length is about 29.66, so only 0.001 of it (about 0.0297) keeps the solid closed.
+    const CsgSolid fraction(MakeBoxWithPinhole(0.006f), 1e-4f);
+    CHECK(fraction.IsClosed());
+    CHECK(fraction.HasOpenEdges());
+    CHECK(fraction.OpenEdgeLength() == Catch::Approx(0.024f).margin(1e-5f));
+
+    // A hole of the side 0.02 has the edge length 0.08. That is more than the budget.
+    const CsgSolid large(MakeBoxWithPinhole(0.02f), 1e-4f);
+    CHECK_FALSE(large.IsClosed());
+    CHECK(large.HasOpenEdges());
+    CHECK(large.OpenEdgeLength() == Catch::Approx(0.08f).margin(1e-4f));
+
+    // A larger epsilon gives a larger budget.
+    const CsgSolid wide(MakeBoxWithPinhole(0.02f), 1e-3f);
+    CHECK(wide.IsClosed());
+}
+
+TEST_CASE("Solid constructor repairs the T-junctions", "[solid]")
+{
+    const auto polygons = MakeBoxWithSplitFace();
+    const CsgSolid solid(polygons);
+    CHECK(solid.IsClosed());
+    CHECK_FALSE(solid.HasOpenEdges());
+    CHECK(solid.FaceCount() == 7);
+    // The two neighbors of the split gain one vertex each.
+    unsigned vertexCount = 0;
+    for (unsigned face = 0; face < solid.FaceCount(); ++face)
+        vertexCount += solid.GetFace(face)->vertices_.size();
+    CHECK(vertexCount == 5 * 4 + 2 * 4 + 2);
+    CHECK(IsEdgeClosed(solid.ToPolygons(), 1e-6f));
+    CHECK(solid.ContainsPoint(Vector3(0.9f, 0.0f, 0.1f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(1.1f, 0.0f, 0.1f)));
+}
+
+TEST_CASE("Solid of an open mesh with a NaN corner is not closed", "[solid]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (const Vector3& corner : {Vector3(nan, nan, nan), Vector3(0.0f, nan, 0.0f), Vector3(inf, inf, inf),
+             Vector3(-inf, 0.0f, 1.0f)})
+    {
+        const auto polygons = MakeOpenBoxWithCorner(corner);
+        const CsgSolid solid(polygons);
+        CHECK_FALSE(solid.IsClosed());
+        // The query must finish and must not read outside of the arrays.
+        (void)solid.ContainsPoint(Vector3(0.5f, 0.5f, 0.5f));
+        (void)solid.ContainsPoint(Vector3(5.0f, 5.0f, 5.0f));
+        CHECK_FALSE(solid.ContainsPoint(Vector3(nan, 0.0f, 0.0f)));
+    }
+}
+
+TEST_CASE("Solid ContainsPoint for a box", "[solid][contains]")
+{
+    const Vector3 center(1.0f, 2.0f, 3.0f);
+    const Vector3 halfSize(0.5f, 1.0f, 1.5f);
+    const CsgSolid solid(MakeBoxPolygons(center, halfSize, 1));
+
+    CHECK(solid.ContainsPoint(center));
+    CHECK(solid.ContainsPoint(center + Vector3(0.4f, 0.9f, -1.4f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(10.0f, 2.0f, 3.0f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(-10.0f, -10.0f, -10.0f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.0f, 2.0f, 0.0f)));
+
+    // Near a face, on each side of it.
+    for (const float offset : {0.01f, 1e-3f, 1e-5f})
+    {
+        CHECK(solid.ContainsPoint(center + Vector3(0.5f - offset, 0.0f, 0.0f)));
+        CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.5f + offset, 0.0f, 0.0f)));
+        CHECK(solid.ContainsPoint(center + Vector3(0.1f, -1.0f + offset, 0.2f)));
+        CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.1f, -1.0f - offset, 0.2f)));
+        CHECK(solid.ContainsPoint(center + Vector3(0.1f, 0.2f, 1.5f - offset)));
+        CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.1f, 0.2f, 1.5f + offset)));
+    }
+
+    // On a face, on an edge and on a corner the result is not defined, but it is stable.
+    const Vector3 surface[] = {center + Vector3(0.5f, 0.0f, 0.0f), center + Vector3(0.5f, 1.0f, 0.0f),
+        center + Vector3(0.5f, 1.0f, 1.5f), center + Vector3(-0.5f, -1.0f, -1.5f), center + Vector3(0.0f, 1.0f, 1.5f)};
+    for (const Vector3& point : surface)
+        CHECK(solid.ContainsPoint(point) == solid.ContainsPoint(point));
+
+    // Points that are not finite are outside. A bad epsilon gives the default.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    CHECK_FALSE(solid.ContainsPoint(Vector3(nan, nan, nan)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(center.x_, nan, center.z_)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(inf, 0.0f, 0.0f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(-inf, -inf, -inf)));
+    CHECK(solid.ContainsPoint(center, 0.0f));
+    CHECK(solid.ContainsPoint(center, nan));
+    CHECK(solid.ContainsPoint(center, -1.0f));
+}
+
+TEST_CASE("Solid ContainsPoint for a sphere", "[solid][contains]")
+{
+    const Vector3 center(1.0f, 2.0f, 3.0f);
+    const CsgSolid solid(MakeSpherePolygons(center, 2.0f, 16, 24, 1));
+    REQUIRE(solid.IsClosed());
+
+    CHECK(solid.ContainsPoint(center));
+    CHECK(solid.ContainsPoint(center + Vector3(1.8f, 0.0f, 0.0f)));
+    CHECK(solid.ContainsPoint(center + Vector3(0.0f, -1.8f, 0.0f)));
+    CHECK(solid.ContainsPoint(center + Vector3(0.0f, 0.0f, 1.8f)));
+    CHECK(solid.ContainsPoint(center + Vector3(1.0f, 1.0f, 1.0f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(2.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.0f, 2.1f, 0.0f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(1.3f, 1.3f, 1.3f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(10.0f, 0.0f, 0.0f)));
+}
+
+TEST_CASE("Solid ContainsPoint for a concave shape", "[solid][contains]")
+{
+    // Three unit cubes: (0..2, 0..1) and (0..1, 1..2) in the xy plane. The notch is x 1..2, y 1..2.
+    const auto polygons = MakeLShape();
+    REQUIRE(polygons.size() == 14);
+    const CsgSolid solid(polygons);
+    CHECK(solid.ComponentCount() == 1);
+    CHECK(solid.IsClosed());
+    CHECK(SignedVolume(polygons) == Catch::Approx(3.0).margin(1e-5));
+
+    CHECK(solid.ContainsPoint(Vector3(0.5f, 0.5f, 0.5f)));
+    CHECK(solid.ContainsPoint(Vector3(1.5f, 0.5f, 0.5f)));
+    CHECK(solid.ContainsPoint(Vector3(0.5f, 1.5f, 0.5f)));
+    CHECK(solid.ContainsPoint(Vector3(0.2f, 1.8f, 0.7f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(1.5f, 1.5f, 0.5f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(1.9f, 1.1f, 0.3f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(2.5f, 0.5f, 0.5f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(0.5f, 2.5f, 0.5f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(0.5f, 0.5f, 1.5f)));
+}
+
+TEST_CASE("Solid ContainsPoint for a cavity", "[solid][contains]")
+{
+    // The inner box has reversed faces, so it is a hole in the outer box.
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3(2.0f, 2.0f, 2.0f), 1);
+    auto inner = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+    for (CsgPolygon& polygon : inner)
+        polygon.Flip();
+    Append(polygons, inner);
+
+    const CsgSolid solid(polygons);
+    CHECK(solid.ComponentCount() == 2);
+    CHECK(solid.IsClosed());
+
+    CHECK_FALSE(solid.ContainsPoint(Vector3::ZERO));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(0.5f, -0.5f, 0.3f)));
+    CHECK(solid.ContainsPoint(Vector3(1.5f, 0.0f, 0.0f)));
+    CHECK(solid.ContainsPoint(Vector3(0.0f, -1.5f, 1.9f)));
+    CHECK(solid.ContainsPoint(Vector3(-1.9f, 1.9f, -1.9f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(3.0f, 0.0f, 0.0f)));
+}
+
+TEST_CASE("Solid ContainsPoint agrees with an analytic box", "[solid][contains]")
+{
+    const Vector3 center(1.0f, 2.0f, 3.0f);
+    const Vector3 halfSize(0.5f, 1.0f, 1.5f);
+    const float epsilon = 1e-4f;
+    const CsgSolid solid(MakeBoxPolygons(center, halfSize, 1), epsilon);
+
+    // A fixed generator, so the points are the same on every platform.
+    uint32_t state = 12345u;
+    const auto next = [&]()
+    {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state >> 8) / static_cast<float>(1u << 24);
+    };
+
+    unsigned inside = 0;
+    unsigned checked = 0;
+    for (unsigned i = 0; i < 1000; ++i)
+    {
+        const Vector3 point(-1.0f + next() * 4.0f, -0.5f + next() * 5.0f, 0.0f + next() * 6.0f);
+        const float distance = BoxDistance(point, center, halfSize);
+        // A point within a few epsilons of the surface can go either way.
+        if (Abs(distance) < 10.0f * epsilon)
+            continue;
+        ++checked;
+        const bool expected = distance < 0.0f;
+        inside += expected ? 1 : 0;
+        CHECK(solid.ContainsPoint(point, epsilon) == expected);
+    }
+    // The sample must have points on both sides.
+    CHECK(checked > 900);
+    CHECK(inside > 20);
+    CHECK(inside < checked);
+}
+
+TEST_CASE("Solid FromOperand keeps a clean box", "[solid]")
+{
+    const auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+    const auto solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(polygons), CSG_DEFAULT_EPSILON);
+    REQUIRE(solid);
+    CHECK(solid->FaceCount() == 6);
+    CHECK(solid->IsClosed());
+    // The faces are the faces of the input. Nothing changed.
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        REQUIRE(solid->GetFace(face)->vertices_.size() == 4);
+        for (unsigned i = 0; i < 4; ++i)
+            CHECK(solid->GetFace(face)->vertices_[i].GetPosition() == polygons[face].vertices_[i].GetPosition());
+    }
+}
+
+TEST_CASE("Solid FromOperand adds the T-junction vertices", "[solid]")
+{
+    auto polygons = MakeBoxWithSplitFace();
+    REQUIRE_FALSE(IsEdgeClosed(polygons, 1e-6f));
+    const auto solid = CsgSolid::FromOperand(ea::move(polygons), CSG_DEFAULT_EPSILON);
+    REQUIRE(solid);
+    CHECK(solid->FaceCount() == 7);
+    CHECK(solid->IsClosed());
+    CHECK_FALSE(solid->HasOpenEdges());
+
+    // The two neighbors of the split gain one vertex each. The other faces keep four.
+    unsigned vertexCount = 0;
+    for (unsigned face = 0; face < solid->FaceCount(); ++face)
+        vertexCount += solid->GetFace(face)->vertices_.size();
+    CHECK(vertexCount == 5 * 4 + 2 * 4 + 2);
+
+    const auto repaired = solid->ToPolygons();
+    CHECK(IsEdgeClosed(repaired, 1e-6f));
+    CHECK(SignedVolume(repaired) == Catch::Approx(8.0).margin(1e-4));
+    CHECK(solid->ContainsPoint(Vector3(0.9f, 0.0f, 0.1f)));
+    CHECK_FALSE(solid->ContainsPoint(Vector3(1.1f, 0.0f, 0.1f)));
+}
+
+TEST_CASE("Solid FromOperand moves noisy corners to one position", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+    unsigned counter = 0;
+    for (CsgPolygon& polygon : polygons)
+    {
+        for (ModelVertex& vertex : polygon.vertices_)
+        {
+            const float noise = 1e-6f * static_cast<float>((counter++ % 7) + 1);
+            vertex.SetPosition(vertex.GetPosition() + Vector3(noise, -noise, noise));
+        }
+    }
+    REQUIRE_FALSE(IsEdgeClosed(polygons, 1e-8f));
+    const auto solid = CsgSolid::FromOperand(ea::move(polygons), 1e-4f);
+    REQUIRE(solid);
+    CHECK(solid->FaceCount() == 6);
+    CHECK(solid->IsClosed());
+    CHECK(IsEdgeClosed(solid->ToPolygons(), 1e-8f));
+}

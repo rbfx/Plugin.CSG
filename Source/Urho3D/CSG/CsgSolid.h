@@ -8,6 +8,7 @@
 #include "Urho3D/CSG/CsgFlatMap.h"
 #include "Urho3D/CSG/CsgPolygon.h"
 #include "Urho3D/CSG/_Plugin.h"
+#include <Urho3D/Container/Ptr.h>
 #include <Urho3D/Container/RefCounted.h>
 #include <Urho3D/Math/Vector3.h>
 
@@ -22,6 +23,7 @@ namespace Urho3D
 {
 
 class CsgFaceBvh;
+struct CsgWeldedLoops;
 
 /// A face that more than one solid can own. Nobody modifies a face after a solid owns it.
 using CsgSharedPolygon = ea::shared_ptr<const CsgPolygon>;
@@ -77,14 +79,24 @@ private:
 ///
 /// The face trees are BVHs that the solid builds on first use: one for each component and one over the components.
 /// The build needs no lock, because one job at a time uses a solid. A tree changes no visible state of the solid.
-/// The next steps add the welded loops, IsClosed, ContainsPoint and the construction from boolean results.
-/// They use the private Build function.
+/// The solid keeps the welded loops of the face corners. They give the edges, the open edges and the T-junctions.
+/// A solid is closed if the open edges are short. The length limit is the larger of 200 epsilons and 0.001 of the
+/// total edge length. Ray parity classifies a point well in such a solid.
+/// The next steps add the construction from boolean results. They use the private Build function.
 class PLUGIN_RBFXCSG_API CsgSolid : public RefCounted
 {
 public:
     /// Build a solid from copies of the polygons. Points within epsilon count as one point.
+    /// The solid repairs the faces like FromOperand does, so neighboring faces share their edge vertices.
     explicit CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon = CSG_DEFAULT_EPSILON);
     ~CsgSolid() override;
+
+    /// Build a solid for a boolean operand from the polygons. The solid takes the polygons.
+    ///
+    /// The corners within epsilon get one position. A face with an edge that ends at the vertex of another face
+    /// gains that vertex. Then neighboring faces share every edge vertex at the same position.
+    /// If the polygons need no repair, the result is the first solid. Otherwise it is a second solid over the repaired faces.
+    static SharedPtr<CsgSolid> FromOperand(ea::vector<CsgPolygon>&& polygons, float epsilon = CSG_DEFAULT_EPSILON);
 
     CsgSolid(const CsgSolid&) = delete;
     CsgSolid& operator=(const CsgSolid&) = delete;
@@ -123,6 +135,19 @@ public:
     /// Return the component of each face.
     ea::span<const unsigned> GetFaceComponents() const { return {faceComponents_.data(), faceComponents_.size()}; }
 
+    /// Return true if the faces bound a closed surface, so ray parity is valid.
+    /// Open edges up to the crack budget do not make a solid open. An empty solid is closed.
+    bool IsClosed() const { return closed_; }
+    /// Return true if any edge has no partner, also a hairline crack that IsClosed tolerates.
+    bool HasOpenEdges() const { return !openEdges_.empty(); }
+    /// Return the total length of the open edges.
+    float OpenEdgeLength() const;
+    /// Return true if the point is inside the solid. The solid must be closed.
+    ///
+    /// Three fixed rays vote by the parity of their crossings. Crossings closer than two epsilons count as one.
+    /// A point that is not finite is outside. The result for a point within epsilon of a face is not defined.
+    bool ContainsPoint(const Vector3& point, float epsilon = CSG_DEFAULT_EPSILON) const;
+
     /// Return true if the bounds of the solid overlap the box within epsilon.
     bool BoundsOverlap(const Vector3& min, const Vector3& max, float epsilon) const;
     /// Return the BVH over the component bounds. It is built on first use.
@@ -140,6 +165,15 @@ public:
         ea::unique_ptr<CsgFaceBvh>& temporary) const;
 
 private:
+    /// Build a solid over faces that the caller made. It does not repair the faces.
+    CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
+    /// Return the welded loops of the topology. They are welded within epsilon if the exact loops are not balanced.
+    const CsgWeldedLoops& GetWeld() const;
+    /// Return true if the faces do not share their edge vertices exactly, so WatertightFaces changes them.
+    bool NeedsRepair() const;
+    /// Return the faces with the corners at the welded positions and the T-junction vertices added.
+    /// A face that needs no change is the same face. A face that collapses is left out.
+    ea::vector<CsgSharedPolygon> WatertightFaces() const;
     /// Take the faces and build the triangles, the bounds and the components.
     void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
 
@@ -155,6 +189,16 @@ private:
     ea::vector<unsigned> componentStart_;
     ea::vector<unsigned> componentFaces_;
     ea::vector<unsigned> faceComponents_;
+    // Corners welded by identical position. The booleans of the next steps use them.
+    ea::unique_ptr<CsgWeldedLoops> exact_;
+    // Corners welded within epsilon. It is empty if the exact loops are balanced. Then GetWeld returns the exact loops.
+    ea::unique_ptr<CsgWeldedLoops> welded_;
+    // Edges without a partner as welded position pairs.
+    ea::vector<ea::pair<Vector3, Vector3>> openEdges_;
+    float epsilon_{CSG_DEFAULT_EPSILON};
+    bool closed_{true};
+    // True if a face edge ends at a T-junction, so the faces do not share vertices exactly.
+    bool hasJunctions_{};
     Vector3 boundsMin_;
     Vector3 boundsMax_;
     ea::vector<Vector3> componentMin_;
