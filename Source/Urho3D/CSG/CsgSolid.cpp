@@ -1129,6 +1129,13 @@ SharedPtr<CsgSolid> CsgSolid::FromOperand(ea::vector<CsgPolygon>&& polygons, flo
     return SharedPtr<CsgSolid>(new CsgSolid(solid->WatertightFaces(), solid->epsilon_));
 }
 
+SharedPtr<CsgSolid> CsgSolid::Repaired(const SharedPtr<CsgSolid>& solid)
+{
+    if (!solid->NeedsRepair())
+        return solid;
+    return SharedPtr<CsgSolid>(new CsgSolid(solid->WatertightFaces(), solid->epsilon_));
+}
+
 bool CsgSolid::NeedsRepair() const
 {
     return hasJunctions_ || !GetWeld().canonical_;

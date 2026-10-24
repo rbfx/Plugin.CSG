@@ -44,6 +44,38 @@ double PolygonArea(const CsgPolygon& polygon)
     return static_cast<double>(normal.Length()) * 0.5;
 }
 
+/// Return the area and the perimeter of a polygon, computed in double relative to the first vertex.
+/// The offset keeps the error small also for a polygon far from the origin.
+void PolygonSize(const CsgPolygon& polygon, double& area, double& perimeter)
+{
+    const unsigned count = polygon.vertices_.size();
+    area = 0.0;
+    perimeter = 0.0;
+    if (count == 0)
+        return;
+    const Vector3 origin = polygon.vertices_[0].GetPosition();
+    double normal[3] = {};
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const Vector3 p = polygon.vertices_[i].GetPosition();
+        const Vector3 q = polygon.vertices_[(i + 1) % count].GetPosition();
+        const double px = static_cast<double>(p.x_) - origin.x_;
+        const double py = static_cast<double>(p.y_) - origin.y_;
+        const double pz = static_cast<double>(p.z_) - origin.z_;
+        const double qx = static_cast<double>(q.x_) - origin.x_;
+        const double qy = static_cast<double>(q.y_) - origin.y_;
+        const double qz = static_cast<double>(q.z_) - origin.z_;
+        normal[0] += py * qz - pz * qy;
+        normal[1] += pz * qx - px * qz;
+        normal[2] += px * qy - py * qx;
+        const double dx = static_cast<double>(q.x_) - p.x_;
+        const double dy = static_cast<double>(q.y_) - p.y_;
+        const double dz = static_cast<double>(q.z_) - p.z_;
+        perimeter += std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    area = 0.5 * std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+}
+
 /// Return a point inside a polygon: the centroid of its largest triangle.
 Vector3 PolygonInteriorPoint(const CsgPolygon& polygon, ea::vector<unsigned>& indices)
 {
@@ -382,6 +414,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
         kept.sourceFace_ = element.sourceFace_;
         kept.second_ = second;
         kept.flip_ = flip;
+        kept.split_ = element.split_;
         if (element.sourceFace_ >= 0)
             continue;
         kept.idStart_ = static_cast<int>(s.keptIds_.size());
@@ -489,6 +522,72 @@ void CancelOpposites(CsgBooleanScratch& s)
     s.kept_.resize(out);
 }
 
+/// Copy the faces that are not thin split regions to a new list. Return the number of faces that the list leaves out.
+///
+/// This step is not in the reference. The symbolic perturbation keeps the strips that lie outside the other solid
+/// by a distance that is smaller than any real number. When two faces touch in one plane, such a strip is a
+/// zero-width region. Its polygon has vertices but no area, and the triangulator gives it triangles of both
+/// windings. The surface then has flaps, and the next boolean intersects them.
+/// A region with a mean width below a quarter of epsilon is below the resolution of the welder.
+/// The comparison is false for NaN, so a face with an unknown size stays.
+unsigned CopyWithoutThinRegions(const ea::vector<CsgKeptFace>& kept, float epsilon, ea::vector<CsgKeptFace>& result)
+{
+    const double limit = static_cast<double>(epsilon) * 0.25;
+    result.clear();
+    result.reserve(kept.size());
+    for (const CsgKeptFace& face : kept)
+    {
+        // Only a region of a split triangle can be a strip. A whole face of an operand, and a triangle that stays
+        // whole because its split failed, are not candidates.
+        if (face.split_)
+        {
+            double area = 0.0;
+            double perimeter = 0.0;
+            PolygonSize(*face.polygon_, area, perimeter);
+            if (2.0 * area <= perimeter * limit)
+                continue;
+        }
+        result.push_back(face);
+    }
+    return kept.size() - result.size();
+}
+
+/// Build the solid of the kept faces. A split region reads its exact ids from the scratch.
+/// An unsplit face reads its ids from its solid, offset like the mesh.
+SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanScratch& s,
+    const ea::vector<CsgKeptFace>& kept, const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    float epsilon)
+{
+    ea::vector<CsgSharedPolygon> faces;
+    ea::vector<CsgFaceOrigin> origins;
+    ea::vector<int> exactIds;
+    faces.reserve(kept.size());
+    origins.reserve(kept.size());
+    for (const CsgKeptFace& face : kept)
+    {
+        faces.push_back(face.polygon_);
+        CsgFaceOrigin& origin = origins.emplace_back();
+        if (face.sourceFace_ >= 0)
+        {
+            origin.solid_ = face.second_ ? b : a;
+            origin.face_ = static_cast<unsigned>(face.sourceFace_);
+            origin.flip_ = face.flip_;
+            const Mesh& mesh = face.second_ ? core.b_ : core.a_;
+            const unsigned start = mesh.loops_.vertexStart_[face.sourceFace_];
+            const int count = static_cast<int>(mesh.loops_.vertexStart_[face.sourceFace_ + 1] - start);
+            for (int k = 0; k < count; ++k)
+                exactIds.push_back(mesh.offset_ + mesh.loops_.ids_[start + (face.flip_ ? count - 1 - k : k)]);
+        }
+        else
+        {
+            exactIds.insert(exactIds.end(), s.keptIds_.begin() + face.idStart_,
+                s.keptIds_.begin() + face.idStart_ + face.idCount_);
+        }
+    }
+    const int idSpace = core.CrossingBase() + static_cast<int>(core.crossings_.size());
+    return CsgSolid::FromKeptFaces(ea::move(faces), epsilon, origins, exactIds, idSpace);
+}
+
 } // namespace
 
 SharedPtr<const CsgSolid> Boolean(
@@ -519,36 +618,30 @@ SharedPtr<const CsgSolid> Boolean(
     if (!s.kept_.empty())
     {
         CancelOpposites(s);
-        // The ids of a kept region are recorded. An unsplit face reads its ids from its solid, offset like the mesh.
-        ea::vector<CsgSharedPolygon> faces;
-        ea::vector<CsgFaceOrigin> origins;
-        ea::vector<int> exactIds;
-        faces.reserve(s.kept_.size());
-        origins.reserve(s.kept_.size());
-        for (const CsgKeptFace& kept : s.kept_)
+
+        // Try the surface without the thin regions first. A removed region leaves the edges of its neighbors
+        // without a partner. The builder does not look for such edges, but the region solid does.
+        // If the faces need a repair, weld them like FromOperand does.
+        // If the surface is open without the thin regions and closed with them, the result keeps them.
+        // The closed flag accepts small cracks, so the test also looks at every open edge.
+        ea::vector<CsgKeptFace> solidRegions;
+        const unsigned dropped = CopyWithoutThinRegions(s.kept_, epsilon, solidRegions);
+        if (dropped == 0)
         {
-            faces.push_back(kept.polygon_);
-            CsgFaceOrigin& origin = origins.emplace_back();
-            if (kept.sourceFace_ >= 0)
+            regionSolid = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
+        }
+        else if (!solidRegions.empty())
+        {
+            regionSolid = CsgSolid::Repaired(BuildRegionSolid(core, s, solidRegions, a, b, epsilon));
+            if (!regionSolid->IsClosed() || regionSolid->HasOpenEdges())
             {
-                origin.solid_ = kept.second_ ? b : a;
-                origin.face_ = static_cast<unsigned>(kept.sourceFace_);
-                origin.flip_ = kept.flip_;
-                const Mesh& mesh = kept.second_ ? core.b_ : core.a_;
-                const unsigned start = mesh.loops_.vertexStart_[kept.sourceFace_];
-                const int count = static_cast<int>(mesh.loops_.vertexStart_[kept.sourceFace_ + 1] - start);
-                for (int k = 0; k < count; ++k)
-                    exactIds.push_back(mesh.offset_ + mesh.loops_.ids_[start + (kept.flip_ ? count - 1 - k : k)]);
-            }
-            else
-            {
-                exactIds.insert(exactIds.end(), s.keptIds_.begin() + kept.idStart_,
-                    s.keptIds_.begin() + kept.idStart_ + kept.idCount_);
+                SharedPtr<CsgSolid> all = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
+                if (!regionSolid->IsClosed() || !all->HasOpenEdges())
+                    regionSolid = all;
             }
         }
-        const int idSpace = core.CrossingBase() + static_cast<int>(core.crossings_.size());
-        regionSolid = CsgSolid::FromKeptFaces(ea::move(faces), epsilon, origins, exactIds, idSpace);
-        result.AppendSolid(*regionSolid);
+        if (regionSolid)
+            result.AppendSolid(*regionSolid);
     }
     return result.Finish();
 }

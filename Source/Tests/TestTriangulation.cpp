@@ -9,6 +9,8 @@
 
 #include "TestGeometry.h"
 
+#include <Urho3D/Math/Quaternion.h>
+
 #include <catch2/catch_amalgamated.hpp>
 
 #include <algorithm>
@@ -600,14 +602,93 @@ TEST_CASE("Triangulate a solid shares the vertices of the corners", "[triangulat
     CHECK(ReadModel(*model).area_ == Catch::Approx(24.0).margin(1e-4));
 }
 
-// Known defect of the Boolean: it leaves faces without area (the polygon goes along a path and back) in the union
-// of boxes that touch. Their triangles have both windings.
-TEST_CASE("Triangulated union of boxes has the winding of the face on all triangles", "[triangulate][boolean][!mayfail]")
+// The union of boxes that touch in a plane keeps no zero-width region. Such a region has triangles of both windings.
+TEST_CASE("Triangulated union of boxes has the winding of the face on all triangles", "[triangulate][boolean]")
 {
     const SolidPtr a = MakeBoxSolid(Vector3::ZERO, 1);
     const SolidPtr b = MakeBoxSolid(Vector3(1, 0, 0), 2);
     const SolidPtr result = Boolean(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+    REQUIRE(result->FaceCount() > 0);
     CHECK(CountInvertedTriangles(*result, false) == 0);
+
+    // No face is a ribbon: each polygon has an area.
+    for (unsigned f = 0; f < result->FaceCount(); ++f)
+    {
+        const CsgPolygon& polygon = *result->GetFace(f);
+        Vector3 sum = Vector3::ZERO;
+        for (size_t i = 0; i < polygon.vertices_.size(); ++i)
+            sum += polygon.vertices_[i].GetPosition().CrossProduct(
+                polygon.vertices_[(i + 1) % polygon.vertices_.size()].GetPosition());
+        CAPTURE(f);
+        CHECK(double(sum.Length()) * 0.5 >= 1e-5);
+    }
+
+    // The area of all triangles, without sign, is the surface of the prism.
+    const SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*result);
+    REQUIRE(model);
+    const TriangleMesh mesh = ReadModel(*model);
+    CHECK(mesh.area_ == Catch::Approx(32.0).margin(1e-3));
+    CHECK(mesh.volume_ == Catch::Approx(12.0).margin(1e-3));
+    CHECK(IsMeshClosed(mesh));
+}
+
+// The test for a zero-width region must not depend on the distance from the origin.
+// The boxes are rotated, so the strips are not aligned with an axis and the cross products do not cancel.
+TEST_CASE("Triangulated union of boxes far from the origin has no ribbon", "[triangulate][boolean]")
+{
+    const Vector3 offsets[] = {Vector3(100.3f, 0, 0), Vector3(0, -323.7f, 0), Vector3(0, 0, 291.9f),
+        Vector3(277.1f, 188.2f, -199.9f)};
+    const Quaternion rotations[] = {Quaternion(), Quaternion(37.0f, Vector3::RIGHT), Quaternion(12.5f, Vector3::UP)};
+    for (const Vector3& offset : offsets)
+    {
+        for (const Quaternion& rotation : rotations)
+        {
+            CAPTURE(offset.x_, offset.y_, offset.z_, rotation.Angle());
+            const Matrix3x4 transform(offset, rotation, 1.0f);
+            const SolidPtr a(CsgSolid::FromOperand(MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1, transform)));
+            const SolidPtr b(CsgSolid::FromOperand(MakeBoxPolygons(Vector3(1, 0, 0), Vector3::ONE, 2, transform)));
+            const SolidPtr result = Boolean(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+            REQUIRE(result->FaceCount() > 0);
+            CHECK(CountInvertedTriangles(*result, false) == 0);
+
+            // No face is a ribbon. The area of a polygon is computed in double, relative to its first vertex.
+            for (unsigned f = 0; f < result->FaceCount(); ++f)
+            {
+                const CsgPolygon& polygon = *result->GetFace(f);
+                const size_t count = polygon.vertices_.size();
+                const Vector3 origin = polygon.vertices_[0].GetPosition();
+                double normal[3] = {};
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const Vector3 p = polygon.vertices_[i].GetPosition() - origin;
+                    const Vector3 q = polygon.vertices_[(i + 1) % count].GetPosition() - origin;
+                    normal[0] += double(p.y_) * q.z_ - double(p.z_) * q.y_;
+                    normal[1] += double(p.z_) * q.x_ - double(p.x_) * q.z_;
+                    normal[2] += double(p.x_) * q.y_ - double(p.y_) * q.x_;
+                }
+                CAPTURE(f);
+                CHECK(0.5 * std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]) >= 1e-5);
+            }
+
+            // The area and the volume are computed in double, relative to the offset.
+            double area = 0.0;
+            double volume = 0.0;
+            const auto positions = result->GetTrianglePositions();
+            for (unsigned f = 0; f < result->FaceCount(); ++f)
+            {
+                for (unsigned tri = result->GetTriangleStart()[f]; tri < result->GetTriangleStart()[f + 1]; ++tri)
+                {
+                    const Vector3 p = positions[tri * 3] - offset;
+                    const Vector3 q = positions[tri * 3 + 1] - offset;
+                    const Vector3 r = positions[tri * 3 + 2] - offset;
+                    area += 0.5 * double((q - p).CrossProduct(r - p).Length());
+                    volume += double(p.DotProduct(q.CrossProduct(r))) / 6.0;
+                }
+            }
+            CHECK(area == Catch::Approx(32.0).margin(1e-2));
+            CHECK(volume == Catch::Approx(12.0).margin(1e-2));
+        }
+    }
 }
 
 TEST_CASE("Triangulate random polygons with spikes and duplicate vertices", "[triangulate]")
