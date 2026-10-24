@@ -17,13 +17,17 @@
 #include <EASTL/unique_ptr.h>
 #include <EASTL/vector.h>
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 
 namespace Urho3D
 {
 
 class CsgFaceBvh;
+class CsgSolid;
 struct CsgWeldedLoops;
+enum class CsgOperation;
 
 /// A face that more than one solid can own. Nobody modifies a face after a solid owns it.
 using CsgSharedPolygon = ea::shared_ptr<const CsgPolygon>;
@@ -41,10 +45,15 @@ class PLUGIN_RBFXCSG_API CsgPointWelder
 public:
     /// Make a welder. The capacity is the expected number of points.
     CsgPointWelder(float epsilon, unsigned capacity);
+    /// Make a welder with an epsilon of zero over positions that are distinct. The ids are the indices.
+    /// The welder indexes the positions on the first call of Add or Find. The first of equal positions wins.
+    explicit CsgPointWelder(ea::vector<Vector3>&& positions);
 
     /// Return the id of the earliest point within epsilon. Add the point if there is none.
     int Add(const Vector3& point);
     /// Return the id of the earliest point within epsilon, or -1.
+    /// With an epsilon of zero the first call can index the positions. Then one thread at a time can use the welder.
+    /// A solid does not expose its welders, so only the build of a solid reaches this case.
     int Find(const Vector3& point) const;
 
     /// Return the number of ids.
@@ -68,7 +77,37 @@ private:
     /// Newest id of each grid cell.
     CellMap cells_;
     /// Id of each exact position. It is used only if epsilon is zero.
-    ExactMap exact_;
+    mutable ExactMap exact_;
+    /// False if the welder took its positions from the caller and has not indexed them yet.
+    mutable bool exactIndexed_{true};
+
+    void IndexExact() const;
+};
+
+/// Source of a face that a boolean keeps whole, so the solid can copy the triangles instead of building them.
+/// A flipped origin means that the face is the flipped copy of the source face.
+/// An origin without a solid means that the face has no source.
+struct CsgFaceOrigin
+{
+    SharedPtr<const CsgSolid> solid_;
+    unsigned face_{};
+    bool flip_{};
+};
+
+/// Face corners of a solid welded by identical position. The spans stay valid as long as the solid lives.
+/// A boolean uses the ids to find shared vertices without a search by position.
+struct CsgExactLoops
+{
+    /// Face f owns the corners [vertexStart_[f], vertexStart_[f + 1]) in ids_ and vertexIds_.
+    ea::span<const unsigned> vertexStart_;
+    /// Id of each face corner.
+    ea::span<const int> ids_;
+    /// Ids of the loop of each face, with repeated ids dropped. The first loopLength_[f] entries of a face are valid.
+    ea::span<const int> vertexIds_;
+    /// Length of the loop of each face. The length is zero for a face that bounds no surface.
+    ea::span<const int> loopLength_;
+    /// Position of each id.
+    ea::span<const Vector3> positions_;
 };
 
 /// Immutable polygonal CSG operand.
@@ -77,12 +116,13 @@ private:
 /// Two faces are in one component if they share a welded edge.
 /// The solid does not change after construction. Faces are shared and can belong to more than one solid.
 ///
-/// The face trees are BVHs that the solid builds on first use: one for each component and one over the components.
-/// The build needs no lock, because one job at a time uses a solid. A tree changes no visible state of the solid.
+/// The face trees are BVHs: one over the components and one for each component.
+/// The tree over the components exists after the build. The solid builds a face tree on first use.
+/// Each face tree has its own once flag. Because of this, many threads can query one shared solid at the same time.
 /// The solid keeps the welded loops of the face corners. They give the edges, the open edges and the T-junctions.
 /// A solid is closed if the open edges are short. The length limit is the larger of 200 epsilons and 0.001 of the
 /// total edge length. Ray parity classifies a point well in such a solid.
-/// The next steps add the construction from boolean results. They use the private Build function.
+/// A boolean builds its result from kept faces. FromKeptFaces and Builder make such a solid.
 class PLUGIN_RBFXCSG_API CsgSolid : public RefCounted
 {
 public:
@@ -148,25 +188,113 @@ public:
     /// A point that is not finite is outside. The result for a point within epsilon of a face is not defined.
     bool ContainsPoint(const Vector3& point, float epsilon = CSG_DEFAULT_EPSILON) const;
 
+    /// Return a copy of the face with the winding, the normals and the plane reversed.
+    static CsgSharedPolygon Flipped(const CsgPolygon& face);
+
+    /// Return true if the boolean operation keeps a part of an operand. The flag tells if the part is inside the other operand.
+    /// An intersection keeps the inside parts. The second operand of DifferenceAB keeps the inside parts.
+    /// Every other case keeps the outside parts.
+    static bool Keep(bool inside, CsgOperation operation, bool secondOperand);
+
     /// Return true if the bounds of the solid overlap the box within epsilon.
     bool BoundsOverlap(const Vector3& min, const Vector3& max, float epsilon) const;
-    /// Return the BVH over the component bounds. It is built on first use.
-    /// Only one thread at a time can use a solid, because this function needs no lock.
+    /// Return the BVH over the component bounds. The solid builds it with the bounds. Many threads can call this.
     const CsgFaceBvh& GetComponentTree() const;
     /// Return the BVH over the faces of a component. It is built on first use and then kept.
-    /// Only one thread at a time can use a solid, because this function needs no lock.
+    /// Many threads can call this at the same time.
     const CsgFaceBvh& GetFaceTree(unsigned component) const;
     /// Return a BVH that holds every face of the component near the box.
     ///
     /// If the full face tree exists, or if most faces are near, the result is the full tree.
     /// Otherwise the function builds a small tree over the near faces and stores it in the temporary.
     /// The caller keeps the temporary alive while it uses the result.
+    /// Many threads can call this at the same time, each with its own temporary.
     const CsgFaceBvh& GetNearFaces(unsigned component, const Vector3& min, const Vector3& max, float epsilon,
         ea::unique_ptr<CsgFaceBvh>& temporary) const;
 
+    // Members for the boolean of the next steps.
+
+    /// Return the corners welded by identical position.
+    CsgExactLoops GetExactLoops() const;
+    /// Return the id of the position of a face vertex. Vertices with one id coincide exactly.
+    int VertexKey(unsigned face, unsigned vertex) const;
+    /// Return the number of distinct vertex positions. It is the bound of VertexKey.
+    unsigned VertexKeySpace() const;
+    /// Copy the triangles of a face as face-local vertex indices. Return false if there is no triangle.
+    ///
+    /// A face that needed the fallback of the triangulator is triangulated again without the shared runs.
+    /// The fallback set is empty until the triangulator port of step 10.
+    bool CopyTriangles(unsigned face, ea::vector<unsigned>& output) const;
+    /// Return a point on the first triangle of the face. A face without triangles gives its first corner.
+    Vector3 FaceSample(unsigned face) const;
+    /// Return a point on the first face of the component.
+    Vector3 ComponentSample(unsigned component) const;
+    /// Classify a point in a closed solid with three rays. Return true if the point is inside.
+    ///
+    /// The answer is reliable if the three rays agree and no ray crosses the surface within four epsilons.
+    /// A point that is not finite is outside and not reliable.
+    bool ClassifyPoint(const Vector3& point, float epsilon, bool& reliable) const;
+
+    /// Build a solid from kept faces of a boolean.
+    ///
+    /// The origins have one entry for each face or none. A face with an origin copies the triangles and the bounds
+    /// from the source face. The origin must fit the face: its face index is valid and the vertex counts are equal.
+    /// The exact ids have one entry for each face corner, in face order, or none. Corners with one id
+    /// share their position exactly. The ids must be in [0, exactIdSpace).
+    /// Without ids, the solid welds the corners by position. A call that breaks these rules is a programming error.
+    /// It fails an assert in a debug build. In a release build the solid ignores the ids or the origin.
+    static SharedPtr<CsgSolid> FromKeptFaces(ea::vector<CsgSharedPolygon>&& faces, float epsilon,
+        ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace);
+
+    /// Assembles a boolean result from whole operand components and solids of the contact regions.
+    ///
+    /// The components are closed and disjoint from the rest of the result. The builder copies their topology
+    /// with new numbers. Corners of different sources never share an id.
+    /// The builder keeps the address of each source. A source must live until Finish returns.
+    class Builder
+    {
+    public:
+        /// The capacities are the operand totals. They are an upper bound for results of whole components.
+        Builder(unsigned faceCapacity, unsigned cornerCapacity, float epsilon = CSG_DEFAULT_EPSILON);
+        /// Append the faces of a component of the source, flipped if the flag is set.
+        void AppendComponent(const CsgSolid& source, unsigned component, bool flip);
+        /// Append every face of the source in its own order and keep its components.
+        void AppendSolid(const CsgSolid& source);
+        /// Return the solid. The builder is empty afterwards.
+        SharedPtr<CsgSolid> Finish();
+
+    private:
+        friend class CsgSolid;
+        void AppendFace(const CsgSolid& source, unsigned face, bool flip, unsigned component);
+        unsigned IdOffset(const CsgSolid& source);
+
+        ea::vector<CsgSharedPolygon> faces_;
+        ea::vector<unsigned> triangleStart_;
+        ea::vector<Vector3> trianglePositions_;
+        ea::vector<unsigned> triangleVertices_;
+        ea::vector<Vector3> faceMin_;
+        ea::vector<Vector3> faceMax_;
+        ea::vector<unsigned> componentStart_;
+        ea::vector<unsigned> componentFaces_;
+        ea::vector<unsigned> faceComponents_;
+        ea::vector<unsigned> fallbackFaces_;
+        /// Exact id of each face corner. The ids of each source start after the ids of the sources before it.
+        ea::vector<int> exactIds_;
+        int exactIdSpace_{};
+        /// Id offset of each source. A solid has few sources, so the search is linear.
+        ea::vector<ea::pair<const CsgSolid*, int>> idOffsets_;
+        float epsilon_{CSG_DEFAULT_EPSILON};
+        bool closed_{true};
+    };
+
 private:
+    /// Build a solid from the parts of a builder. The exact ids give the exact loops, the topology is copied.
+    explicit CsgSolid(Builder&& builder);
     /// Build a solid over faces that the caller made. It does not repair the faces.
     CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
+    /// Build a solid over kept faces of a boolean. See FromKeptFaces.
+    CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
+        ea::span<const int> exactIds, int exactIdSpace);
     /// Return the welded loops of the topology. They are welded within epsilon if the exact loops are not balanced.
     const CsgWeldedLoops& GetWeld() const;
     /// Return true if the faces do not share their edge vertices exactly, so WatertightFaces changes them.
@@ -175,7 +303,15 @@ private:
     /// A face that needs no change is the same face. A face that collapses is left out.
     ea::vector<CsgSharedPolygon> WatertightFaces() const;
     /// Take the faces and build the triangles, the bounds and the components.
-    void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
+    /// The optional origins and exact ids are as in FromKeptFaces.
+    void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins = {},
+        ea::span<const int> exactIds = {}, int exactIdSpace = 0);
+    /// Copy the triangles and the bounds of the source face of an origin. Return false if the origin does not fit.
+    bool CopyOrigin(unsigned index, const CsgFaceOrigin& origin);
+    /// Compute the bounds of the solid and of the components from the bounds of the faces. Reset the trees.
+    void BuildBounds();
+    /// Return true if the face is in the fallback set.
+    bool IsFallbackFace(unsigned face) const;
 
     ea::vector<CsgSharedPolygon> faces_;
     // Face f owns the triangles [triangleStart_[f], triangleStart_[f + 1]). A triangle has three entries in
@@ -189,6 +325,9 @@ private:
     ea::vector<unsigned> componentStart_;
     ea::vector<unsigned> componentFaces_;
     ea::vector<unsigned> faceComponents_;
+    // Faces whose triangulation needed the fallback of the triangulator, in ascending order.
+    // The triangulator port of step 10 fills the set. Until then it is empty.
+    ea::vector<unsigned> fallbackFaces_;
     // Corners welded by identical position. The booleans of the next steps use them.
     ea::unique_ptr<CsgWeldedLoops> exact_;
     // Corners welded within epsilon. It is empty if the exact loops are balanced. Then GetWeld returns the exact loops.
@@ -203,9 +342,18 @@ private:
     Vector3 boundsMax_;
     ea::vector<Vector3> componentMin_;
     ea::vector<Vector3> componentMax_;
-    // Lazy caches. Logically the solid is immutable. Only one job at a time uses a solid, so there is no lock.
-    mutable ea::unique_ptr<CsgFaceBvh> componentTree_;
-    mutable ea::vector<ea::unique_ptr<CsgFaceBvh>> faceTrees_;
+    /// Face tree of a component. The once flag guards the build, and the built flag tells readers that it is done.
+    struct FaceTreeSlot
+    {
+        std::once_flag once_;
+        std::atomic<bool> built_{false};
+        ea::unique_ptr<CsgFaceBvh> tree_;
+    };
+
+    // The tree over the components. The build makes it together with the bounds.
+    ea::unique_ptr<CsgFaceBvh> componentTree_;
+    // One slot for each component. The slots are made in the build and filled on first use by any thread.
+    ea::unique_ptr<FaceTreeSlot[]> faceTrees_;
 };
 
 } // namespace Urho3D

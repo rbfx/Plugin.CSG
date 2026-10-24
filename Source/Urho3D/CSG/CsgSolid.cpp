@@ -4,8 +4,10 @@
 
 #include "Urho3D/CSG/CsgSolid.h"
 
+#include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgFaceBvh.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
+#include <Urho3D/Core/Assert.h>
 #include <Urho3D/Core/Profiler.h>
 
 #include <EASTL/algorithm.h>
@@ -155,7 +157,17 @@ struct CsgWeldedLoops
     {
     }
 
+    /// Make loops over distinct positions that a boolean assigned. The caller sets the ids.
+    CsgWeldedLoops(ea::vector<Vector3>&& positions, unsigned cornerCount)
+        : welder_(ea::move(positions))
+        , ids_(cornerCount)
+        , vertexIds_(cornerCount)
+        , corners_(cornerCount)
+    {
+    }
+
     /// Return the finder of junctions. The finder is built on first use.
+    /// Only the build of a solid and the repair after it call this function. They run before the solid is shared.
     CsgJunctionFinder& GetFinder() const
     {
         if (!finder_)
@@ -171,10 +183,14 @@ struct CsgWeldedLoops
     /// Index in its face of the corner that each loop id was taken from. The layout is the same as in ids_.
     ea::vector<int> corners_;
     ea::vector<int> loopLength_;
-    /// Edge states between loop ids.
-    CsgRawEdgeMap rawEdges_;
+    /// First corner of each face, and one more entry at the end. It is the layout of ids_.
+    ea::vector<unsigned> vertexStart_;
+    /// Edge states between loop ids. The edges are built on first use, see EnsureRawEdges.
+    mutable CsgRawEdgeMap rawEdges_;
     /// Each face edge after the first on its welded edge, paired with the first face of that edge.
-    ea::vector<ea::pair<int, int>> links_;
+    mutable ea::vector<ea::pair<int, int>> links_;
+    /// True if rawEdges_ and links_ are built.
+    mutable bool edgesBuilt_{};
     /// True if every corner is exactly at the position of its welded id.
     bool canonical_{true};
     mutable ea::unique_ptr<CsgJunctionFinder> finder_;
@@ -207,10 +223,17 @@ void BuildLoops(CsgWeldedLoops& loops, ea::span<const unsigned> vertexStart, ea:
     }
 }
 
-void BuildRawEdges(CsgWeldedLoops& loops, ea::span<const unsigned> vertexStart)
+/// Build the edge states and the links on the first call. A later call does nothing.
+/// Only the build of a solid and the repair after it call this function, before any other thread sees the solid.
+/// Because of this, the function needs no lock.
+void EnsureRawEdges(const CsgWeldedLoops& loops)
 {
+    if (loops.edgesBuilt_)
+        return;
+    loops.edgesBuilt_ = true;
+    const ea::span<const unsigned> vertexStart(loops.vertexStart_.data(), loops.vertexStart_.size());
     loops.rawEdges_.Reserve(loops.vertexIds_.size());
-    const unsigned faceCount = vertexStart.size() - 1;
+    const unsigned faceCount = loops.loopLength_.size();
     for (unsigned face = 0; face < faceCount; ++face)
     {
         const unsigned count = loops.loopLength_[face];
@@ -234,6 +257,7 @@ void BuildRawEdges(CsgWeldedLoops& loops, ea::span<const unsigned> vertexStart)
 /// Return true if every directed edge has an opposite partner, so the loops close up exactly.
 bool IsBalanced(const CsgWeldedLoops& loops)
 {
+    EnsureRawEdges(loops);
     for (const auto& entry : loops.rawEdges_)
     {
         if (entry.value_.winding_ != 0)
@@ -246,6 +270,7 @@ bool IsBalanced(const CsgWeldedLoops& loops)
 /// Solids that touch along an edge pinch it with two balanced pairs.
 bool IsMatched(const CsgWeldedLoops& loops, int from, int to)
 {
+    EnsureRawEdges(loops);
     const CsgEdgeState* state = loops.rawEdges_.Find(CsgUndirectedKey(from, to));
     return state && state->winding_ == 0;
 }
@@ -424,7 +449,9 @@ void CollectRayHits(const CsgSolid& solid, const CsgFaceBvh& tree, const Vector3
     }
 }
 
-int CountCrossings(const CsgSolid& solid, const Vector3& origin, const Vector3& direction, float epsilon)
+/// Count the crossings of a ray. The nearest hit is the distance of the closest triangle, or infinity.
+int CountCrossings(
+    const CsgSolid& solid, const Vector3& origin, const Vector3& direction, float epsilon, float* nearest = nullptr)
 {
     const Vector3 inverse(1.0f / direction.x_, 1.0f / direction.y_, 1.0f / direction.z_);
     RayHits hits;
@@ -460,6 +487,8 @@ int CountCrossings(const CsgSolid& solid, const Vector3& origin, const Vector3& 
     // A crossing is a distance that differs from the last by more than two epsilons. This way two triangles
     // on the same surface do not change the parity twice. All distances are finite, so the sort is safe.
     ea::sort(hits.begin(), hits.end());
+    if (nearest)
+        *nearest = hits.empty() ? INF : hits.front();
     int crossings = 0;
     float last = -INF;
     for (const float hit : hits)
@@ -486,14 +515,70 @@ struct Topology
     bool hasJunctions{};
 };
 
+/// Make the loops of the corners welded by identical position.
+///
+/// With exact ids from a boolean, the corners with one id get one dense id, numbered in the order of first use.
+/// The position of an id is the position of its first corner. The ids must be in [0, idSpace).
+/// If the ids are missing or not valid, the function welds the positions.
+ea::unique_ptr<CsgWeldedLoops> BuildExactLoops(ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart,
+    ea::span<const unsigned> triangleStart, ea::span<const int> exactIds, int exactIdSpace)
+{
+    const unsigned cornerCount = corners.size();
+    ea::unique_ptr<CsgWeldedLoops> result;
+    // Empty ids are legal. Other ids must have one entry for each corner and a positive id space.
+    URHO3D_ASSERT(exactIds.empty() || (exactIds.size() == cornerCount && exactIdSpace > 0),
+        "CsgSolid exact ids must have one entry for each corner");
+    if (exactIds.size() == cornerCount && cornerCount != 0 && exactIdSpace > 0)
+    {
+        ea::vector<int> dense(exactIdSpace, -1);
+        ea::vector<int> denseIds(cornerCount);
+        ea::vector<Vector3> positions;
+        positions.reserve(cornerCount);
+        bool valid = true;
+        for (unsigned i = 0; i < cornerCount; ++i)
+        {
+            const int id = exactIds[i];
+            URHO3D_ASSERT(id >= 0 && id < exactIdSpace, "CsgSolid exact id is out of range");
+            if (id < 0 || id >= exactIdSpace)
+            {
+                valid = false;
+                break;
+            }
+            int& slot = dense[id];
+            if (slot < 0)
+            {
+                slot = static_cast<int>(positions.size());
+                positions.push_back(corners[i]);
+            }
+            denseIds[i] = slot;
+        }
+        if (valid)
+        {
+            result = ea::make_unique<CsgWeldedLoops>(ea::move(positions), cornerCount);
+            result->ids_ = ea::move(denseIds);
+        }
+    }
+    if (!result)
+    {
+        result = ea::make_unique<CsgWeldedLoops>(0.0f, cornerCount);
+        for (unsigned i = 0; i < cornerCount; ++i)
+            result->ids_[i] = result->welder_.Add(corners[i]);
+    }
+    result->vertexStart_.assign(vertexStart.begin(), vertexStart.end());
+    BuildLoops(*result, vertexStart, triangleStart);
+    return result;
+}
+
 /// Split the faces into components and find out if the faces bound a closed surface.
 /// Faces are in one component if they share a welded edge.
 ///
 /// The corners are welded exactly first. If every edge has an opposite partner, the exact loops give the components.
 /// Otherwise the distinct positions are welded again within epsilon.
 /// Then an edge that ends at a T-junction is split at the welded points along it.
+/// The optional exact ids come from a boolean. See BuildExactLoops.
 void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart,
-    ea::span<const unsigned> triangleStart, float epsilon, Topology& result)
+    ea::span<const unsigned> triangleStart, float epsilon, ea::span<const int> exactIds, int exactIdSpace,
+    Topology& result)
 {
     URHO3D_PROFILE("CsgSolid::BuildTopology");
     const unsigned faceCount = vertexStart.size() - 1;
@@ -508,12 +593,8 @@ void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> ver
             result.closed = false;
     }
 
-    result.exact = ea::make_unique<CsgWeldedLoops>(0.0f, cornerCount);
+    result.exact = BuildExactLoops(corners, vertexStart, triangleStart, exactIds, exactIdSpace);
     CsgWeldedLoops& exact = *result.exact;
-    for (unsigned i = 0; i < cornerCount; ++i)
-        exact.ids_[i] = exact.welder_.Add(corners[i]);
-    BuildLoops(exact, vertexStart, triangleStart);
-    BuildRawEdges(exact, vertexStart);
 
     // Loops that close up exactly, as boolean results and most modeled meshes do, are closed within epsilon
     // as well and need no second welding. Only float noise between neighboring faces calls for it.
@@ -530,10 +611,11 @@ void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> ver
         }
         for (unsigned i = 0; i < cornerCount; ++i)
             welded.ids_[i] = map[exact.ids_[i]];
+        welded.vertexStart_.assign(vertexStart.begin(), vertexStart.end());
         BuildLoops(welded, vertexStart, triangleStart);
-        BuildRawEdges(welded, vertexStart);
     }
     CsgWeldedLoops& loops = balanced ? exact : *result.welded;
+    EnsureRawEdges(loops);
     const bool collapsed = HasCollapsedFace(loops, triangleStart);
 
     // Balanced loops match every edge exactly. Nothing can end at a T-junction, and the faces
@@ -673,11 +755,30 @@ CsgPointWelder::CsgPointWelder(float epsilon, unsigned capacity)
         exact_.Reserve(capacity);
 }
 
+CsgPointWelder::CsgPointWelder(ea::vector<Vector3>&& positions)
+    : epsilon_(0.0f)
+    , inverseCell_(0.0)
+    , positions_(ea::move(positions))
+    , exactIndexed_(false)
+{
+}
+
+void CsgPointWelder::IndexExact() const
+{
+    if (exactIndexed_)
+        return;
+    exactIndexed_ = true;
+    exact_.Reserve(positions_.size());
+    for (unsigned i = 0; i < positions_.size(); ++i)
+        exact_.TryAdd(CsgVec3Key(positions_[i]), static_cast<int>(i));
+}
+
 int CsgPointWelder::Add(const Vector3& point)
 {
     const int index = static_cast<int>(positions_.size());
     if (epsilon_ <= 0.0f)
     {
+        IndexExact();
         bool existed = false;
         int& id = exact_.FindOrAdd(CsgVec3Key(point), existed);
         if (!existed)
@@ -706,6 +807,7 @@ int CsgPointWelder::Find(const Vector3& point) const
 {
     if (epsilon_ <= 0.0f)
     {
+        IndexExact();
         const int* id = exact_.Find(CsgVec3Key(point));
         return id ? *id : -1;
     }
@@ -764,6 +866,252 @@ CsgSolid::CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
     Build(ea::move(faces), epsilon);
+}
+
+CsgSolid::CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
+    ea::span<const int> exactIds, int exactIdSpace)
+{
+    URHO3D_PROFILE("CsgSolid::CsgSolid");
+    Build(ea::move(faces), epsilon, origins, exactIds, exactIdSpace);
+}
+
+CsgSolid::CsgSolid(Builder&& builder)
+    : faces_(ea::move(builder.faces_))
+    , triangleStart_(ea::move(builder.triangleStart_))
+    , trianglePositions_(ea::move(builder.trianglePositions_))
+    , triangleVertices_(ea::move(builder.triangleVertices_))
+    , faceMin_(ea::move(builder.faceMin_))
+    , faceMax_(ea::move(builder.faceMax_))
+    , componentStart_(ea::move(builder.componentStart_))
+    , componentFaces_(ea::move(builder.componentFaces_))
+    , faceComponents_(ea::move(builder.faceComponents_))
+    , fallbackFaces_(ea::move(builder.fallbackFaces_))
+    , epsilon_(builder.epsilon_ > 0.0f ? builder.epsilon_ : CSG_DEFAULT_EPSILON)
+    , closed_(builder.closed_)
+{
+    URHO3D_PROFILE("CsgSolid::CsgSolid");
+    // The topology is copied. Only the exact loops are built, and the edges of the loops only when someone needs them.
+    ea::vector<Vector3> corners;
+    ea::vector<unsigned> vertexStart;
+    vertexStart.reserve(faces_.size() + 1);
+    for (const CsgSharedPolygon& face : faces_)
+    {
+        vertexStart.push_back(corners.size());
+        for (const ModelVertex& vertex : face->vertices_)
+            corners.push_back(vertex.GetPosition());
+    }
+    vertexStart.push_back(corners.size());
+    exact_ = BuildExactLoops(corners, vertexStart, triangleStart_, builder.exactIds_, builder.exactIdSpace_);
+    BuildBounds();
+}
+
+SharedPtr<CsgSolid> CsgSolid::FromKeptFaces(ea::vector<CsgSharedPolygon>&& faces, float epsilon,
+    ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace)
+{
+    return SharedPtr<CsgSolid>(new CsgSolid(ea::move(faces), epsilon, origins, exactIds, exactIdSpace));
+}
+
+CsgSharedPolygon CsgSolid::Flipped(const CsgPolygon& face)
+{
+    auto result = ea::make_shared<CsgPolygon>(face);
+    result->Flip();
+    return result;
+}
+
+bool CsgSolid::Keep(bool inside, CsgOperation operation, bool secondOperand)
+{
+    if (operation == CsgOperation::Intersection)
+        return inside;
+    return secondOperand && operation == CsgOperation::DifferenceAB ? inside : !inside;
+}
+
+CsgExactLoops CsgSolid::GetExactLoops() const
+{
+    const CsgWeldedLoops& exact = *exact_;
+    CsgExactLoops result;
+    result.vertexStart_ = {exact.vertexStart_.data(), exact.vertexStart_.size()};
+    result.ids_ = {exact.ids_.data(), exact.ids_.size()};
+    result.vertexIds_ = {exact.vertexIds_.data(), exact.vertexIds_.size()};
+    result.loopLength_ = {exact.loopLength_.data(), exact.loopLength_.size()};
+    result.positions_ = exact.welder_.GetPositions();
+    return result;
+}
+
+int CsgSolid::VertexKey(unsigned face, unsigned vertex) const
+{
+    return exact_->ids_[exact_->vertexStart_[face] + vertex];
+}
+
+unsigned CsgSolid::VertexKeySpace() const
+{
+    return exact_->welder_.Count();
+}
+
+bool CsgSolid::IsFallbackFace(unsigned face) const
+{
+    return ea::binary_search(fallbackFaces_.begin(), fallbackFaces_.end(), face);
+}
+
+bool CsgSolid::CopyTriangles(unsigned face, ea::vector<unsigned>& output) const
+{
+    if (IsFallbackFace(face))
+        return CsgTriangulatePolygon(*faces_[face], output);
+    output.clear();
+    const unsigned begin = triangleStart_[face] * 3;
+    const unsigned end = triangleStart_[face + 1] * 3;
+    output.assign(triangleVertices_.begin() + begin, triangleVertices_.begin() + end);
+    return !output.empty();
+}
+
+Vector3 CsgSolid::FaceSample(unsigned face) const
+{
+    if (triangleStart_[face] == triangleStart_[face + 1])
+    {
+        const auto& vertices = faces_[face]->vertices_;
+        return vertices.empty() ? Vector3::ZERO : vertices[0].GetPosition();
+    }
+    const unsigned offset = triangleStart_[face] * 3;
+    return (trianglePositions_[offset] + trianglePositions_[offset + 1] + trianglePositions_[offset + 2]) / 3.0f;
+}
+
+Vector3 CsgSolid::ComponentSample(unsigned component) const
+{
+    return FaceSample(componentFaces_[componentStart_[component]]);
+}
+
+bool CsgSolid::ClassifyPoint(const Vector3& point, float epsilon, bool& reliable) const
+{
+    reliable = true;
+    // The negated test also catches NaN.
+    if (!(epsilon > 0.0f))
+        epsilon = CSG_DEFAULT_EPSILON;
+    if (faces_.empty())
+        return false;
+    // A ray from a point that is not finite has no meaning.
+    if (!std::isfinite(point.x_) || !std::isfinite(point.y_) || !std::isfinite(point.z_))
+    {
+        reliable = false;
+        return false;
+    }
+    if (!BoundsOverlap(point, point, epsilon * 4.0f))
+        return false;
+
+    const Vector3* directions = GetRayDirections();
+    int insideVotes = 0;
+    for (int ray = 0; ray < 3; ++ray)
+    {
+        float nearest = INF;
+        if ((CountCrossings(*this, point, directions[ray], epsilon, &nearest) & 1) != 0)
+            ++insideVotes;
+        // A hit that is close to the point puts the point on the surface.
+        if (!(nearest > epsilon * 4.0f))
+            reliable = false;
+    }
+    if (insideVotes != 0 && insideVotes != 3)
+        reliable = false;
+    return insideVotes >= 2;
+}
+
+CsgSolid::Builder::Builder(unsigned faceCapacity, unsigned cornerCapacity, float epsilon)
+    : epsilon_(epsilon)
+{
+    faces_.reserve(faceCapacity);
+    triangleStart_.reserve(faceCapacity + 1);
+    triangleStart_.push_back(0);
+    trianglePositions_.reserve(cornerCapacity);
+    triangleVertices_.reserve(cornerCapacity);
+    faceMin_.reserve(faceCapacity);
+    faceMax_.reserve(faceCapacity);
+    componentStart_.push_back(0);
+    componentFaces_.reserve(faceCapacity);
+    faceComponents_.reserve(faceCapacity);
+    exactIds_.reserve(cornerCapacity);
+}
+
+unsigned CsgSolid::Builder::IdOffset(const CsgSolid& source)
+{
+    for (const auto& entry : idOffsets_)
+    {
+        if (entry.first == &source)
+            return entry.second;
+    }
+    const int offset = exactIdSpace_;
+    idOffsets_.push_back({&source, offset});
+    exactIdSpace_ += static_cast<int>(source.VertexKeySpace());
+    return offset;
+}
+
+void CsgSolid::Builder::AppendComponent(const CsgSolid& source, unsigned component, bool flip)
+{
+    const unsigned componentIndex = componentStart_.size() - 1;
+    for (unsigned c = source.componentStart_[component]; c < source.componentStart_[component + 1]; ++c)
+    {
+        componentFaces_.push_back(faces_.size());
+        AppendFace(source, source.componentFaces_[c], flip, componentIndex);
+    }
+    componentStart_.push_back(componentFaces_.size());
+}
+
+void CsgSolid::Builder::AppendSolid(const CsgSolid& source)
+{
+    const unsigned faceBase = faces_.size();
+    const unsigned componentBase = componentStart_.size() - 1;
+    for (unsigned face = 0; face < source.faces_.size(); ++face)
+        AppendFace(source, face, false, componentBase + source.faceComponents_[face]);
+    for (unsigned component = 0; component < source.ComponentCount(); ++component)
+    {
+        for (unsigned c = source.componentStart_[component]; c < source.componentStart_[component + 1]; ++c)
+            componentFaces_.push_back(faceBase + source.componentFaces_[c]);
+        componentStart_.push_back(componentFaces_.size());
+    }
+    closed_ = closed_ && source.IsClosed();
+}
+
+void CsgSolid::Builder::AppendFace(const CsgSolid& source, unsigned face, bool flip, unsigned component)
+{
+    if (source.IsFallbackFace(face))
+        fallbackFaces_.push_back(faces_.size());
+    faces_.push_back(flip ? Flipped(*source.faces_[face]) : source.faces_[face]);
+    faceComponents_.push_back(component);
+
+    const int offset = IdOffset(source);
+    const CsgWeldedLoops& weld = *source.exact_;
+    const unsigned idStart = weld.vertexStart_[face];
+    const unsigned idCount = weld.vertexStart_[face + 1] - idStart;
+    for (unsigned i = 0; i < idCount; ++i)
+        exactIds_.push_back(offset + weld.ids_[idStart + (flip ? idCount - 1 - i : i)]);
+    faceMin_.push_back(source.faceMin_[face]);
+    faceMax_.push_back(source.faceMax_[face]);
+
+    const unsigned vertexCount = source.faces_[face]->vertices_.size();
+    const unsigned first = source.triangleStart_[face];
+    const unsigned count = source.triangleStart_[face + 1] - first;
+    const Vector3* positions = source.trianglePositions_.data() + first * 3;
+    const unsigned* locals = source.triangleVertices_.data() + first * 3;
+    if (flip)
+    {
+        // Flipping reverses the vertex list. Keep the same corners under their new indices and reverse
+        // each triangle, so that it winds with the flipped face.
+        for (unsigned t = 0; t < count; ++t)
+        {
+            for (int corner = 2; corner >= 0; --corner)
+            {
+                trianglePositions_.push_back(positions[t * 3 + corner]);
+                triangleVertices_.push_back(vertexCount - 1 - locals[t * 3 + corner]);
+            }
+        }
+    }
+    else
+    {
+        trianglePositions_.insert(trianglePositions_.end(), positions, positions + count * 3);
+        triangleVertices_.insert(triangleVertices_.end(), locals, locals + count * 3);
+    }
+    triangleStart_.push_back(triangleStart_.back() + count);
+}
+
+SharedPtr<CsgSolid> CsgSolid::Builder::Finish()
+{
+    return SharedPtr<CsgSolid>(new CsgSolid(ea::move(*this)));
 }
 
 CsgSolid::~CsgSolid() = default;
@@ -872,30 +1220,28 @@ bool CsgSolid::BoundsOverlap(const Vector3& min, const Vector3& max, float epsil
 
 const CsgFaceBvh& CsgSolid::GetComponentTree() const
 {
-    if (!componentTree_)
-        componentTree_ = ea::make_unique<CsgFaceBvh>(
-            ea::span<const Vector3>(componentMin_.data(), componentMin_.size()),
-            ea::span<const Vector3>(componentMax_.data(), componentMax_.size()));
     return *componentTree_;
 }
 
 const CsgFaceBvh& CsgSolid::GetFaceTree(unsigned component) const
 {
-    ea::unique_ptr<CsgFaceBvh>& tree = faceTrees_[component];
-    if (!tree)
-    {
-        tree = ea::make_unique<CsgFaceBvh>(GetFaceMin(), GetFaceMax(),
-            ea::span<const unsigned>(componentFaces_.data() + componentStart_[component],
-                componentStart_[component + 1] - componentStart_[component]));
-    }
-    return *tree;
+    FaceTreeSlot& slot = faceTrees_[component];
+    std::call_once(slot.once_,
+        [&]
+        {
+            slot.tree_ = ea::make_unique<CsgFaceBvh>(GetFaceMin(), GetFaceMax(),
+                ea::span<const unsigned>(componentFaces_.data() + componentStart_[component],
+                    componentStart_[component + 1] - componentStart_[component]));
+            slot.built_.store(true, std::memory_order_release);
+        });
+    return *slot.tree_;
 }
 
 const CsgFaceBvh& CsgSolid::GetNearFaces(unsigned component, const Vector3& min, const Vector3& max, float epsilon,
     ea::unique_ptr<CsgFaceBvh>& temporary) const
 {
-    if (faceTrees_[component])
-        return *faceTrees_[component];
+    if (faceTrees_[component].built_.load(std::memory_order_acquire))
+        return *faceTrees_[component].tree_;
     const unsigned begin = componentStart_[component];
     const unsigned faceCount = componentStart_[component + 1] - begin;
     const Vector3 low(min.x_ - epsilon, min.y_ - epsilon, min.z_ - epsilon);
@@ -925,7 +1271,8 @@ ea::vector<CsgPolygon> CsgSolid::ToPolygons() const
     return result;
 }
 
-void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
+void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
+    ea::span<const int> exactIds, int exactIdSpace)
 {
     URHO3D_PROFILE("CsgSolid::Build");
     if (epsilon <= 0.0f)
@@ -937,6 +1284,8 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
     triangleStart_.clear();
     trianglePositions_.clear();
     triangleVertices_.clear();
+    fallbackFaces_.clear();
+    URHO3D_ASSERT(origins.empty() || origins.size() == faceCount, "CsgSolid origins must have one entry for each face");
     triangleStart_.reserve(faceCount + 1);
     faceMin_.resize(faceCount);
     faceMax_.resize(faceCount);
@@ -967,13 +1316,21 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
             const auto& vertices = faces_[i]->vertices_;
             triangleStart_.push_back(triangleCount);
             vertexStart.push_back(corners.size());
+            for (const ModelVertex& vertex : vertices)
+                corners.push_back(vertex.GetPosition());
+
+            // A face with an origin copies the triangles and the bounds of its source face.
+            if (i < origins.size() && origins[i].solid_ && CopyOrigin(i, origins[i]))
+            {
+                triangleCount = triangleVertices_.size() / 3;
+                continue;
+            }
 
             Vector3 min(INF, INF, INF);
             Vector3 max(-INF, -INF, -INF);
             for (const ModelVertex& vertex : vertices)
             {
                 const Vector3& point = vertex.GetPosition();
-                corners.push_back(point);
                 min = MinOf(min, point);
                 max = MaxOf(max, point);
             }
@@ -995,6 +1352,8 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
                 continue;
             if (vertices.size() == 3)
                 appendTriangle(0, 1, 2);
+            // The triangulator of step 10 gives the shared runs and tells if it needed the fallback.
+            // That port adds the faces that needed the fallback to fallbackFaces_.
             else if (CsgTriangulatePolygon(*faces_[i], scratch))
             {
                 for (unsigned t = 0; t + 2 < scratch.size(); t += 3)
@@ -1007,7 +1366,7 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
 
     {
         Topology topology;
-        BuildTopology(corners, vertexStart, triangleStart_, epsilon, topology);
+        BuildTopology(corners, vertexStart, triangleStart_, epsilon, exactIds, exactIdSpace, topology);
         componentStart_ = ea::move(topology.componentStart);
         componentFaces_ = ea::move(topology.componentFaces);
         faceComponents_ = ea::move(topology.faceComponents);
@@ -1019,6 +1378,53 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
         epsilon_ = epsilon;
     }
 
+    BuildBounds();
+}
+
+bool CsgSolid::CopyOrigin(unsigned index, const CsgFaceOrigin& origin)
+{
+    const CsgSolid& source = *origin.solid_;
+    // An origin that does not fit the face is a programming error. A release build ignores it
+    // and triangulates the face like a face without an origin.
+    const bool fits = origin.face_ < source.faces_.size()
+        && source.faces_[origin.face_]->vertices_.size() == faces_[index]->vertices_.size();
+    URHO3D_ASSERT(fits, "CsgSolid origin does not fit the face");
+    if (!fits)
+        return false;
+
+    faceMin_[index] = source.faceMin_[origin.face_];
+    faceMax_[index] = source.faceMax_[origin.face_];
+    if (source.IsFallbackFace(origin.face_))
+        fallbackFaces_.push_back(index);
+
+    const unsigned first = source.triangleStart_[origin.face_];
+    const unsigned count = source.triangleStart_[origin.face_ + 1] - first;
+    const Vector3* positions = source.trianglePositions_.data() + first * 3;
+    const unsigned* locals = source.triangleVertices_.data() + first * 3;
+    if (origin.flip_)
+    {
+        // The face is the flipped copy of the source face. Reverse each triangle and renumber its corners.
+        const unsigned vertexCount = source.faces_[origin.face_]->vertices_.size();
+        for (unsigned t = 0; t < count; ++t)
+        {
+            for (unsigned corner = 0; corner < 3; ++corner)
+            {
+                trianglePositions_.push_back(positions[t * 3 + 2 - corner]);
+                triangleVertices_.push_back(vertexCount - 1 - locals[t * 3 + 2 - corner]);
+            }
+        }
+    }
+    else
+    {
+        trianglePositions_.insert(trianglePositions_.end(), positions, positions + count * 3);
+        triangleVertices_.insert(triangleVertices_.end(), locals, locals + count * 3);
+    }
+    return true;
+}
+
+void CsgSolid::BuildBounds()
+{
+    const unsigned faceCount = faces_.size();
     boundsMin_ = Vector3(INF, INF, INF);
     boundsMax_ = Vector3(-INF, -INF, -INF);
     for (unsigned i = 0; i < faceCount; ++i)
@@ -1042,9 +1448,11 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
         componentMin_[component] = min;
         componentMax_[component] = max;
     }
-    faceTrees_.clear();
-    faceTrees_.resize(componentCount);
-    componentTree_.reset();
+    faceTrees_ = ea::make_unique<FaceTreeSlot[]>(componentCount);
+    // Built here, so that a query from many threads only reads the tree.
+    componentTree_ = ea::make_unique<CsgFaceBvh>(
+        ea::span<const Vector3>(componentMin_.data(), componentMin_.size()),
+        ea::span<const Vector3>(componentMax_.data(), componentMax_.size()));
 }
 
 bool CsgSolid::ContainsPoint(const Vector3& point, float epsilon) const

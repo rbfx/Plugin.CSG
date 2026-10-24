@@ -2,13 +2,16 @@
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
+#include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include "TestGeometry.h"
 
 #include <catch2/catch_amalgamated.hpp>
 
+#include <cmath>
 #include <limits>
+#include <thread>
 
 using namespace Urho3D;
 
@@ -733,4 +736,488 @@ TEST_CASE("Solid FromOperand moves noisy corners to one position", "[solid]")
     CHECK(solid->FaceCount() == 6);
     CHECK(solid->IsClosed());
     CHECK(IsEdgeClosed(solid->ToPolygons(), 1e-8f));
+}
+
+namespace
+{
+
+SharedPtr<CsgSolid> MakeBoxSolid(const Vector3& center, float halfSize)
+{
+    return CsgSolid::FromOperand(MakeBoxPolygons(center, Vector3::ONE * halfSize, 1));
+}
+
+/// The kept faces of a boolean test: all faces of A, and all faces of B flipped. The ids are taken from the solids.
+struct KeptFaces
+{
+    ea::vector<CsgSharedPolygon> faces_;
+    ea::vector<CsgFaceOrigin> origins_;
+    ea::vector<int> ids_;
+    int idSpace_{};
+};
+
+KeptFaces KeepBoxes(const SharedPtr<CsgSolid>& a, const SharedPtr<CsgSolid>& b)
+{
+    KeptFaces kept;
+    kept.idSpace_ = static_cast<int>(a->VertexKeySpace() + b->VertexKeySpace());
+    for (unsigned face = 0; face < a->FaceCount(); ++face)
+    {
+        kept.faces_.push_back(a->GetFace(face));
+        kept.origins_.push_back({SharedPtr<const CsgSolid>(a), face, false});
+        const unsigned count = a->GetFace(face)->vertices_.size();
+        for (unsigned k = 0; k < count; ++k)
+            kept.ids_.push_back(a->VertexKey(face, k));
+    }
+    for (unsigned face = 0; face < b->FaceCount(); ++face)
+    {
+        kept.faces_.push_back(CsgSolid::Flipped(*b->GetFace(face)));
+        kept.origins_.push_back({SharedPtr<const CsgSolid>(b), face, true});
+        const unsigned count = b->GetFace(face)->vertices_.size();
+        for (unsigned k = 0; k < count; ++k)
+            kept.ids_.push_back(static_cast<int>(a->VertexKeySpace()) + b->VertexKey(face, count - 1 - k));
+    }
+    return kept;
+}
+
+SharedPtr<CsgSolid> BuildKept(KeptFaces& kept)
+{
+    return CsgSolid::FromKeptFaces(ea::move(kept.faces_), CSG_DEFAULT_EPSILON,
+        {kept.origins_.data(), kept.origins_.size()}, {kept.ids_.data(), kept.ids_.size()}, kept.idSpace_);
+}
+
+Vector3 TriangleNormal(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    return (b - a).CrossProduct(c - a);
+}
+
+/// Check that the triangles of every face index the face vertices at the triangle positions.
+void CheckTrianglesMatchFaces(const CsgSolid& solid)
+{
+    for (unsigned face = 0; face < solid.FaceCount(); ++face)
+    {
+        const auto& vertices = solid.GetFace(face)->vertices_;
+        for (unsigned t = solid.GetTriangleStart()[face]; t < solid.GetTriangleStart()[face + 1]; ++t)
+        {
+            for (unsigned corner = 0; corner < 3; ++corner)
+            {
+                const unsigned local = solid.GetTriangleVertices()[t * 3 + corner];
+                REQUIRE(local < vertices.size());
+                CHECK(vertices[local].GetPosition() == solid.GetTrianglePositions()[t * 3 + corner]);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("Solid from kept faces shares faces and copies triangles", "[solid][kept]")
+{
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 1.0f);
+    KeptFaces kept = KeepBoxes(a, b);
+    const auto solid = BuildKept(kept);
+
+    REQUIRE(solid->FaceCount() == 12);
+    CHECK(solid->ComponentCount() == 2);
+    CHECK(solid->IsClosed());
+    CheckTrianglesMatchFaces(*solid);
+
+    ea::vector<unsigned> expected;
+    ea::vector<unsigned> actual;
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        // An untouched face is the same object, and its triangles are the source triangles.
+        CHECK(solid->GetFace(face).get() == a->GetFace(face).get());
+        REQUIRE(a->CopyTriangles(face, expected));
+        REQUIRE(solid->CopyTriangles(face, actual));
+        CHECK(actual == expected);
+        CHECK(solid->GetFaceMin()[face] == a->GetFaceMin()[face]);
+        CHECK(solid->GetFaceMax()[face] == a->GetFaceMax()[face]);
+    }
+
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        const CsgPolygon& source = *b->GetFace(face);
+        const CsgPolygon& flipped = *solid->GetFace(6 + face);
+        CHECK(solid->GetFace(6 + face).get() != b->GetFace(face).get());
+        REQUIRE(flipped.vertices_.size() == source.vertices_.size());
+        const unsigned count = source.vertices_.size();
+        for (unsigned k = 0; k < count; ++k)
+            CHECK(flipped.vertices_[k].GetPosition() == source.vertices_[count - 1 - k].GetPosition());
+        CHECK(flipped.plane_.normal_ == -source.plane_.normal_);
+        CHECK(flipped.plane_.d_ == -source.plane_.d_);
+        CHECK(flipped.shared_ == source.shared_);
+        // The source stays as it was.
+        CHECK(b->GetFace(face)->plane_.normal_ == source.plane_.normal_);
+
+        // Each copied triangle winds with the flipped plane and has the corners of a source triangle.
+        const unsigned sourceFirst = b->GetTriangleStart()[face];
+        const unsigned first = solid->GetTriangleStart()[6 + face];
+        REQUIRE(solid->GetTriangleStart()[7 + face] - first == b->GetTriangleStart()[face + 1] - sourceFirst);
+        for (unsigned t = 0; t < b->GetTriangleStart()[face + 1] - sourceFirst; ++t)
+        {
+            const Vector3* p = &solid->GetTrianglePositions()[(first + t) * 3];
+            const Vector3* q = &b->GetTrianglePositions()[(sourceFirst + t) * 3];
+            CHECK(p[0] == q[2]);
+            CHECK(p[1] == q[1]);
+            CHECK(p[2] == q[0]);
+            CHECK(TriangleNormal(p[0], p[1], p[2]).DotProduct(flipped.plane_.normal_) > 0.0f);
+            CHECK(TriangleNormal(q[0], q[1], q[2]).DotProduct(source.plane_.normal_) > 0.0f);
+        }
+    }
+}
+
+TEST_CASE("Solid vertex keys are stable and exact", "[solid][kept]")
+{
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 1.0f);
+    CHECK(a->VertexKeySpace() == 8);
+
+    KeptFaces kept = KeepBoxes(a, b);
+    const auto solid = BuildKept(kept);
+    CHECK(solid->VertexKeySpace() == 16);
+
+    // The keys of the first solid keep their numbers. Two corners have one key if and only if their positions are equal.
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        for (unsigned k = 0; k < 4; ++k)
+            CHECK(solid->VertexKey(face, k) == a->VertexKey(face, k));
+    }
+    for (unsigned f0 = 0; f0 < solid->FaceCount(); ++f0)
+    {
+        for (unsigned k0 = 0; k0 < 4; ++k0)
+        {
+            const int key = solid->VertexKey(f0, k0);
+            CHECK(key >= 0);
+            CHECK(key < static_cast<int>(solid->VertexKeySpace()));
+            for (unsigned f1 = 0; f1 < solid->FaceCount(); ++f1)
+            {
+                for (unsigned k1 = 0; k1 < 4; ++k1)
+                {
+                    const bool samePosition = solid->GetFace(f0)->vertices_[k0].GetPosition()
+                        == solid->GetFace(f1)->vertices_[k1].GetPosition();
+                    CHECK((key == solid->VertexKey(f1, k1)) == samePosition);
+                }
+            }
+        }
+    }
+
+    // Empty ids are legal. The positions give the keys.
+    KeptFaces missing = KeepBoxes(a, b);
+    missing.ids_.clear();
+    const auto welded = BuildKept(missing);
+    CHECK(welded->VertexKeySpace() == 16);
+    CHECK(welded->ComponentCount() == 2);
+}
+
+TEST_CASE("Solid exact weld merges bit-identical points only", "[solid][kept]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+    // A point within epsilon of the corner, but not identical.
+    const Vector3 corner = polygons[0].vertices_[0].GetPosition();
+    polygons[0].vertices_[0].SetPosition(corner + Vector3(1e-6f, 0.0f, 0.0f));
+    ea::vector<CsgSharedPolygon> faces;
+    for (const CsgPolygon& polygon : polygons)
+        faces.push_back(ea::make_shared<CsgPolygon>(polygon));
+    const auto solid = CsgSolid::FromKeptFaces(ea::move(faces), CSG_DEFAULT_EPSILON, {}, {}, 0);
+    CHECK(solid->VertexKeySpace() == 9);
+    const CsgExactLoops loops = solid->GetExactLoops();
+    CHECK(loops.positions_.size() == 9);
+    CHECK(loops.vertexStart_.size() == 7);
+    CHECK(loops.ids_.size() == 24);
+    for (unsigned face = 0; face < 6; ++face)
+        CHECK(loops.loopLength_[face] == 4);
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        for (unsigned k = 0; k < 4; ++k)
+        {
+            const int id = solid->VertexKey(face, k);
+            CHECK(loops.ids_[loops.vertexStart_[face] + k] == id);
+            CHECK(loops.positions_[id] == solid->GetFace(face)->vertices_[k].GetPosition());
+        }
+    }
+}
+
+TEST_CASE("Solid builder copies components and faces", "[solid][kept]")
+{
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 2.0f);
+
+    SECTION("Components")
+    {
+        CsgSolid::Builder builder(12, 72);
+        builder.AppendComponent(*a, 0, false);
+        builder.AppendComponent(*b, 0, true);
+        const auto solid = builder.Finish();
+        REQUIRE(solid->FaceCount() == 12);
+        CHECK(solid->ComponentCount() == 2);
+        CHECK(solid->IsClosed());
+        CHECK(solid->VertexKeySpace() == 16);
+        CheckTrianglesMatchFaces(*solid);
+        for (unsigned face = 0; face < 6; ++face)
+        {
+            CHECK(solid->GetFace(face).get() == a->GetFace(face).get());
+            CHECK(solid->GetFace(6 + face).get() != b->GetFace(face).get());
+            CHECK(solid->GetFace(6 + face)->plane_.normal_ == -b->GetFace(face)->plane_.normal_);
+            CHECK(solid->GetFaceComponents()[face] == 0);
+            CHECK(solid->GetFaceComponents()[6 + face] == 1);
+        }
+        CHECK(solid->GetComponentMin(1) == Vector3(3.0f, -2.0f, -2.0f));
+        CHECK(solid->GetComponentMax(1) == Vector3(7.0f, 2.0f, 2.0f));
+        CHECK(solid->GetBoundsMin() == Vector3(-1.0f, -2.0f, -2.0f));
+        CHECK(solid->ContainsPoint(Vector3(0.0f, 0.0f, 0.0f)));
+        CHECK_FALSE(solid->ContainsPoint(Vector3(2.5f, 0.0f, 0.0f)));
+        // The exact ids of the sources do not meet: one solid is the first, and the other starts after it.
+        for (unsigned face = 0; face < 6; ++face)
+        {
+            for (unsigned k = 0; k < 4; ++k)
+            {
+                CHECK(solid->VertexKey(face, k) == a->VertexKey(face, k));
+                CHECK(solid->VertexKey(6 + face, k) >= 8);
+            }
+        }
+    }
+
+    SECTION("Solids")
+    {
+        CsgSolid::Builder builder(12, 72);
+        builder.AppendSolid(*a);
+        builder.AppendSolid(*b);
+        const auto solid = builder.Finish();
+        REQUIRE(solid->FaceCount() == 12);
+        CHECK(solid->ComponentCount() == 2);
+        CHECK(solid->IsClosed());
+        CHECK(solid->VertexKeySpace() == 16);
+        CheckTrianglesMatchFaces(*solid);
+        for (unsigned face = 0; face < 6; ++face)
+        {
+            CHECK(solid->GetFace(face).get() == a->GetFace(face).get());
+            CHECK(solid->GetFace(6 + face).get() == b->GetFace(face).get());
+        }
+        CHECK(solid->ContainsPoint(Vector3(5.0f, 1.0f, 1.0f)));
+        CHECK_FALSE(solid->ContainsPoint(Vector3(2.5f, 0.0f, 0.0f)));
+    }
+
+    SECTION("An open source makes an open result")
+    {
+        auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+        polygons.pop_back();
+        const auto open = CsgSolid::FromOperand(ea::move(polygons));
+        REQUIRE_FALSE(open->IsClosed());
+        CsgSolid::Builder builder(12, 72);
+        builder.AppendSolid(*a);
+        builder.AppendSolid(*open);
+        const auto solid = builder.Finish();
+        CHECK_FALSE(solid->IsClosed());
+        CHECK(solid->FaceCount() == 11);
+    }
+}
+
+TEST_CASE("Solid Keep follows the operation table", "[solid][kept]")
+{
+    for (const bool inside : {false, true})
+    {
+        CHECK(CsgSolid::Keep(inside, CsgOperation::Union, false) == !inside);
+        CHECK(CsgSolid::Keep(inside, CsgOperation::Union, true) == !inside);
+        CHECK(CsgSolid::Keep(inside, CsgOperation::Intersection, false) == inside);
+        CHECK(CsgSolid::Keep(inside, CsgOperation::Intersection, true) == inside);
+        CHECK(CsgSolid::Keep(inside, CsgOperation::DifferenceAB, false) == !inside);
+        CHECK(CsgSolid::Keep(inside, CsgOperation::DifferenceAB, true) == inside);
+    }
+}
+
+TEST_CASE("Solid ClassifyPoint agrees with ContainsPoint and reports the surface", "[solid][kept]")
+{
+    const auto solid = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const float epsilon = CSG_DEFAULT_EPSILON;
+    bool reliable = false;
+
+    CHECK(solid->ClassifyPoint(Vector3(0.1f, 0.2f, -0.3f), epsilon, reliable));
+    CHECK(reliable);
+    CHECK_FALSE(solid->ClassifyPoint(Vector3(3.0f, 0.2f, 0.1f), epsilon, reliable));
+    CHECK(reliable);
+    CHECK_FALSE(solid->ClassifyPoint(Vector3(0.2f, -0.4f, 1.5f), epsilon, reliable));
+    CHECK(reliable);
+    reliable = false;
+    CHECK_FALSE(solid->ClassifyPoint(Vector3(100.0f, 0.0f, 0.0f), epsilon, reliable));
+    CHECK(reliable);
+
+    for (int i = 0; i < 40; ++i)
+    {
+        const Vector3 point(-1.5f + 0.0731f * i, -1.4f + 0.0613f * i, 1.4f - 0.0709f * i);
+        const bool inside = solid->ClassifyPoint(point, epsilon, reliable);
+        if (reliable)
+            CHECK(inside == solid->ContainsPoint(point, epsilon));
+    }
+
+    // Just inside and just outside of a face: the answer can not be trusted.
+    solid->ClassifyPoint(Vector3(1.0f - 0.5f * epsilon, 0.1f, 0.1f), epsilon, reliable);
+    CHECK_FALSE(reliable);
+    solid->ClassifyPoint(Vector3(-1.0f - 0.5f * epsilon, 0.1f, 0.1f), epsilon, reliable);
+    CHECK_FALSE(reliable);
+    // Far enough from the face, the answer is reliable again.
+    solid->ClassifyPoint(Vector3(1.0f - 20.0f * epsilon, 0.1f, 0.1f), epsilon, reliable);
+    CHECK(reliable);
+
+    // Values that are not valid never hang or crash.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    CHECK_FALSE(solid->ClassifyPoint(Vector3(nan, 0.0f, 0.0f), epsilon, reliable));
+    CHECK_FALSE(reliable);
+    CHECK_FALSE(solid->ClassifyPoint(Vector3(0.0f, inf, 0.0f), epsilon, reliable));
+    CHECK_FALSE(reliable);
+    solid->ClassifyPoint(Vector3(0.0f, 0.0f, 0.0f), nan, reliable);
+    solid->ClassifyPoint(Vector3(0.0f, 0.0f, 0.0f), -1.0f, reliable);
+
+    const CsgSolid empty(ea::span<const CsgPolygon>{});
+    CHECK_FALSE(empty.ClassifyPoint(Vector3::ZERO, epsilon, reliable));
+    CHECK(reliable);
+}
+
+TEST_CASE("Solid samples lie on their face and component", "[solid][kept]")
+{
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 2.0f);
+    CsgSolid::Builder builder(12, 72);
+    builder.AppendSolid(*a);
+    builder.AppendSolid(*b);
+    const auto solid = builder.Finish();
+
+    for (unsigned face = 0; face < solid->FaceCount(); ++face)
+    {
+        const Vector3 sample = solid->FaceSample(face);
+        const CsgPolygon& polygon = *solid->GetFace(face);
+        CHECK(std::abs(polygon.plane_.Distance(sample)) < 1e-5f);
+        const float slack = 1e-5f;
+        CHECK(sample.x_ >= solid->GetFaceMin()[face].x_ - slack);
+        CHECK(sample.y_ >= solid->GetFaceMin()[face].y_ - slack);
+        CHECK(sample.z_ >= solid->GetFaceMin()[face].z_ - slack);
+        CHECK(sample.x_ <= solid->GetFaceMax()[face].x_ + slack);
+        CHECK(sample.y_ <= solid->GetFaceMax()[face].y_ + slack);
+        CHECK(sample.z_ <= solid->GetFaceMax()[face].z_ + slack);
+    }
+    for (unsigned component = 0; component < solid->ComponentCount(); ++component)
+    {
+        const Vector3 sample = solid->ComponentSample(component);
+        const unsigned face = solid->GetComponentFaces()[solid->GetComponentStart()[component]];
+        CHECK(sample == solid->FaceSample(face));
+        CHECK(solid->GetFaceComponents()[face] == component);
+        CHECK(sample.x_ >= solid->GetComponentMin(component).x_);
+        CHECK(sample.x_ <= solid->GetComponentMax(component).x_);
+    }
+
+    // A face without triangles samples its first corner.
+    ModelVertex vertex;
+    vertex.SetPosition(Vector3(4.0f, 5.0f, 6.0f));
+    ea::vector<ModelVertex> vertices{vertex, vertex};
+    ea::vector<CsgSharedPolygon> faces{ea::make_shared<CsgPolygon>(ea::move(vertices), 1)};
+    const auto degenerate = CsgSolid::FromKeptFaces(ea::move(faces), CSG_DEFAULT_EPSILON, {}, {}, 0);
+    CHECK(degenerate->FaceSample(0) == Vector3(4.0f, 5.0f, 6.0f));
+    CHECK(degenerate->ComponentSample(0) == Vector3(4.0f, 5.0f, 6.0f));
+    ea::vector<unsigned> triangles{1, 2, 3};
+    CHECK_FALSE(degenerate->CopyTriangles(0, triangles));
+    CHECK(triangles.empty());
+}
+
+TEST_CASE("Solid from kept faces survives non-finite positions", "[solid][kept]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    polygons[1].vertices_[2].SetPosition(Vector3(nan, 0.0f, 0.0f));
+    polygons[2].vertices_[0].SetPosition(Vector3(std::numeric_limits<float>::infinity(), 0.0f, 0.0f));
+    ea::vector<CsgSharedPolygon> faces;
+    ea::vector<int> ids;
+    int next = 0;
+    for (const CsgPolygon& polygon : polygons)
+    {
+        faces.push_back(ea::make_shared<CsgPolygon>(polygon));
+        for (unsigned k = 0; k < polygon.vertices_.size(); ++k)
+            ids.push_back(next++);
+    }
+    const auto solid = CsgSolid::FromKeptFaces(
+        ea::move(faces), CSG_DEFAULT_EPSILON, {}, {ids.data(), ids.size()}, next);
+    CHECK(solid->FaceCount() == 6);
+    bool reliable = true;
+    solid->ClassifyPoint(Vector3(0.1f, 0.1f, 0.1f), CSG_DEFAULT_EPSILON, reliable);
+    CHECK_FALSE(solid->IsClosed());
+}
+
+TEST_CASE("Solid exact ids count ids and not positions", "[solid][kept]")
+{
+    // The boxes touch at the plane x = 1. Four corner positions are equal.
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(2.0f, 0.0f, 0.0f), 1.0f);
+    REQUIRE(a->VertexKeySpace() == 8);
+    REQUIRE(b->VertexKeySpace() == 8);
+
+    SECTION("Builder")
+    {
+        CsgSolid::Builder builder(12, 72);
+        builder.AppendComponent(*a, 0, false);
+        builder.AppendComponent(*b, 0, false);
+        const auto solid = builder.Finish();
+        REQUIRE(solid->FaceCount() == 12);
+        // Sixteen ids, but only twelve distinct positions.
+        CHECK(solid->VertexKeySpace() == 16);
+        CHECK(solid->GetExactLoops().positions_.size() == 16);
+    }
+
+    SECTION("Kept faces")
+    {
+        KeptFaces kept = KeepBoxes(a, b);
+        const auto solid = BuildKept(kept);
+        REQUIRE(solid->FaceCount() == 12);
+        CHECK(solid->VertexKeySpace() == 16);
+        CHECK(solid->IsClosed());
+
+        // Find the corners of both boxes at one position. They have different keys.
+        unsigned shared = 0;
+        for (unsigned f0 = 0; f0 < 6; ++f0)
+        {
+            for (unsigned k0 = 0; k0 < 4; ++k0)
+            {
+                for (unsigned f1 = 6; f1 < 12; ++f1)
+                {
+                    for (unsigned k1 = 0; k1 < 4; ++k1)
+                    {
+                        if (solid->GetFace(f0)->vertices_[k0].GetPosition()
+                            != solid->GetFace(f1)->vertices_[k1].GetPosition())
+                            continue;
+                        ++shared;
+                        CHECK(solid->VertexKey(f0, k0) != solid->VertexKey(f1, k1));
+                    }
+                }
+            }
+        }
+        CHECK(shared > 0);
+    }
+}
+
+TEST_CASE("Solid answers queries from many threads on a fresh solid", "[solid][kept]")
+{
+    const auto polygons = MakeSpherePolygons(Vector3::ZERO, 1.0f, 12, 16, 1);
+    ea::vector<Vector3> points;
+    for (int i = 0; i < 400; ++i)
+        points.push_back(Vector3(-1.3f + 0.0067f * i, 1.2f - 0.0059f * (i % 97), -1.1f + 0.0053f * (i % 211)));
+
+    const auto query = [&points](const CsgSolid& solid, ea::vector<unsigned char>& result)
+    {
+        for (const Vector3& point : points)
+            result.push_back(solid.ContainsPoint(point) ? 1 : 0);
+    };
+
+    // The reference comes from a second solid in one thread.
+    const CsgSolid reference(polygons);
+    ea::vector<unsigned char> expected;
+    query(reference, expected);
+
+    // The solid is fresh: no face tree exists when the threads start.
+    const CsgSolid shared(polygons);
+    ea::vector<unsigned char> results[4];
+    std::thread threads[4];
+    for (int i = 0; i < 4; ++i)
+        threads[i] = std::thread([&, i] { query(shared, results[i]); });
+    for (std::thread& thread : threads)
+        thread.join();
+    for (int i = 0; i < 4; ++i)
+        CHECK(results[i] == expected);
 }
