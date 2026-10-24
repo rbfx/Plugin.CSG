@@ -91,6 +91,18 @@ public:
     /// Apply the oldest finished result that the root queued while auto-apply was off.
     /// Return true if the root applied a result.
     bool ApplyPendingResult();
+    /// Fold all applied brushes into the base operand and remove the brush nodes.
+    /// Later brushes apply to the baked result, so each one costs one boolean operation.
+    /// Baking is permanent and exists only at run time. The root does not serialize the baked geometry.
+    /// A change of the base model, or of the epsilon, discards the baked result.
+    /// The function fails and returns false in these cases:
+    /// - The root has no node.
+    /// - A rebuild is in flight, or the root needs a rebuild.
+    /// - A brush is dirty.
+    /// - A finished result waits to be applied.
+    /// - The root has no cached solid, no cached brushes or no cached sources.
+    /// Return true if the root baked the brushes.
+    bool Bake();
 
 protected:
     void ApplyAttributes() override;
@@ -140,6 +152,19 @@ private:
         unsigned revision_{};
     };
 
+    /// Result of a bake. It replaces the base operand until the base model or the epsilon changes.
+    struct BakedState
+    {
+        SharedPtr<const CsgSolid> solid_;
+        Vector3 metricScale_{Vector3::ONE};
+        float epsilon_{};
+        SharedPtr<Model> baseModel_;
+        ea::vector<SharedPtr<Model>> sourceModels_;
+        ea::vector<ResourceRefList> sourceMaterials_;
+        SharedPtr<Model> outputModel_;
+        ResourceRefList outputMaterials_;
+    };
+
     /// Return persistent output StaticModel on the same node.
     StaticModel* GetOrCreateOutputStaticModel();
     void UpdateSubscriptions();
@@ -171,6 +196,8 @@ private:
     unsigned rebuildRequestId_{1};
     unsigned rebuildInFlightId_{};
     bool rebuildInFlight_{};
+    /// True while Bake removes the brush nodes. Then a rebuild request only sets the dirty flag.
+    bool baking_{};
     bool autoApplyResults_{true};
     ea::vector<PendingBuildResult> pendingResults_;
 
@@ -182,6 +209,8 @@ private:
     ea::vector<SharedPtr<Model>> cachedSourceModels_;
     ea::vector<ResourceRefList> cachedSourceMaterials_;
     ea::vector<BrushFingerprint> cachedBrushes_;
+    /// Baked result. It is null if the root has no bake.
+    ea::unique_ptr<BakedState> baked_;
 
     WeakPtr<StaticModel> output_;
     WeakPtr<Node> tempNode_;

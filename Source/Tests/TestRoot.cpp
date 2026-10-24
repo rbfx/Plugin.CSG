@@ -399,3 +399,192 @@ TEST_CASE("CsgRoot queues a result while auto-apply is off", "[root]")
     CHECK(!root->HasPendingResult());
     CHECK(!root->ApplyPendingResult());
 }
+
+TEST_CASE("CsgInternal::RescalePolygons scales positions and fixes normals", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    SharedPtr<Model> box = AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    SharedPtr<CsgSolid> solid = CsgSolid::FromOperand(CsgBuildPolygonsFromModel(box, Matrix3x4::IDENTITY, 0), 1e-4f);
+    REQUIRE(solid);
+    REQUIRE(solid->FaceCount() != 0);
+
+    const ea::vector<CsgPolygon> scaled = CsgInternal::RescalePolygons(*solid, Vector3(2.0f, 1.0f, 0.5f));
+    REQUIRE(scaled.size() == solid->FaceCount());
+    for (unsigned i = 0; i < scaled.size(); ++i)
+    {
+        const CsgPolygon& source = *solid->GetFace(i);
+        const CsgPolygon& result = scaled[i];
+        CHECK(result.shared_ == source.shared_);
+        REQUIRE(result.vertices_.size() == source.vertices_.size());
+        for (unsigned v = 0; v < result.vertices_.size(); ++v)
+        {
+            CHECK(result.vertices_[v].GetPosition().Equals(source.vertices_[v].GetPosition() * Vector3(2.0f, 1.0f, 0.5f), 1e-5f));
+            CHECK(result.vertices_[v].GetNormal().Length() == Catch::Approx(1.0f).margin(1e-5f));
+            // The test box can have normals that differ from the winding. The scale keeps their direction.
+            CHECK(result.vertices_[v].GetNormal().DotProduct(source.vertices_[v].GetNormal()) > 0.999f);
+            CHECK(result.plane_.normal_.DotProduct(source.plane_.normal_) > 0.999f);
+        }
+        // The plane passes through the scaled corners.
+        CHECK(Abs(result.plane_.Distance(result.vertices_[0].GetPosition())) < 1e-4f);
+    }
+
+    const ea::vector<CsgPolygon> same = CsgInternal::RescalePolygons(*solid, Vector3::ONE);
+    REQUIRE(same.size() == solid->FaceCount());
+    for (unsigned i = 0; i < same.size(); ++i)
+    {
+        const CsgPolygon& source = *solid->GetFace(i);
+        REQUIRE(same[i].vertices_.size() == source.vertices_.size());
+        CHECK(same[i].shared_ == source.shared_);
+        CHECK(same[i].plane_.normal_ == source.plane_.normal_);
+        for (unsigned v = 0; v < source.vertices_.size(); ++v)
+        {
+            CHECK(same[i].vertices_[v].GetPosition() == source.vertices_[v].GetPosition());
+            CHECK(same[i].vertices_[v].GetNormal() == source.vertices_[v].GetNormal());
+        }
+    }
+}
+
+TEST_CASE("CsgRoot bakes the brushes and appends on the baked result", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Baked");
+    // A root without brushes cannot bake.
+    CHECK(!root->Bake());
+
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    // The root needs a rebuild: the bake fails.
+    CHECK(!root->Bake());
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 10);
+
+    const Model* bakedModel = GetOutput(root)->GetModel();
+    const unsigned bakedIndices = CountIndices(bakedModel);
+    REQUIRE(root->Bake());
+    CHECK(root->GetNode()->GetChild("Cut") == nullptr);
+    CHECK(root->GetNode()->GetChild("Extension") == nullptr);
+    // Nothing to bake any more.
+    CHECK(!root->Bake());
+    RunFrames(root, workQueue, 60);
+    CHECK(GetOutput(root)->GetModel() == bakedModel);
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == bakedIndices);
+
+    // A new brush applies to the baked result.
+    AddBoxBrush(root, "Third", Vector3(0.0f, 3.0f, 0.0f), CsgOperation::Union);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    const Model* appended = GetOutput(root)->GetModel();
+    REQUIRE(appended);
+    CHECK(appended != bakedModel);
+    CHECK(CountIndices(appended) > bakedIndices);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    AddBoxBrush(fresh, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    AddBoxBrush(fresh, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    AddBoxBrush(fresh, "Third", Vector3(0.0f, 3.0f, 0.0f), CsgOperation::Union);
+    fresh->Rebuild();
+    REQUIRE(RunUntilOutput(fresh, workQueue, 1000));
+    const Model* expected = GetOutput(fresh)->GetModel();
+    CHECK(CountIndices(appended) == CountIndices(expected));
+    CHECK(appended->GetBoundingBox().min_.Equals(expected->GetBoundingBox().min_, 1e-3f));
+    CHECK(appended->GetBoundingBox().max_.Equals(expected->GetBoundingBox().max_, 1e-3f));
+}
+
+TEST_CASE("CsgRoot refuses to bake while a result is pending", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "PendingBake");
+    root->SetAutoApplyResults(false);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    REQUIRE(root->HasPendingResult());
+    CHECK(!root->Bake());
+    CHECK(root->GetNode()->GetChild("Cut") != nullptr);
+}
+
+TEST_CASE("CsgRoot discards the bake when the root model changes", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxC.mdl", Vector3(2.0f, 2.0f, 2.0f));
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "BakeDiscard");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 10);
+    REQUIRE(root->Bake());
+    RunFrames(root, workQueue, 60);
+    CHECK(CountIndices(GetOutput(root)->GetModel()) > 36);
+
+    // The new base model replaces the baked result. The output is the plain new box.
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxC.mdl"));
+    RunFrames(root, workQueue, 60);
+    const Model* model = GetOutput(root)->GetModel();
+    REQUIRE(model);
+    CHECK(CountIndices(model) == 36);
+    CHECK(model->GetBoundingBox().max_.Equals(Vector3(2.0f, 2.0f, 2.0f), 1e-3f));
+}
+
+TEST_CASE("CsgRoot keeps the baked result for a transformed root", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    const Vector3 positions[] = {Vector3(0.5f, 0.0f, 0.0f), Vector3::ZERO};
+    const Vector3 scales[] = {Vector3::ONE, Vector3(2.0f, 1.0f, 1.0f)};
+    for (unsigned i = 0; i < 2; ++i)
+    {
+        CsgRoot* root = MakeBoxRoot(scene, i == 0 ? "MovedBake" : "ScaledBake");
+        root->GetNode()->SetPosition(positions[i]);
+        root->GetNode()->SetScale(scales[i]);
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+        RunFrames(root, workQueue, 10);
+
+        const Model* bakedModel = GetOutput(root)->GetModel();
+        const unsigned bakedIndices = CountIndices(bakedModel);
+        const BoundingBox bakedBounds = bakedModel->GetBoundingBox();
+        REQUIRE(bakedIndices > 36);
+        REQUIRE(root->Bake());
+        RunFrames(root, workQueue, 60);
+
+        const Model* after = GetOutput(root)->GetModel();
+        REQUIRE(after);
+        CHECK(after == bakedModel);
+        CHECK(CountIndices(after) == bakedIndices);
+        CHECK(after->GetBoundingBox().min_.Equals(bakedBounds.min_, 1e-3f));
+        CHECK(after->GetBoundingBox().max_.Equals(bakedBounds.max_, 1e-3f));
+    }
+}

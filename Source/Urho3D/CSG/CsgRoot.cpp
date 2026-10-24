@@ -309,6 +309,7 @@ void CsgRoot::OnModelChanged()
     BaseClassName::OnModelChanged();
     cachedSolid_ = nullptr;
     cachedBrushes_.clear();
+    baked_.reset();
     RequestRebuild();
 }
 
@@ -405,7 +406,8 @@ void CsgRoot::CollectBrushesAndNestedRoots(
         for (unsigned i = numChildren; i-- > 0;)
         {
             Node* child = node->GetChild(i);
-            if (child && child->IsEnabled())
+            // A child without a parent is in removal.
+            if (child && child->IsEnabled() && child->GetParent())
                 stack.push_back(child);
         }
     }
@@ -580,6 +582,10 @@ void CsgRoot::ScheduleDeferredRebuild()
     if (!queue)
         return;
 
+    // Bake removes nodes. It requests one rebuild after the last removal.
+    if (baking_)
+        return;
+
     if (deferredDelaySec_ <= 0.0f)
     {
         Rebuild();
@@ -677,6 +683,29 @@ void ToNodeSpace(CsgTriangulatedModel& model, const Vector3& scale)
         model.boundingBox_ = BoundingBox(model.boundingBox_.min_ * inverse, model.boundingBox_.max_ * inverse);
 }
 
+ea::vector<CsgPolygon> RescalePolygons(const CsgSolid& solid, const Vector3& factor)
+{
+    if (factor == Vector3::ONE)
+        return solid.ToPolygons();
+
+    const Vector3 normalFactor(1.0f / factor.x_, 1.0f / factor.y_, 1.0f / factor.z_);
+    ea::vector<CsgPolygon> result;
+    result.reserve(solid.FaceCount());
+    for (unsigned faceIndex = 0; faceIndex < solid.FaceCount(); ++faceIndex)
+    {
+        const CsgPolygon& face = *solid.GetFace(faceIndex);
+        ea::vector<ModelVertex> vertices = face.vertices_;
+        for (ModelVertex& vertex : vertices)
+        {
+            vertex.SetPosition(vertex.GetPosition() * factor);
+            if (vertex.HasNormal())
+                vertex.SetNormal((vertex.GetNormal() * normalFactor).NormalizedOrDefault(vertex.GetNormal()));
+        }
+        result.emplace_back(ea::move(vertices), face.shared_);
+    }
+    return result;
+}
+
 } // namespace CsgInternal
 
 namespace
@@ -740,12 +769,25 @@ void CsgRoot::Rebuild()
     job->baseModel_ = tempBase->GetModel();
     job->baseMaterials_ = tempBase->GetMaterialsAttr();
 
+    // A bake belongs to the base operand and to the epsilon that it was made with.
+    if (baked_ && (baked_->baseModel_ != job->baseModel_ || baked_->epsilon_ != epsilon_))
+        baked_.reset();
+
     // Prepare source lookup tables for output vertex layout and materials.
-    // MeshId 0 is reserved for the base operand.
+    // MeshId 0 is reserved for the base operand. Baked faces refer to the tables of the build
+    // that made them, so the new brushes extend these tables.
     job->sourceModels_.clear();
     job->sourceMaterials_.clear();
-    job->sourceModels_.push_back(job->baseModel_);
-    job->sourceMaterials_.push_back(job->baseMaterials_);
+    if (baked_)
+    {
+        job->sourceModels_ = baked_->sourceModels_;
+        job->sourceMaterials_ = baked_->sourceMaterials_;
+    }
+    else
+    {
+        job->sourceModels_.push_back(job->baseModel_);
+        job->sourceMaterials_.push_back(job->baseMaterials_);
+    }
 
     // The base polygons are extracted only if the cached solid cannot be reused.
     job->rootStep_.model_ = job->baseModel_;
@@ -758,11 +800,22 @@ void CsgRoot::Rebuild()
     if (!BuildOperationTree(job->rootStep_, node_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
     {
         cachedBrushes_.clear();
+        rebuildDirty_ = false;
+        if (baked_)
+        {
+            // No new operations after a bake: the baked result is the output and the base for appends.
+            cachedSolid_ = baked_->solid_;
+            cachedBaseModel_ = job->baseModel_;
+            cachedEpsilon_ = baked_->epsilon_;
+            cachedMetricScale_ = baked_->metricScale_;
+            const ResourceRefList outputMaterials = baked_->outputMaterials_;
+            ApplyResultToOutput(baked_->outputModel_, outputMaterials);
+            return;
+        }
         cachedSolid_ = nullptr;
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
         ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
-        rebuildDirty_ = false;
         return;
     }
 
@@ -790,9 +843,19 @@ void CsgRoot::Rebuild()
     }
     if (!job->cachedSolid_)
     {
-        // The root frame has the world scale of the root but not its rotation or position.
-        job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
-            job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
+        if (baked_)
+        {
+            const Vector3& oldScale = baked_->metricScale_;
+            const Vector3 factor(job->metricScale_.x_ / oldScale.x_, job->metricScale_.y_ / oldScale.y_,
+                job->metricScale_.z_ / oldScale.z_);
+            job->rootStep_.polygons_ = CsgInternal::RescalePolygons(*baked_->solid_, factor);
+        }
+        else
+        {
+            // The root frame has the world scale of the root but not its rotation or position.
+            job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
+                job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
+        }
     }
 
     // The map is built from the full source tables. A key of a reused brush stays stable: a new model
@@ -927,6 +990,69 @@ bool CsgRoot::ApplyPendingResult()
     return true;
 }
 
+bool CsgRoot::Bake()
+{
+    if (!node_ || rebuildInFlight_ || rebuildDirty_ || HasPendingResult() || !cachedSolid_ || cachedBrushes_.empty()
+        || cachedSourceModels_.empty())
+    {
+        return false;
+    }
+    for (const BrushFingerprint& fingerprint : cachedBrushes_)
+    {
+        const CsgBrush* brush = fingerprint.brush_;
+        if (brush && brush->IsDirty())
+            return false;
+    }
+
+    const StaticModel* output = GetOrCreateOutputStaticModel();
+    if (!output || !output->GetModel())
+        return false;
+
+    // The baked state must exist before the brush nodes go away. Each removal requests a rebuild.
+    auto baked = ea::make_unique<BakedState>();
+    baked->solid_ = cachedSolid_;
+    baked->metricScale_ = cachedMetricScale_;
+    baked->epsilon_ = cachedEpsilon_;
+    baked->baseModel_ = cachedBaseModel_;
+    baked->sourceModels_ = cachedSourceModels_;
+    baked->sourceMaterials_ = cachedSourceMaterials_;
+    baked->outputModel_ = output->GetModel();
+    baked->outputMaterials_ = output->GetMaterialsAttr();
+    baked_ = ea::move(baked);
+
+    // Removal of a node calls UnregisterBrush, so the loop uses copies.
+    const ea::vector<BrushFingerprint> brushes = cachedBrushes_;
+    cachedBrushes_.clear();
+    ea::vector<WeakPtr<Node>> brushNodes;
+    ea::vector<WeakPtr<CsgBrush>> rootBrushes;
+    for (const BrushFingerprint& fingerprint : brushes)
+    {
+        CsgBrush* brush = fingerprint.brush_;
+        if (!brush || !brush->GetNode())
+            continue;
+        if (brush->GetNode() == node_)
+            rootBrushes.push_back(fingerprint.brush_);
+        else
+            brushNodes.push_back(WeakPtr<Node>(brush->GetNode()));
+    }
+    // Each removal requests a rebuild. The rebuild waits until the last removal, so it never sees a node in removal.
+    baking_ = true;
+    for (const WeakPtr<Node>& brushNode : brushNodes)
+    {
+        if (Node* removed = brushNode)
+            removed->Remove();
+    }
+    // A brush on the node of the root cannot remove its node. The root removes the component.
+    for (const WeakPtr<CsgBrush>& brush : rootBrushes)
+    {
+        if (CsgBrush* removed = brush)
+            removed->Remove();
+    }
+    baking_ = false;
+    RequestRebuild();
+    return true;
+}
+
 StaticModel* CsgRoot::GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache)
 {
     if (!node_)
@@ -999,6 +1125,10 @@ bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x
     {
         Node* child = node->GetChild(i);
         if (!child || !child->IsEnabled())
+            continue;
+
+        // A child without a parent is in removal.
+        if (!child->GetParent())
             continue;
 
         // Ignore nested CsgRoots (except this one).
