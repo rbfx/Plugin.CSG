@@ -21,6 +21,7 @@ class Context;
 class CsgSolid;
 class CsgTriangulatedModel;
 class Model;
+class WorkQueue;
 struct CsgPolygon;
 struct ResourceRefList;
 
@@ -44,8 +45,13 @@ static const char* CsgOperationNames[] = {
 /// `epsilon` is used for the bounds, for the weld of the result and for the point queries.
 /// An epsilon that is not positive gives the default epsilon.
 /// The result can be one of the operands if the other operand is empty. A null operand gives a null result.
+/// A work queue lets large operands find the overlapping faces in parallel. The result does not change.
+/// Pass the work queue only from a caller outside of all work queue tasks. A caller inside any task must pass null.
+/// The code forces a serial run only on worker threads, as a cheap guard. It cannot detect a task on the main thread.
+/// A null work queue gives a serial call.
 PLUGIN_RBFXCSG_API SharedPtr<const CsgSolid> CsgBooleanOperation(
-    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon = CSG_DEFAULT_EPSILON);
+    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon = CSG_DEFAULT_EPSILON,
+    WorkQueue* workQueue = nullptr);
 
 /// Extract CSG polygons from a `Model` operand.
 ///

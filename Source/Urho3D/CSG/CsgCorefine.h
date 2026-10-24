@@ -372,7 +372,9 @@ public:
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
 
     /// Find all the face pairs of the operands in the order of the C# reference and intersect them.
-    void CollectCrossings(CsgScratch& scratch);
+    /// The parallel options only change how the face pairs are found. The order of the pairs stays the same.
+    /// A caller inside a work queue task must pass options without a work queue.
+    void CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel = {});
     /// Intersect the triangles of two faces. Add the crossings and the segments.
     void IntersectFaces(int faceA, int faceB);
     /// Write the crossings on an edge of the mesh to the output, ordered from the vertex from to the vertex to.

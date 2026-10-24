@@ -6,6 +6,7 @@
 
 // This header is internal. Do not export these functions.
 
+#include "Urho3D/CSG/CsgFaceBvh.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Container/Ptr.h>
 
@@ -23,8 +24,12 @@ namespace CsgInternal
 /// An empty second operand gives the second operand for an intersection, and the first operand for any other operation.
 /// A triangle that has a corner which is not finite is left out if the curve reaches its face.
 /// Every other face stays as it is.
-SharedPtr<const CsgSolid> Boolean(
-    const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b, CsgOperation operation, float epsilon);
+///
+/// The parallel options only change how the face pairs of the corefinement are found. The result is the same
+/// for every option. The default options give a serial run. The code forces a serial run
+/// only on worker threads. A caller inside any work queue task must pass a null work queue.
+SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel = {});
 
 } // namespace CsgInternal
 

@@ -279,11 +279,13 @@ SharedPtr<CsgSolid> CsgBuildSolidFromModel(
 }
 
 SharedPtr<const CsgSolid> CsgBooleanOperation(
-    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon)
+    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon, WorkQueue* workQueue)
 {
     if (!a || !b)
         return nullptr;
-    return CsgInternal::Boolean(SharedPtr<const CsgSolid>(a), SharedPtr<const CsgSolid>(b), op, epsilon);
+    CsgParallelOptions parallel;
+    parallel.workQueue_ = workQueue;
+    return CsgInternal::Boolean(SharedPtr<const CsgSolid>(a), SharedPtr<const CsgSolid>(b), op, epsilon, parallel);
 }
 
 SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& triangulated,

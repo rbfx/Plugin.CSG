@@ -14,6 +14,38 @@
 namespace Urho3D
 {
 
+class WorkQueue;
+
+/// Smallest number of items in each of the two trees for the automatic parallel overlap collection.
+constexpr unsigned CSG_PARALLEL_MIN_ITEMS = 2048;
+
+/// How a query decides to run on the work queue.
+enum class CsgParallelMode
+{
+    /// Run parallel if the work queue allows it and both trees have at least CSG_PARALLEL_MIN_ITEMS items.
+    Auto,
+    /// Always run serial.
+    Serial,
+    /// Run parallel if the work queue allows it. The size of the trees does not matter.
+    Parallel,
+};
+
+/// Options for a query that can run on the work queue. The default options give a serial run.
+struct CsgParallelOptions
+{
+    /// Work queue for the tasks. A null pointer gives a serial run.
+    WorkQueue* workQueue_{};
+    CsgParallelMode mode_{CsgParallelMode::Auto};
+};
+
+/// Return true if the options allow tasks on the work queue from the current thread.
+///
+/// The answer is false if there is no work queue, if it has only one thread, if the mode is serial,
+/// or if the current thread is a worker thread (thread index not 0). This is only a cheap guard.
+/// The work queue has no way to tell if the main thread runs a task. A caller inside any work queue task
+/// must pass a null work queue. A caller outside of all tasks can pass the work queue.
+PLUGIN_RBFXCSG_API bool CsgCanRunParallel(const CsgParallelOptions& options);
+
 /// Binned-SAH bounding volume hierarchy over item boxes.
 ///
 /// The nodes are in one flat array. The children of an inner node are a pair at first_ and first_ + 1.
@@ -63,6 +95,11 @@ public:
         ea::vector<ItemPair>& scratch) const;
     /// Append every pair of items with boxes that overlap within epsilon.
     void CollectOverlaps(const CsgFaceBvh& other, float epsilon, ea::vector<ItemPair>& output) const;
+    /// Append every pair of items with boxes that overlap within epsilon. The scratch is the traversal stack.
+    /// The pairs have exactly the order of the serial traversal, also if the tasks run on the work queue.
+    /// The tasks share no mutable state. Each task writes its own list, and the lists join in task order.
+    void CollectOverlaps(const CsgFaceBvh& other, float epsilon, ea::vector<ItemPair>& output,
+        ea::vector<ItemPair>& scratch, const CsgParallelOptions& parallel) const;
 
     /// Clear the output, then add the items with boxes that overlap the query box within epsilon.
     /// The scratch is the traversal stack.
@@ -84,6 +121,12 @@ private:
     /// Remove the items with a NaN box, then build the nodes.
     void Initialize();
     void Build(ea::vector<Primitive>& primitives);
+    /// Split a node pair of the traversal. Return false if both nodes are leaves.
+    /// The two children are in the visit order.
+    bool SplitPair(const CsgFaceBvh& other, const ItemPair& pair, ItemPair& first, ItemPair& second) const;
+    /// Run the traversal below one node pair. Append the item pairs to the output.
+    void Traverse(const CsgFaceBvh& other, float epsilon, const ItemPair& root, ea::vector<ItemPair>& output,
+        ea::vector<ItemPair>& stack) const;
 
     ea::span<const Vector3> itemMin_;
     ea::span<const Vector3> itemMax_;

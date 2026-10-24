@@ -279,7 +279,7 @@ Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
     segmentsB_.Reset(static_cast<unsigned>(b_.triangleFace_.size()));
 }
 
-void Corefinement::CollectCrossings(CsgScratch& scratch)
+void Corefinement::CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel)
 {
     const CsgSolid& solidA = a_.solid_;
     const CsgSolid& solidB = b_.solid_;
@@ -300,7 +300,7 @@ void Corefinement::CollectCrossings(CsgScratch& scratch)
             solidB.GetComponentMax(componentB), epsilon_, temporaryA);
         const CsgFaceBvh& treeB = solidB.GetNearFaces(componentB, solidA.GetComponentMin(componentA),
             solidA.GetComponentMax(componentA), epsilon_, temporaryB);
-        treeA.CollectOverlaps(treeB, epsilon_, scratch.facePairs_, scratch.stack_);
+        treeA.CollectOverlaps(treeB, epsilon_, scratch.facePairs_, scratch.stack_, parallel);
     }
     for (const CsgFaceBvh::ItemPair& pair : scratch.facePairs_)
     {

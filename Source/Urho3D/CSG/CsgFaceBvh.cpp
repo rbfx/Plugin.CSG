@@ -4,6 +4,9 @@
 
 #include "Urho3D/CSG/CsgFaceBvh.h"
 
+#include <Urho3D/Core/WorkQueue.h>
+
+#include <atomic>
 #include <climits>
 #include <limits>
 
@@ -308,13 +311,30 @@ void CsgFaceBvh::CollectOverlaps(const CsgFaceBvh& other, float epsilon, ea::vec
     CollectOverlaps(other, epsilon, output, scratch);
 }
 
-void CsgFaceBvh::CollectOverlaps(
-    const CsgFaceBvh& other, float epsilon, ea::vector<ItemPair>& output, ea::vector<ItemPair>& stack) const
+bool CsgFaceBvh::SplitPair(const CsgFaceBvh& other, const ItemPair& pair, ItemPair& first, ItemPair& second) const
 {
-    if (items_.empty() || other.items_.empty())
-        return;
+    const Node& a = nodes_[pair.first];
+    const Node& b = other.nodes_[pair.second];
+    if (a.count_ != 0 && b.count_ != 0)
+        return false;
+    if (b.count_ != 0 || (a.count_ == 0 && HalfArea(a.min_, a.max_) >= HalfArea(b.min_, b.max_)))
+    {
+        first = {a.first_, pair.second};
+        second = {a.first_ + 1, pair.second};
+    }
+    else
+    {
+        first = {pair.first, b.first_};
+        second = {pair.first, b.first_ + 1};
+    }
+    return true;
+}
+
+void CsgFaceBvh::Traverse(const CsgFaceBvh& other, float epsilon, const ItemPair& root, ea::vector<ItemPair>& output,
+    ea::vector<ItemPair>& stack) const
+{
     stack.clear();
-    stack.push_back({0, 0});
+    stack.push_back(root);
     while (!stack.empty())
     {
         const ItemPair pair = stack.back();
@@ -323,7 +343,9 @@ void CsgFaceBvh::CollectOverlaps(
         const Node& b = other.nodes_[pair.second];
         if (!Overlaps(a.min_, a.max_, b.min_, b.max_, epsilon))
             continue;
-        if (a.count_ != 0 && b.count_ != 0)
+        ItemPair first;
+        ItemPair second;
+        if (!SplitPair(other, pair, first, second))
         {
             for (int i = a.first_; i < a.first_ + a.count_; ++i)
             {
@@ -337,19 +359,114 @@ void CsgFaceBvh::CollectOverlaps(
                         output.push_back({itemA, itemB});
                 }
             }
+            continue;
         }
-        else if (b.count_ != 0 || (a.count_ == 0 && HalfArea(a.min_, a.max_) >= HalfArea(b.min_, b.max_)))
-        {
-            // Visit the first child first.
-            stack.push_back({a.first_ + 1, pair.second});
-            stack.push_back({a.first_, pair.second});
-        }
-        else
-        {
-            stack.push_back({pair.first, b.first_ + 1});
-            stack.push_back({pair.first, b.first_});
-        }
+        // Visit the first child first. The depth of the trees limits the size of the stack.
+        stack.push_back(second);
+        stack.push_back(first);
     }
+}
+
+void CsgFaceBvh::CollectOverlaps(
+    const CsgFaceBvh& other, float epsilon, ea::vector<ItemPair>& output, ea::vector<ItemPair>& stack) const
+{
+    if (items_.empty() || other.items_.empty())
+        return;
+    Traverse(other, epsilon, {0, 0}, output, stack);
+}
+
+bool CsgCanRunParallel(const CsgParallelOptions& options)
+{
+    if (!options.workQueue_ || options.mode_ == CsgParallelMode::Serial || !options.workQueue_->IsMultithreaded())
+        return false;
+    // Thread index 0 is the main thread. This is a cheap guard that keeps nested waits off the worker threads.
+    // The code cannot detect a call from a task that runs on the main thread. The caller must avoid it.
+    return WorkQueue::GetThreadIndex() == 0;
+}
+
+void CsgFaceBvh::CollectOverlaps(const CsgFaceBvh& other, float epsilon, ea::vector<ItemPair>& output,
+    ea::vector<ItemPair>& stack, const CsgParallelOptions& parallel) const
+{
+    if (items_.empty() || other.items_.empty())
+        return;
+    const bool bigEnough = ItemCount() >= CSG_PARALLEL_MIN_ITEMS && other.ItemCount() >= CSG_PARALLEL_MIN_ITEMS;
+    if (!CsgCanRunParallel(parallel) || (parallel.mode_ == CsgParallelMode::Auto && !bigEnough))
+    {
+        Traverse(other, epsilon, {0, 0}, output, stack);
+        return;
+    }
+
+    WorkQueue* workQueue = parallel.workQueue_;
+    const unsigned runnerCount = workQueue->GetNumProcessingThreads();
+    // More tasks than runners balance the load. The limits keep the loop finite.
+    constexpr unsigned tasksPerRunner = 8;
+    constexpr unsigned maxRounds = 16;
+    const unsigned wantedTasks = runnerCount * tasksPerRunner;
+
+    // Split the traversal into subtree tasks. The list keeps the visit order of the serial traversal.
+    // A pair without overlap is dropped, as the serial traversal skips it.
+    ea::vector<ItemPair> tasks;
+    ea::vector<ItemPair> nextTasks;
+    tasks.push_back({0, 0});
+    for (unsigned round = 0; round < maxRounds && tasks.size() < wantedTasks; ++round)
+    {
+        bool split = false;
+        nextTasks.clear();
+        for (const ItemPair& pair : tasks)
+        {
+            const Node& a = nodes_[pair.first];
+            const Node& b = other.nodes_[pair.second];
+            if (!Overlaps(a.min_, a.max_, b.min_, b.max_, epsilon))
+                continue;
+            ItemPair first;
+            ItemPair second;
+            if (SplitPair(other, pair, first, second))
+            {
+                nextTasks.push_back(first);
+                nextTasks.push_back(second);
+                split = true;
+            }
+            else
+                nextTasks.push_back(pair);
+        }
+        tasks.swap(nextTasks);
+        if (!split)
+            break;
+    }
+    if (tasks.empty())
+        return;
+
+    const unsigned taskCount = static_cast<unsigned>(tasks.size());
+    ea::vector<ea::vector<ItemPair>> taskOutputs(taskCount);
+    const unsigned posted = ea::min(runnerCount, taskCount);
+    ea::vector<ea::vector<ItemPair>> runnerStacks(posted);
+    std::atomic<unsigned> nextTask{0};
+    for (unsigned runner = 0; runner < posted; ++runner)
+    {
+        // Each runner has its own stack. Each task writes only to its own output.
+        ea::vector<ItemPair>* runnerStack = &runnerStacks[runner];
+        workQueue->PostTask(
+            [this, &other, epsilon, &tasks, &taskOutputs, &nextTask, taskCount, runnerStack]()
+            {
+                while (true)
+                {
+                    const unsigned index = nextTask.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= taskCount)
+                        break;
+                    Traverse(other, epsilon, tasks[index], taskOutputs[index], *runnerStack);
+                }
+            },
+            TaskPriority::Immediate);
+    }
+    // This call waits only for the tasks that this thread posted.
+    workQueue->CompleteImmediateForThisThread();
+
+    size_t total = output.size();
+    for (const ea::vector<ItemPair>& taskOutput : taskOutputs)
+        total += taskOutput.size();
+    output.reserve(total);
+    for (const ea::vector<ItemPair>& taskOutput : taskOutputs)
+        output.insert(output.end(), taskOutput.begin(), taskOutput.end());
 }
 
 void CsgFaceBvh::CollectBox(const Vector3& min, const Vector3& max, float epsilon, ea::vector<int>& output) const

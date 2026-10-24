@@ -590,8 +590,8 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
 
 } // namespace
 
-SharedPtr<const CsgSolid> Boolean(
-    const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b, CsgOperation operation, float epsilon)
+SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel)
 {
     // The negated test also catches NaN.
     if (!(epsilon > 0.0f))
@@ -605,7 +605,7 @@ SharedPtr<const CsgSolid> Boolean(
 
     Corefinement core(*a, *b, epsilon);
     CsgScratch scratch;
-    core.CollectCrossings(scratch);
+    core.CollectCrossings(scratch, parallel);
     core.SplitFaces(scratch);
 
     CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
