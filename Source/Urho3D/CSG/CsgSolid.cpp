@@ -124,7 +124,8 @@ public:
                 continue;
             const Vector3& point = welder_.GetPosition(item);
             const float t = (point - start).DotProduct(span) / spanLengthSquared;
-            if (t <= 0.0f || t >= 1.0f)
+            // The negated test also rejects NaN, so the sort below sees only finite keys.
+            if (!(t > 0.0f && t < 1.0f))
                 continue;
             if ((point - (start + span * t)).LengthSquared() <= toleranceSquared)
                 cuts.push_back({t, item});

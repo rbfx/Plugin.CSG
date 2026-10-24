@@ -937,7 +937,9 @@ private:
             s_.keys_[i] = DistanceSquared(ProjectDouble(outerIds[i]), start);
         }
         const ea::vector<double>& keys = s_.keys_;
-        SortIds(s_.order_, s_.merge_, [&keys](int x, int y) { return CompareDouble(keys[x], keys[y]); });
+        s_.merge_.resize(outerCount);
+        ea::merge_sort_buffer(s_.order_.begin(), s_.order_.end(), s_.merge_.data(),
+            [&keys](int x, int y) { return CompareDouble(keys[x], keys[y]) < 0; });
         for (const int candidate : s_.order_)
         {
             if (candidate == avoidOuter)
@@ -1046,7 +1048,9 @@ private:
         }
         {
             const ea::vector<double>& keys = s_.keys_;
-            SortIds(s_.order_, s_.merge_, [&keys](int x, int y) { return CompareDouble(keys[y], keys[x]); });
+            s_.merge_.resize(holeTotal);
+            ea::merge_sort_buffer(s_.order_.begin(), s_.order_.end(), s_.merge_.data(),
+                [&keys](int x, int y) { return CompareDouble(keys[y], keys[x]) < 0; });
         }
         s_.temp1_.resize(holeTotal);
         for (int i = 0; i < holeTotal; ++i)

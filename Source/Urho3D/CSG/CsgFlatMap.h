@@ -19,6 +19,9 @@ namespace Urho3D
 
 /// Hash map with open addressing and linear probing. The map has no erase.
 ///
+/// The ea::hash_map type iterates in bucket order, and its clear() walks all buckets.
+/// This map keeps the insertion order and clears in time proportional to its entries.
+///
 /// The map keeps the entries in a dense vector, in insertion order.
 /// The hash table stores only int32 indices into this vector.
 /// Iteration walks the dense vector. The result never depends on the hash table order.
