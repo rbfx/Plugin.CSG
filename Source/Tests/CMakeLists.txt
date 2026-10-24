@@ -18,12 +18,18 @@ set (SOURCE_FILES
     TestBoolean.cpp
     TestTriangulation.cpp
     TestOptimization.cpp
+    TestRoot.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
 # This keeps the tests independent from the plugin entry point and from the plugin loader.
 set (CSG_DIR ${CMAKE_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
+    ${CSG_DIR}/Csg.cpp
+    ${CSG_DIR}/CsgBrush.cpp
+    ${CSG_DIR}/CsgBsp.cpp
+    ${CSG_DIR}/CsgComponent.cpp
+    ${CSG_DIR}/CsgRoot.cpp
     ${CSG_DIR}/CsgBoolean.cpp
     ${CSG_DIR}/CsgCommon.cpp
     ${CSG_DIR}/CsgCorefine.cpp
