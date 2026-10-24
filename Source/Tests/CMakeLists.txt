@@ -13,6 +13,7 @@ set (SOURCE_FILES
     TestFlatMap.cpp
     TestSolid.cpp
     TestBvh.cpp
+    TestCorefine.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
@@ -21,6 +22,7 @@ set (CSG_DIR ${CMAKE_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgBsp.cpp
     ${CSG_DIR}/CsgCommon.cpp
+    ${CSG_DIR}/CsgCorefine.cpp
     ${CSG_DIR}/CsgExact.cpp
     ${CSG_DIR}/CsgFaceBvh.cpp
     ${CSG_DIR}/CsgOptimization.cpp
