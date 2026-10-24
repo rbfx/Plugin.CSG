@@ -6,6 +6,7 @@ set (TARGET_NAME Tests.CSG)
 
 set (SOURCE_FILES
     TestMain.cpp
+    TestExact.cpp
     TestGeometry.cpp
     TestGeometry.h
     TestCommon.cpp
@@ -17,6 +18,7 @@ set (CSG_DIR ${CMAKE_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgBsp.cpp
     ${CSG_DIR}/CsgCommon.cpp
+    ${CSG_DIR}/CsgExact.cpp
 )
 
 add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES})

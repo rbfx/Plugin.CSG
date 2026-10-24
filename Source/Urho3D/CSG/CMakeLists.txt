@@ -12,6 +12,7 @@ set (SOURCE_FILES
     CsgBsp.cpp
     CsgCommon.cpp
     CsgComponent.cpp
+    CsgExact.cpp
     CsgOptimization.cpp
     CsgRoot.cpp
     CsgTriangulation.cpp
@@ -20,8 +21,11 @@ set (SOURCE_FILES
     CsgBsp.h
     CsgCommon.h
     CsgComponent.h
+    CsgExact.h
+    CsgExactFilter.h
     CsgOptimization.h
     CsgRoot.h
+    CsgSimd.h
     CsgTriangulation.h
 )
 
