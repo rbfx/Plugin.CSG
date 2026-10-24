@@ -19,6 +19,7 @@ namespace Urho3D
 
 class Context;
 class CsgBsp;
+class CsgSolid;
 class CsgTriangulatedModel;
 class Model;
 struct CsgPolygon;
@@ -44,12 +45,29 @@ static const char* CsgOperationNames[] = {
 PLUGIN_RBFXCSG_API ea::vector<CsgPolygon> CsgBooleanOperation(
     const CsgBsp& a, const CsgBsp& b, CsgOperation op, float epsilon = CSG_DEFAULT_EPSILON);
 
+/// Compute CSG boolean operation between two solids and return the resulting solid.
+///
+/// The solids must be closed. The operation uses exact math for the intersection curve.
+/// `epsilon` is used for the bounds, for the weld of the result and for the point queries.
+/// An epsilon that is not positive gives the default epsilon.
+/// The result can be one of the operands if the other operand is empty. A null operand gives a null result.
+PLUGIN_RBFXCSG_API SharedPtr<const CsgSolid> CsgBooleanOperation(
+    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon = CSG_DEFAULT_EPSILON);
+
 /// Extract CSG polygons from a `Model` operand.
 ///
 /// `worldTransform` is applied to vertex positions (and normals/tangents) during extraction.
 /// `meshId` is encoded into `CsgPolygon::shared_` as (meshId << 16) | geometryIndex.
 PLUGIN_RBFXCSG_API ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(
     const Model* model, const Matrix3x4& worldTransform, unsigned meshId = 0);
+
+/// Build a solid from a `Model` operand.
+///
+/// `worldTransform` is applied to vertex positions (and normals/tangents) during extraction.
+/// `meshId` is encoded into `CsgPolygon::shared_` as (meshId << 16) | geometryIndex.
+/// Returns an empty solid if extraction fails.
+PLUGIN_RBFXCSG_API SharedPtr<CsgSolid> CsgBuildSolidFromModel(
+    const Model* model, const Matrix3x4& worldTransform, unsigned meshId = 0, float epsilon = CSG_DEFAULT_EPSILON);
 
 /// Build BSP tree from a `Model` operand.
 ///

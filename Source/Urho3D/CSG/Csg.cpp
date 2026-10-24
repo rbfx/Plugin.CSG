@@ -3,11 +3,13 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSG/Csg.h"
+#include "Urho3D/CSG/CsgBoolean.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgBsp.h"
 #include "Urho3D/CSG/CsgCommon.h"
 #include "Urho3D/CSG/CsgComponent.h"
 #include "Urho3D/CSG/CsgRoot.h"
+#include "Urho3D/CSG/CsgSolid.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include <Urho3D/Container/ByteVector.h>
 #include <Urho3D/Core/Context.h>
@@ -327,6 +329,20 @@ CsgBsp CsgBuildBspFromModel(const Model* model, const Matrix3x4& worldTransform,
     CsgBsp result;
     result.Build(ea::move(polygons), epsilon);
     return result;
+}
+
+SharedPtr<CsgSolid> CsgBuildSolidFromModel(
+    const Model* model, const Matrix3x4& worldTransform, unsigned meshId, float epsilon)
+{
+    return CsgSolid::FromOperand(CsgBuildPolygonsFromModel(model, worldTransform, meshId), epsilon);
+}
+
+SharedPtr<const CsgSolid> CsgBooleanOperation(
+    const CsgSolid* a, const CsgSolid* b, CsgOperation op, float epsilon)
+{
+    if (!a || !b)
+        return nullptr;
+    return CsgInternal::Boolean(SharedPtr<const CsgSolid>(a), SharedPtr<const CsgSolid>(b), op, epsilon);
 }
 
 SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& triangulated,

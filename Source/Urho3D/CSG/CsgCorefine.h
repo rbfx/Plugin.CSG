@@ -284,9 +284,69 @@ struct CsgSplitResult
     ea::vector<uint8_t> bridged_;
 };
 
+/// A face of the contact region of a boolean before the classification: a region of a split triangle,
+/// a whole triangle of a face that the curve reaches, or a whole face.
+struct CsgBooleanElement
+{
+    CsgSharedPolygon polygon_;
+    /// First global id of the polygon vertices in the element id pool. Not used if sourceFace_ is not negative.
+    int idStart_{};
+    int idCount_{};
+    /// The face that the element is as a whole, so the result copies its triangles. It is -1 for any other element.
+    /// The ids of such an element are the loop of the face in the mesh.
+    int sourceFace_{-1};
+    /// True for a region of a split triangle. Only these border the curve.
+    bool split_{};
+};
+
+/// A face that the boolean keeps. A face with a source face reads its ids from the solid of the operand.
+struct CsgKeptFace
+{
+    CsgSharedPolygon polygon_;
+    int idStart_{};
+    int idCount_{};
+    int sourceFace_{-1};
+    /// True if the face comes from the second operand.
+    bool second_{};
+    /// True if the polygon is the flipped copy of the source face.
+    bool flip_{};
+};
+
+/// One entry for the sort in CancelOpposites.
+struct CsgOppositeCandidate
+{
+    int count_{};
+    uint64_t hash_{};
+    int index_{};
+};
+
+/// Reusable vectors of the classification and of the assembly of a boolean.
+struct CsgBooleanScratch
+{
+    ea::vector<uint8_t> touched_;
+    ea::vector<uint8_t> frontier_;
+    ea::vector<CsgBooleanElement> elements_;
+    ea::vector<int> elementIds_;
+    ea::vector<uint8_t> inside_;
+    ea::vector<CsgKeptFace> kept_;
+    ea::vector<int> keptIds_;
+    ea::vector<CsgOppositeCandidate> candidates_;
+    ea::vector<uint8_t> removed_;
+    /// Classification.
+    ea::vector<int> edgeStart_;
+    ea::vector<int> loops_;
+    CsgFlatMap<uint64_t, int, CsgPackedKeyHash> edgeOwner_;
+    ea::vector<int> twins_;
+    ea::vector<uint8_t> decided_;
+    ea::vector<int> queue_;
+    ea::vector<int> patch_;
+    ea::vector<unsigned> indices_;
+};
+
 /// Reusable vectors. A boolean makes one scratch and passes it to every step.
 struct CsgScratch
 {
+    CsgBooleanScratch boolean_;
     ea::vector<CsgFaceBvh::ItemPair> componentPairs_;
     ea::vector<CsgFaceBvh::ItemPair> facePairs_;
     ea::vector<CsgFaceBvh::ItemPair> stack_;

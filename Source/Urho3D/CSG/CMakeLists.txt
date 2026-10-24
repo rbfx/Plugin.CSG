@@ -9,6 +9,7 @@ set (SOURCE_FILES
     _Plugin.h
     Csg.cpp
     CsgBrush.cpp
+    CsgBoolean.cpp
     CsgBsp.cpp
     CsgPolygon.cpp
     CsgSolid.cpp
@@ -21,6 +22,7 @@ set (SOURCE_FILES
     CsgRoot.cpp
     CsgTriangulation.cpp
     Csg.h
+    CsgBoolean.h
     CsgBrush.h
     CsgBsp.h
     CsgPolygon.h
