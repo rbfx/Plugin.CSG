@@ -13,12 +13,15 @@
 
 #include <EASTL/shared_ptr.h>
 #include <EASTL/span.h>
+#include <EASTL/unique_ptr.h>
 #include <EASTL/vector.h>
 
 #include <cstdint>
 
 namespace Urho3D
 {
+
+class CsgFaceBvh;
 
 /// A face that more than one solid can own. Nobody modifies a face after a solid owns it.
 using CsgSharedPolygon = ea::shared_ptr<const CsgPolygon>;
@@ -72,8 +75,10 @@ private:
 /// Two faces are in one component if they share a welded edge.
 /// The solid does not change after construction. Faces are shared and can belong to more than one solid.
 ///
-/// The next steps add the face BVH (lazy per component), the welded loops, IsClosed,
-/// ContainsPoint and the construction from boolean results. They use the private Build function.
+/// The face trees are BVHs that the solid builds on first use: one for each component and one over the components.
+/// The build needs no lock, because one job at a time uses a solid. A tree changes no visible state of the solid.
+/// The next steps add the welded loops, IsClosed, ContainsPoint and the construction from boolean results.
+/// They use the private Build function.
 class PLUGIN_RBFXCSG_API CsgSolid : public RefCounted
 {
 public:
@@ -118,6 +123,22 @@ public:
     /// Return the component of each face.
     ea::span<const unsigned> GetFaceComponents() const { return {faceComponents_.data(), faceComponents_.size()}; }
 
+    /// Return true if the bounds of the solid overlap the box within epsilon.
+    bool BoundsOverlap(const Vector3& min, const Vector3& max, float epsilon) const;
+    /// Return the BVH over the component bounds. It is built on first use.
+    /// Only one thread at a time can use a solid, because this function needs no lock.
+    const CsgFaceBvh& GetComponentTree() const;
+    /// Return the BVH over the faces of a component. It is built on first use and then kept.
+    /// Only one thread at a time can use a solid, because this function needs no lock.
+    const CsgFaceBvh& GetFaceTree(unsigned component) const;
+    /// Return a BVH that holds every face of the component near the box.
+    ///
+    /// If the full face tree exists, or if most faces are near, the result is the full tree.
+    /// Otherwise the function builds a small tree over the near faces and stores it in the temporary.
+    /// The caller keeps the temporary alive while it uses the result.
+    const CsgFaceBvh& GetNearFaces(unsigned component, const Vector3& min, const Vector3& max, float epsilon,
+        ea::unique_ptr<CsgFaceBvh>& temporary) const;
+
 private:
     /// Take the faces and build the triangles, the bounds and the components.
     void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
@@ -138,6 +159,9 @@ private:
     Vector3 boundsMax_;
     ea::vector<Vector3> componentMin_;
     ea::vector<Vector3> componentMax_;
+    // Lazy caches. Logically the solid is immutable. Only one job at a time uses a solid, so there is no lock.
+    mutable ea::unique_ptr<CsgFaceBvh> componentTree_;
+    mutable ea::vector<ea::unique_ptr<CsgFaceBvh>> faceTrees_;
 };
 
 } // namespace Urho3D

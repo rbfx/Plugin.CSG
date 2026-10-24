@@ -4,6 +4,7 @@
 
 #include "Urho3D/CSG/CsgSolid.h"
 
+#include "Urho3D/CSG/CsgFaceBvh.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include <Urho3D/Core/Profiler.h>
 
@@ -178,8 +179,8 @@ struct Junction
     int id_{};
 };
 
-/// Finds the welded points near an edge. The points are sorted along their longest axis on first use.
-/// The next steps can replace this index with the face BVH.
+/// Finds the welded points near an edge. A BVH over the points answers the box query.
+/// The tree is built on first use.
 class JunctionFinder
 {
 public:
@@ -193,87 +194,43 @@ public:
     void Collect(int from, int to, ea::vector<Junction>& cuts)
     {
         cuts.clear();
-        if (!built_)
-            BuildIndex();
+        if (!points_)
+        {
+            // The tree leaves out a point with a NaN coordinate. Such a point is never near an edge.
+            const ea::span<const Vector3> positions = welder_.GetPositions();
+            points_ = ea::make_unique<CsgFaceBvh>(positions, positions);
+            stack_.reserve(64);
+        }
 
         const Vector3 start = welder_.GetPosition(from);
         const Vector3 end = welder_.GetPosition(to);
-        const Vector3 boxMin = MinOf(start, end);
-        const Vector3 boxMax = MaxOf(start, end);
         const Vector3 span = end - start;
         const float spanLengthSquared = span.LengthSquared();
         const float toleranceSquared = tolerance_ * tolerance_;
 
-        const float low = boxMin.Data()[axis_] - tolerance_;
-        const float high = boxMax.Data()[axis_] + tolerance_;
-        const unsigned count = keys_.size();
-        for (unsigned i = ea::lower_bound(keys_.begin(), keys_.end(), low) - keys_.begin(); i < count && keys_[i] <= high;
-             ++i)
+        points_->CollectBox(MinOf(start, end), MaxOf(start, end), tolerance_, nearby_, stack_);
+        for (const int item : nearby_)
         {
-            const int item = order_[i];
             if (item == from || item == to)
                 continue;
             const Vector3& point = welder_.GetPosition(item);
-            if (point.x_ < boxMin.x_ - tolerance_ || point.x_ > boxMax.x_ + tolerance_
-                || point.y_ < boxMin.y_ - tolerance_ || point.y_ > boxMax.y_ + tolerance_
-                || point.z_ < boxMin.z_ - tolerance_ || point.z_ > boxMax.z_ + tolerance_)
-                continue;
             const float t = (point - start).DotProduct(span) / spanLengthSquared;
             if (t <= 0.0f || t >= 1.0f)
                 continue;
             if ((point - (start + span * t)).LengthSquared() <= toleranceSquared)
                 cuts.push_back({t, item});
         }
+        // The id breaks a tie, so the order does not depend on the order of the tree.
         ea::sort(cuts.begin(), cuts.end(),
             [](const Junction& a, const Junction& b) { return a.t_ < b.t_ || (a.t_ == b.t_ && a.id_ < b.id_); });
     }
 
 private:
-    void BuildIndex()
-    {
-        built_ = true;
-        const unsigned count = welder_.Count();
-        Vector3 min(INF, INF, INF);
-        Vector3 max(-INF, -INF, -INF);
-        for (const Vector3& point : welder_.GetPositions())
-        {
-            min = MinOf(min, point);
-            max = MaxOf(max, point);
-        }
-        axis_ = 0;
-        for (int i = 1; i < 3; ++i)
-        {
-            if (max.Data()[i] - min.Data()[i] > max.Data()[axis_] - min.Data()[axis_])
-                axis_ = i;
-        }
-        // A point with a NaN coordinate never passes the box test. It must not enter the sort,
-        // because a NaN key breaks the strict weak order of the comparator.
-        const int axis = axis_;
-        order_.reserve(count);
-        for (unsigned i = 0; i < count; ++i)
-        {
-            const Vector3& point = welder_.GetPosition(static_cast<int>(i));
-            if (point.x_ == point.x_ && point.y_ == point.y_ && point.z_ == point.z_)
-                order_.push_back(static_cast<int>(i));
-        }
-        ea::sort(order_.begin(), order_.end(),
-            [this, axis](int a, int b)
-            {
-                const float ka = welder_.GetPosition(a).Data()[axis];
-                const float kb = welder_.GetPosition(b).Data()[axis];
-                return ka < kb || (ka == kb && a < b);
-            });
-        keys_.resize(order_.size());
-        for (unsigned i = 0; i < order_.size(); ++i)
-            keys_[i] = welder_.GetPosition(order_[i]).Data()[axis];
-    }
-
     const CsgPointWelder& welder_;
     float tolerance_{};
-    bool built_{};
-    int axis_{};
-    ea::vector<int> order_;
-    ea::vector<float> keys_;
+    ea::unique_ptr<CsgFaceBvh> points_;
+    ea::vector<int> nearby_;
+    ea::vector<int> stack_;
 };
 
 /// Disjoint sets of faces with union by rank.
@@ -565,6 +522,59 @@ CsgSolid::CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon)
 
 CsgSolid::~CsgSolid() = default;
 
+bool CsgSolid::BoundsOverlap(const Vector3& min, const Vector3& max, float epsilon) const
+{
+    return boundsMin_.x_ <= max.x_ + epsilon && min.x_ <= boundsMax_.x_ + epsilon
+        && boundsMin_.y_ <= max.y_ + epsilon && min.y_ <= boundsMax_.y_ + epsilon
+        && boundsMin_.z_ <= max.z_ + epsilon && min.z_ <= boundsMax_.z_ + epsilon;
+}
+
+const CsgFaceBvh& CsgSolid::GetComponentTree() const
+{
+    if (!componentTree_)
+        componentTree_ = ea::make_unique<CsgFaceBvh>(
+            ea::span<const Vector3>(componentMin_.data(), componentMin_.size()),
+            ea::span<const Vector3>(componentMax_.data(), componentMax_.size()));
+    return *componentTree_;
+}
+
+const CsgFaceBvh& CsgSolid::GetFaceTree(unsigned component) const
+{
+    ea::unique_ptr<CsgFaceBvh>& tree = faceTrees_[component];
+    if (!tree)
+    {
+        tree = ea::make_unique<CsgFaceBvh>(GetFaceMin(), GetFaceMax(),
+            ea::span<const unsigned>(componentFaces_.data() + componentStart_[component],
+                componentStart_[component + 1] - componentStart_[component]));
+    }
+    return *tree;
+}
+
+const CsgFaceBvh& CsgSolid::GetNearFaces(unsigned component, const Vector3& min, const Vector3& max, float epsilon,
+    ea::unique_ptr<CsgFaceBvh>& temporary) const
+{
+    if (faceTrees_[component])
+        return *faceTrees_[component];
+    const unsigned begin = componentStart_[component];
+    const unsigned faceCount = componentStart_[component + 1] - begin;
+    const Vector3 low(min.x_ - epsilon, min.y_ - epsilon, min.z_ - epsilon);
+    const Vector3 high(max.x_ + epsilon, max.y_ + epsilon, max.z_ + epsilon);
+    ea::vector<unsigned> nearFaces;
+    for (unsigned i = begin; i < begin + faceCount; ++i)
+    {
+        const unsigned face = componentFaces_[i];
+        const Vector3& faceMin = faceMin_[face];
+        const Vector3& faceMax = faceMax_[face];
+        if (faceMin.x_ <= high.x_ && faceMin.y_ <= high.y_ && faceMin.z_ <= high.z_ && faceMax.x_ >= low.x_
+            && faceMax.y_ >= low.y_ && faceMax.z_ >= low.z_)
+            nearFaces.push_back(face);
+    }
+    if (nearFaces.size() * 2 > faceCount)
+        return GetFaceTree(component);
+    temporary = ea::make_unique<CsgFaceBvh>(GetFaceMin(), GetFaceMax(), ea::span<const unsigned>(nearFaces.data(), nearFaces.size()));
+    return *temporary;
+}
+
 ea::vector<CsgPolygon> CsgSolid::ToPolygons() const
 {
     ea::vector<CsgPolygon> result;
@@ -675,6 +685,9 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
         componentMin_[component] = min;
         componentMax_[component] = max;
     }
+    faceTrees_.clear();
+    faceTrees_.resize(componentCount);
+    componentTree_.reset();
 }
 
 } // namespace Urho3D
