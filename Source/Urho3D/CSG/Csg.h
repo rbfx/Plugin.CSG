@@ -8,6 +8,7 @@
 #include "Urho3D/CSG/_Plugin.h"
 #include <Urho3D/Container/Ptr.h>
 #include <Urho3D/Math/Matrix3x4.h>
+#include <Urho3D/Plugins/PluginApplication.h>
 
 #include <EASTL/utility.h>
 #include <EASTL/span.h>
@@ -20,7 +21,6 @@ class Context;
 class CsgBsp;
 class CsgTriangulatedModel;
 class Model;
-class PluginApplication;
 struct CsgPolygon;
 struct ResourceRefList;
 
