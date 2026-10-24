@@ -452,8 +452,8 @@ static bool IsSimplePolygonInPlane(const CsgPolygon& poly, float epsilon, const 
         return false;
 
     const float eps = ea::max(epsilon, 1e-6f);
-    // Keep self-intersection tolerance aligned with the vertex quantization epsilon used elsewhere.
-    const float intersectionEps = eps;
+    // The self-intersection tolerance is much smaller than the vertex quantization epsilon.
+    const float intersectionEps = ea::max(1e-9f, eps * 1e-5f);
     const float invEps = 1.0f / eps;
 
     ea::hash_map<IntVector3, unsigned> unique;
@@ -498,8 +498,8 @@ static bool IsSimplePolygonInPlane(
         return false;
 
     const float eps = ea::max(epsilon, 1e-6f);
-    // Keep self-intersection tolerance aligned with the vertex quantization epsilon used elsewhere.
-    const float intersectionEps = eps;
+    // The self-intersection tolerance is much smaller than the vertex quantization epsilon.
+    const float intersectionEps = ea::max(1e-9f, eps * 1e-5f);
     const float invEps = 1.0f / eps;
 
     ea::hash_map<IntVector3, unsigned> unique;
@@ -700,17 +700,20 @@ static unsigned ChooseNextVertex(const ea::vector<unsigned>& candidates, unsigne
     return best;
 }
 
-static bool TryExtractSingleLoopFromEdges(
-    const ea::vector<Vector2>& pos2, ea::hash_map<unsigned, ea::vector<unsigned>>& outgoing, ea::vector<unsigned>& outLoop)
+// The loop starts at the first inserted key of the outgoing map. This keeps the result independent of the hash order.
+static bool TryExtractSingleLoopFromEdges(const ea::vector<Vector2>& pos2,
+    ea::hash_map<unsigned, ea::vector<unsigned>>& outgoing, const ea::vector<unsigned>& outgoingOrder,
+    ea::vector<unsigned>& outLoop)
 {
     outLoop.clear();
-    if (outgoing.empty())
+    if (outgoing.empty() || outgoingOrder.empty())
         return false;
 
-    unsigned start = outgoing.begin()->first;
-    if (outgoing.begin()->second.empty())
+    const unsigned start = outgoingOrder.front();
+    const auto startIt = outgoing.find(start);
+    if (startIt == outgoing.end() || startIt->second.empty())
         return false;
-    unsigned next = outgoing.begin()->second.back();
+    const unsigned next = startIt->second.back();
     PopOutgoingEdge(outgoing, start, next);
 
     outLoop.push_back(start);
@@ -933,7 +936,9 @@ struct BoundaryCancellationBuilder
         return id;
     }
 
-    void AddDirectedEdges(const CsgPolygon& poly, ea::hash_map<uint64_t, unsigned>& directedCount)
+    // The order vector keeps the keys of the count map in insertion order.
+    void AddDirectedEdges(
+        const CsgPolygon& poly, ea::hash_map<uint64_t, unsigned>& directedCount, ea::vector<uint64_t>& directedOrder)
     {
         const unsigned n = poly.vertices_.size();
         for (unsigned i = 0; i < n; ++i)
@@ -943,7 +948,11 @@ struct BoundaryCancellationBuilder
             const unsigned id1 = GetId(poly.vertices_[i1]);
             if (id0 == id1)
                 continue;
-            directedCount[PackDirectedEdgeKey(id0, id1)] += 1;
+            const uint64_t key = PackDirectedEdgeKey(id0, id1);
+            unsigned& count = directedCount[key];
+            if (count == 0)
+                directedOrder.push_back(key);
+            count += 1;
         }
     }
 };
@@ -977,8 +986,10 @@ static bool TryMergeByBoundaryCancellation(
 
     ea::hash_map<uint64_t, unsigned> directedCount;
     directedCount.reserve((a.vertices_.size() + b.vertices_.size()) * 2u);
-    builder.AddDirectedEdges(aSplit, directedCount);
-    builder.AddDirectedEdges(bSplit, directedCount);
+    ea::vector<uint64_t> directedOrder;
+    directedOrder.reserve((a.vertices_.size() + b.vertices_.size()) * 2u);
+    builder.AddDirectedEdges(aSplit, directedCount, directedOrder);
+    builder.AddDirectedEdges(bSplit, directedCount, directedOrder);
 
     // Cancel opposite edges.
     ea::hash_set<uint64_t> visitedUndirected;
@@ -986,9 +997,9 @@ static bool TryMergeByBoundaryCancellation(
     ea::vector<CanceledEdge> boundaryEdges;
     boundaryEdges.reserve(directedCount.size());
 
-    for (const auto& it : directedCount)
+    // Iterate in insertion order, not in hash order.
+    for (const uint64_t key : directedOrder)
     {
-        const uint64_t key = it.first;
         const unsigned from = static_cast<unsigned>(key >> 32u);
         const unsigned to = static_cast<unsigned>(key & 0xffffffffu);
         const uint64_t und = PackUndirectedEdgeKey(from, to);
@@ -997,7 +1008,7 @@ static bool TryMergeByBoundaryCancellation(
         visitedUndirected.insert(und);
 
         const uint64_t rev = PackDirectedEdgeKey(to, from);
-        const unsigned cF = it.second;
+        const unsigned cF = directedCount.find(key)->second;
         const auto itRev = directedCount.find(rev);
         const unsigned cR = itRev != directedCount.end() ? itRev->second : 0u;
         if (cF == cR)
@@ -1025,11 +1036,17 @@ static bool TryMergeByBoundaryCancellation(
 
     ea::hash_map<unsigned, ea::vector<unsigned>> outgoing;
     outgoing.reserve(boundaryEdges.size() * 2u);
+    ea::vector<unsigned> outgoingOrder;
     for (const auto& e : boundaryEdges)
-        outgoing[e.from_].push_back(e.to_);
+    {
+        auto& targets = outgoing[e.from_];
+        if (targets.empty())
+            outgoingOrder.push_back(e.from_);
+        targets.push_back(e.to_);
+    }
 
     ea::vector<unsigned> loopIds;
-    if (!TryExtractSingleLoopFromEdges(pos2, outgoing, loopIds))
+    if (!TryExtractSingleLoopFromEdges(pos2, outgoing, outgoingOrder, loopIds))
         return false;
     if (!outgoing.empty())
         return false;
@@ -1431,26 +1448,6 @@ static bool MergeByFullEdgesToFixpoint(ea::vector<CsgPolygon>& group, float epsi
     }
 
     ea::vector<unsigned char> dirty(group.size(), 1);
-    const auto markAdjacentPolygonsDirty = [&](unsigned polyIndex)
-    {
-        if (polyIndex >= dirty.size())
-            return;
-
-        dirty[polyIndex] = 1;
-        for (const auto& edge : edgesByPoly[polyIndex])
-        {
-            const uint64_t revKey = PackDirectedEdgeKey(edge.toId_, edge.fromId_);
-            const auto it = edgesByDirected.find(revKey);
-            if (it == edgesByDirected.end())
-                continue;
-
-            for (const EdgeRef& ref : it->second)
-            {
-                if (ref.polyIndex_ < dirty.size())
-                    dirty[ref.polyIndex_] = 1;
-            }
-        }
-    };
 
     for (;;)
     {
@@ -1507,8 +1504,8 @@ static bool MergeByFullEdgesToFixpoint(ea::vector<CsgPolygon>& group, float epsi
                     mergedEver = true;
                     mergedThisRound = true;
 
-                    // Only the merged polygon and its edge-adjacent neighbors can gain new merge opportunities.
-                    markAdjacentPolygonsDirty(pi);
+                    // Conservative correctness: after a merge, any polygon may become eligible (rescan all).
+                    ea::fill(dirty.begin(), dirty.end(), static_cast<unsigned char>(1));
                     break;
                 }
 
@@ -1537,10 +1534,8 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
         *outPasses = 0;
 
     BoundingBox bbox;
-    unsigned totalVertices = 0;
     for (const auto& poly : polygons)
     {
-        totalVertices += poly.vertices_.size();
         for (const auto& v : poly.vertices_)
             bbox.Merge(v.GetPosition());
     }
@@ -1550,9 +1545,8 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
 
     const Vector3 size = bbox.Size();
     const float maxDim = ea::max(size.x_, ea::max(size.y_, size.z_));
-    const float cellsPerAxis = Clamp(Sqrt(static_cast<float>(ea::max(totalVertices, 1u))), 20.0f, 128.0f);
-    float cellSize = maxDim > 0.0f ? maxDim / cellsPerAxis : 1.0f;
-    cellSize = ea::max(cellSize, epsilon * 8.0f);
+    float cellSize = maxDim > 0.0f ? maxDim / 20.0f : 1.0f;
+    cellSize = ea::max(cellSize, epsilon * 10.0f);
 
     VertexGrid grid;
     grid.Init(cellSize);
@@ -1565,7 +1559,6 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
     unsigned pass = 0;
 
     ea::fixed_vector<Vector3, 32, true> candidates;
-    ea::hash_set<IntVector3> seenCandidates;
 
     const float invEps = 1.0f / ea::max(epsilon, 1e-6f);
 
@@ -1629,8 +1622,6 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
 
                 edgeDir /= edgeLen;
                 grid.Query(p0, p1, candidates);
-                seenCandidates.clear();
-                seenCandidates.reserve(candidates.size());
 
                 float bestT = edgeLen;
                 Vector3 bestPos;
@@ -1638,9 +1629,6 @@ static unsigned ResolveTJunctions(ea::vector<CsgPolygon>& polygons, float epsilo
 
                 for (const auto& pos : candidates)
                 {
-                    if (!seenCandidates.insert(QuantizePosition(pos, invEps)).second)
-                        continue;
-
                     const Vector3 vec = pos - p0;
                     const float t = vec.DotProduct(edgeDir);
 

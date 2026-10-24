@@ -397,7 +397,6 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(ea::vector<CsgPolygon> po
     {
         auto& polys = groups[sharedKey];
 
-        CsgSimplifyPolygons(polys, epsilon);
         if (polys.empty())
             continue;
 

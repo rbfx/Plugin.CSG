@@ -6,7 +6,7 @@
 
 #include "Urho3D/CSG/_Plugin.h"
 #include <Urho3D/Urho3D.h>
-#include "Urho3D/CSG/CsgBsp.h"
+#include "Urho3D/CSG/CsgPolygon.h"
 #include <Urho3D/Container/RefCounted.h>
 #include "Urho3D/CSG/CsgCommon.h"
 #include <Urho3D/Container/Ptr.h>

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "Urho3D/CSG/CsgBsp.h"
+#include "Urho3D/CSG/CsgPolygon.h"
 #include <Urho3D/Math/Matrix3x4.h>
 #include <Urho3D/Math/Vector3.h>
 
