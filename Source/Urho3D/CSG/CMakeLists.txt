@@ -22,6 +22,7 @@ set (SOURCE_FILES
     CsgCommon.h
     CsgComponent.h
     CsgExact.h
+    CsgFlatMap.h
     CsgExactFilter.h
     CsgOptimization.h
     CsgRoot.h

@@ -10,6 +10,7 @@ set (SOURCE_FILES
     TestGeometry.cpp
     TestGeometry.h
     TestCommon.cpp
+    TestFlatMap.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
