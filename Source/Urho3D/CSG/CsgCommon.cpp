@@ -26,6 +26,16 @@ Vector3 MakePerpendicular(const Vector3& normal)
     return normal.CrossProduct(Vector3::UP).NormalizedOrDefault(Vector3::RIGHT);
 }
 
+uint64_t CsgDirectedKey(unsigned a, unsigned b)
+{
+    return (static_cast<uint64_t>(a) << 32) | static_cast<uint64_t>(b);
+}
+
+uint64_t CsgUndirectedKey(unsigned a, unsigned b)
+{
+    return a < b ? CsgDirectedKey(a, b) : CsgDirectedKey(b, a);
+}
+
 ModelVertex LerpModelVertex(const ModelVertex& a, const ModelVertex& b, float t)
 {
     ModelVertex result;

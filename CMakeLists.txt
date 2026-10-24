@@ -23,3 +23,10 @@ create_symlink(${RbfxCsg_SOURCE_DIR}/Project/Data ${CMAKE_BINARY_DIR}/../Project
 # CSG plugin.
 add_subdirectory(Source/Urho3D/CSG)
 
+
+# CSG tests.
+option (RBFXCSG_TESTING "Build CSG tests" ON)
+if (RBFXCSG_TESTING AND NOT EMSCRIPTEN AND NOT MOBILE AND NOT UWP AND NOT IOS)
+    enable_testing ()
+    add_subdirectory (Source/Tests)
+endif ()
