@@ -60,6 +60,15 @@ struct CsgRoot::BuildJob
 
     ea::vector<SharedPtr<Model>> sourceModels_;
     ea::vector<ResourceRefList> sourceMaterials_;
+
+    /// Solid of the earlier build. If set, the job evaluates only the new brushes on it.
+    SharedPtr<const CsgSolid> cachedSolid_;
+    /// Number of root children that the cached solid already contains.
+    unsigned reusedRootChildren_{};
+    /// Fingerprints of the root children. Empty if the tree is not flat.
+    ea::vector<BrushFingerprint> flatBrushes_;
+    /// Final solid of the job. The worker thread sets it.
+    SharedPtr<const CsgSolid> resultSolid_;
 };
 
 namespace
@@ -298,12 +307,17 @@ void CsgRoot::OnMarkedDirty(Node* node)
 void CsgRoot::OnModelChanged()
 {
     BaseClassName::OnModelChanged();
+    cachedSolid_ = nullptr;
+    cachedBrushes_.clear();
     RequestRebuild();
 }
 
 void CsgRoot::OnMaterialsChanged()
 {
     BaseClassName::OnMaterialsChanged();
+    // The canonical shared keys of the cached solid depend on the materials.
+    cachedSolid_ = nullptr;
+    cachedBrushes_.clear();
     RequestRebuild();
 }
 
@@ -733,19 +747,18 @@ void CsgRoot::Rebuild()
     job->sourceModels_.push_back(job->baseModel_);
     job->sourceMaterials_.push_back(job->baseMaterials_);
 
-    // Extract base polygons in the root frame on the main thread.
-    // The root frame has the world scale of the root but not its rotation or position.
+    // The base polygons are extracted only if the cached solid cannot be reused.
     job->rootStep_.model_ = job->baseModel_;
     job->rootStep_.materials_ = job->baseMaterials_;
     job->rootStep_.meshId_ = 0;
-    job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
-        job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
 
     // Build operation tree recursively starting from root node.
     const Matrix3x4 rootFrame = Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_) *
         node_->GetWorldTransform().Inverse();
     if (!BuildOperationTree(job->rootStep_, node_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
     {
+        cachedBrushes_.clear();
+        cachedSolid_ = nullptr;
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
         ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
@@ -753,6 +766,37 @@ void CsgRoot::Rebuild()
         return;
     }
 
+    // Reuse only for an append to a flat tree. A same-length rebuild may reflect an in-place
+    // model edit even if the resource object and the brush references are the same.
+    if (TryCaptureFlatBrushes(job->rootStep_, job->flatBrushes_) && cachedSolid_ && job->baseModel_ == cachedBaseModel_
+        && job->epsilon_ == cachedEpsilon_ && job->metricScale_ == cachedMetricScale_
+        && cachedBrushes_.size() < job->flatBrushes_.size())
+    {
+        bool prefixUnchanged = true;
+        for (unsigned i = 0; i < cachedBrushes_.size(); ++i)
+        {
+            const CsgBrush* brush = job->flatBrushes_[i].brush_;
+            if (cachedBrushes_[i] != job->flatBrushes_[i] || !brush || brush->IsDirty())
+            {
+                prefixUnchanged = false;
+                break;
+            }
+        }
+        if (prefixUnchanged)
+        {
+            job->cachedSolid_ = cachedSolid_;
+            job->reusedRootChildren_ = cachedBrushes_.size();
+        }
+    }
+    if (!job->cachedSolid_)
+    {
+        // The root frame has the world scale of the root but not its rotation or position.
+        job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
+            job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
+    }
+
+    // The map is built from the full source tables. A key of a reused brush stays stable: a new model
+    // joins an older group or opens a new group, and the representative of a group is its first member.
     const ea::hash_map<unsigned, unsigned> canonicalSharedKeys =
         BuildCanonicalSharedKeyMap(job->sourceModels_, job->sourceMaterials_);
     const auto canonicalizeStep = [&](auto&& self, BrushStep& step) -> void
@@ -777,9 +821,14 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
     (void)threadIndex;
 
     HiresTimer timer;
-    SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
-    CheckSolidRange(*solid, job->outOfRange_);
-    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->outOfRange_);
+    SharedPtr<const CsgSolid> solid = job->cachedSolid_;
+    if (!solid)
+    {
+        solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
+        CheckSolidRange(*solid, job->outOfRange_);
+    }
+    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->outOfRange_, job->reusedRootChildren_);
+    job->resultSolid_ = solid;
 
     SharedPtr<CsgTriangulatedModel> triangulated;
     if (solid && solid->FaceCount() != 0)
@@ -847,10 +896,35 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
             ea::span<const ResourceRefList* const>(sourceMaterials.data(), sourceMaterials.size()), &materials);
     }
 
-    root->ApplyResultToOutput(renderableModel, materials);
-
     // Acknowledge changes.
     root->AcknowledgeBrushes(job->rootStep_);
+
+    // Keep the solid as a base for an append only if the tree is flat.
+    root->cachedSolid_ = job->flatBrushes_.size() == job->rootStep_.children_.size() ? job->resultSolid_ : nullptr;
+    root->cachedBaseModel_ = job->baseModel_;
+    root->cachedEpsilon_ = job->epsilon_;
+    root->cachedMetricScale_ = job->metricScale_;
+    root->cachedSourceModels_ = job->sourceModels_;
+    root->cachedSourceMaterials_ = job->sourceMaterials_;
+    root->cachedBrushes_.clear();
+    if (root->cachedSolid_)
+        root->cachedBrushes_ = job->flatBrushes_;
+
+    if (root->autoApplyResults_)
+        root->ApplyResultToOutput(renderableModel, materials);
+    else
+        root->pendingResults_.push_back({renderableModel, materials, job->buildId_});
+}
+
+bool CsgRoot::ApplyPendingResult()
+{
+    if (pendingResults_.empty())
+        return false;
+
+    const PendingBuildResult result = ea::move(pendingResults_.front());
+    pendingResults_.erase(pendingResults_.begin());
+    ApplyResultToOutput(result.model_, result.materials_);
+    return true;
 }
 
 StaticModel* CsgRoot::GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache)
@@ -975,11 +1049,26 @@ bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x
     return !rootStep.children_.empty();
 }
 
-void CsgRoot::EvaluateOperationTree(
-    const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon, bool& outOfRange)
+bool CsgRoot::TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushFingerprint>& output)
 {
-    for (const BrushStep& child : step.children_)
+    for (const BrushStep& child : rootStep.children_)
     {
+        if (!child.children_.empty() || !child.brush_)
+        {
+            output.clear();
+            return false;
+        }
+        output.push_back({child.brush_, child.model_, child.transform_, child.meshId_, child.op_});
+    }
+    return true;
+}
+
+void CsgRoot::EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
+    bool& outOfRange, unsigned startChild)
+{
+    for (unsigned childIndex = startChild; childIndex < step.children_.size(); ++childIndex)
+    {
+        const BrushStep& child = step.children_[childIndex];
         SharedPtr<const CsgSolid> childSolid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(child.polygons_), epsilon);
         CheckSolidRange(*childSolid, outOfRange);
         if (!child.children_.empty())

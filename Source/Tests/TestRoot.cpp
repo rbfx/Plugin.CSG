@@ -148,6 +148,41 @@ BoundingBox BuildDifferenceBounds(Context* context, Scene* scene, WorkQueue* wor
     return output->GetModel()->GetBoundingBox();
 }
 
+/// Create a root node with the box A base model and no delay for the rebuild.
+CsgRoot* MakeBoxRoot(Scene* scene, const ea::string& nodeName)
+{
+    auto* root = scene->CreateChild(nodeName)->CreateComponent<CsgRoot>();
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxA.mdl"));
+    root->SetDeferredDelaySec(0.0f);
+    return root;
+}
+
+/// Add a brush with the box B model under the node of the root.
+CsgBrush* AddBoxBrush(CsgRoot* root, const ea::string& name, const Vector3& position, CsgOperation op)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<CsgBrush>();
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Run the work queue and the time for a fixed number of frames.
+void RunFrames(CsgRoot* root, WorkQueue* workQueue, unsigned frames)
+{
+    auto* time = root->GetSubsystem<Time>();
+    for (unsigned i = 0; i < frames; ++i)
+    {
+        workQueue->CompleteAll();
+        time->BeginFrame(1.0f / 60.0f);
+        root->GetScene()->Update(1.0f / 60.0f);
+        time->EndFrame();
+    }
+}
+
+StaticModel* GetOutput(CsgRoot* root) { return root->GetNode()->GetComponent<StaticModel>(); }
+
 } // namespace
 
 TEST_CASE("CsgRoot builds a model from a root and a brush")
@@ -258,4 +293,109 @@ TEST_CASE("CsgSolid from an empty operand is empty and works in a boolean", "[ro
         REQUIRE(result);
         CHECK((result->FaceCount() != 0) == (op != CsgOperation::Intersection));
     }
+}
+
+TEST_CASE("CsgRoot appends a brush on the cached solid", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // Build with one brush. The root caches the solid.
+    CsgRoot* root = MakeBoxRoot(scene, "Appended");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    const unsigned oneBrushIndices = CountIndices(GetOutput(root)->GetModel());
+
+    // Append a second brush. The rebuild evaluates only the new brush.
+    AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    const Model* appended = GetOutput(root)->GetModel();
+    REQUIRE(appended);
+    CHECK(CountIndices(appended) > oneBrushIndices);
+    CHECK(appended->GetBoundingBox().max_.x_ == Catch::Approx(4.0f).margin(1e-3f));
+
+    // A fresh root without a cache must give the same output.
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    AddBoxBrush(fresh, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    AddBoxBrush(fresh, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    fresh->Rebuild();
+    REQUIRE(RunUntilOutput(fresh, workQueue, 1000));
+    const Model* expected = GetOutput(fresh)->GetModel();
+    CHECK(CountIndices(appended) == CountIndices(expected));
+    CHECK(appended->GetNumGeometries() == expected->GetNumGeometries());
+    CHECK(appended->GetBoundingBox().min_.Equals(expected->GetBoundingBox().min_, 1e-3f));
+    CHECK(appended->GetBoundingBox().max_.Equals(expected->GetBoundingBox().max_, 1e-3f));
+}
+
+TEST_CASE("CsgRoot does not reuse the cached solid after a prefix brush moves", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Moved");
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    const unsigned cutIndices = CountIndices(GetOutput(root)->GetModel());
+    CHECK(cutIndices > 36);
+
+    // Move the first brush away from the base and append a brush that cuts nothing.
+    cut->GetNode()->SetPosition(Vector3(10.0f, 10.0f, 10.0f));
+    AddBoxBrush(root, "Far", Vector3(-10.0f, -10.0f, -10.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+
+    // Neither brush touches the base, so the output is the plain box. A stale solid keeps the cut.
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+}
+
+TEST_CASE("CsgRoot queues a result while auto-apply is off", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Pending");
+    CHECK(root->GetAutoApplyResults());
+    root->SetAutoApplyResults(false);
+    CHECK(!root->GetAutoApplyResults());
+    CHECK(!root->HasPendingResult());
+    CHECK(root->GetPendingResultRevision() == 0);
+
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+
+    CHECK(root->HasPendingResult());
+    CHECK(root->GetPendingResultRevision() == root->GetRebuildRevision());
+    StaticModel* output = GetOutput(root);
+    // A rebuild without brushes applies the plain base model at once. The queued result is not in the output.
+    CHECK((!output || !output->GetModel() || CountIndices(output->GetModel()) == 36));
+
+    CHECK(root->ApplyPendingResult());
+    output = GetOutput(root);
+    REQUIRE(output);
+    REQUIRE(output->GetModel());
+    CHECK(CountIndices(output->GetModel()) > 36);
+    CHECK(!root->HasPendingResult());
+    CHECK(!root->ApplyPendingResult());
 }

@@ -11,6 +11,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include "Urho3D/CSG/CsgComponent.h"
+#include "Urho3D/CSG/CsgSolid.h"
 #include "Urho3D/CSG/_Plugin.h"
 #include <Urho3D/Core/Variant.h>
 #include <Urho3D/Graphics/Material.h>
@@ -76,6 +77,20 @@ public:
     float GetEpsilon() const { return epsilon_; }
     /// Set epsilon used by polygon operations. Values below 0 are clamped to 0.
     void SetEpsilon(float value);
+    /// Get whether a finished rebuild goes to the output model at once.
+    bool GetAutoApplyResults() const { return autoApplyResults_; }
+    /// Set whether a finished rebuild goes to the output model at once.
+    /// If false, the root queues each finished result. Call ApplyPendingResult to apply the oldest one.
+    void SetAutoApplyResults(bool value) { autoApplyResults_ = value; }
+    /// Get the current rebuild revision. The revision changes when an input changes.
+    unsigned GetRebuildRevision() const { return rebuildRequestId_; }
+    /// Return true if a finished result waits to be applied.
+    bool HasPendingResult() const { return !pendingResults_.empty(); }
+    /// Get the revision of the oldest finished result. Return 0 if no result is pending.
+    unsigned GetPendingResultRevision() const { return pendingResults_.empty() ? 0u : pendingResults_.front().revision_; }
+    /// Apply the oldest finished result that the root queued while auto-apply was off.
+    /// Return true if the root applied a result.
+    bool ApplyPendingResult();
 
 protected:
     void ApplyAttributes() override;
@@ -100,6 +115,31 @@ private:
     struct BrushStep;
     struct BuildJob;
 
+    /// Data of a brush that decides if a cached solid is valid for this brush.
+    struct BrushFingerprint
+    {
+        WeakPtr<CsgBrush> brush_;
+        SharedPtr<Model> model_;
+        Matrix3x4 transform_{Matrix3x4::IDENTITY};
+        unsigned meshId_{};
+        CsgOperation op_{};
+
+        bool operator==(const BrushFingerprint& rhs) const
+        {
+            return brush_ == rhs.brush_ && model_ == rhs.model_ && transform_ == rhs.transform_ && meshId_ == rhs.meshId_
+                && op_ == rhs.op_;
+        }
+        bool operator!=(const BrushFingerprint& rhs) const { return !(*this == rhs); }
+    };
+
+    /// Finished result that waits for ApplyPendingResult.
+    struct PendingBuildResult
+    {
+        SharedPtr<Model> model_;
+        ResourceRefList materials_;
+        unsigned revision_{};
+    };
+
     /// Return persistent output StaticModel on the same node.
     StaticModel* GetOrCreateOutputStaticModel();
     void UpdateSubscriptions();
@@ -116,8 +156,10 @@ private:
 
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
-    static void EvaluateOperationTree(
-        const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon, bool& outOfRange);
+    static void EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
+        bool& outOfRange, unsigned startChild = 0);
+    /// Copy the fingerprints of the brushes. Return false if the tree is not flat or a brush is dead.
+    static bool TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushFingerprint>& output);
     static void AcknowledgeBrushes(const BrushStep& step);
 
     float deferredDelaySec_{0.1f};
@@ -129,6 +171,17 @@ private:
     unsigned rebuildRequestId_{1};
     unsigned rebuildInFlightId_{};
     bool rebuildInFlight_{};
+    bool autoApplyResults_{true};
+    ea::vector<PendingBuildResult> pendingResults_;
+
+    /// Solid of the last applied build. It is the base for an append of brushes.
+    SharedPtr<const CsgSolid> cachedSolid_;
+    SharedPtr<Model> cachedBaseModel_;
+    float cachedEpsilon_{};
+    Vector3 cachedMetricScale_{Vector3::ONE};
+    ea::vector<SharedPtr<Model>> cachedSourceModels_;
+    ea::vector<ResourceRefList> cachedSourceMaterials_;
+    ea::vector<BrushFingerprint> cachedBrushes_;
 
     WeakPtr<StaticModel> output_;
     WeakPtr<Node> tempNode_;
