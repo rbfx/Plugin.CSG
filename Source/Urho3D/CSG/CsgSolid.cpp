@@ -1309,7 +1309,69 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
 
     {
         URHO3D_PROFILE("CsgSolid::Triangulate");
+
+        // Two planar faces can share a run of several edges only along the line where their planes meet, so a
+        // vertex whose edges both lead to the same neighbor is straight up to rounding. If both faces clipped it as
+        // an ear, both would claim the sliver under the run and share a diagonal. Both faces of such a pair have
+        // more than three vertices, so only those enter the list. The list is sorted by edge and by face.
+        // For an edge in many faces, the last face is the owner.
+        struct EdgeOwner
+        {
+            Vector3 from_;
+            Vector3 to_;
+            unsigned face_;
+        };
+        const auto hasNan = [](const Vector3& v) { return v.x_ != v.x_ || v.y_ != v.y_ || v.z_ != v.z_; };
+        const auto less = [](const Vector3& a, const Vector3& b)
+        {
+            if (a.x_ != b.x_)
+                return a.x_ < b.x_;
+            if (a.y_ != b.y_)
+                return a.y_ < b.y_;
+            return a.z_ < b.z_;
+        };
+        const auto edgeLess = [&](const EdgeOwner& a, const EdgeOwner& b)
+        {
+            if (less(a.from_, b.from_) || less(b.from_, a.from_))
+                return less(a.from_, b.from_);
+            if (less(a.to_, b.to_) || less(b.to_, a.to_))
+                return less(a.to_, b.to_);
+            return a.face_ < b.face_;
+        };
+        ea::vector<EdgeOwner> edgeOwners;
+        for (unsigned i = 0; i < faceCount; ++i)
+        {
+            const auto& vertices = faces_[i]->vertices_;
+            if (vertices.size() <= 3 || (i < origins.size() && origins[i].solid_))
+                continue;
+            for (unsigned k = 0; k < vertices.size(); ++k)
+            {
+                const Vector3 from = vertices[k].GetPosition();
+                const Vector3 to = vertices[(k + 1) % vertices.size()].GetPosition();
+                // A position with a NaN is never equal to another one.
+                if (!hasNan(from) && !hasNan(to))
+                    edgeOwners.push_back({from, to, i});
+            }
+        }
+        ea::sort(edgeOwners.begin(), edgeOwners.end(), edgeLess);
+        // Return the owner of the edge from `from` to `to`, or -1.
+        const auto findOwner = [&](const Vector3& from, const Vector3& to) -> int
+        {
+            if (hasNan(from) || hasNan(to))
+                return -1;
+            // The first entry after the edge. The entry before it is the last face of the edge.
+            const auto it = ea::upper_bound(edgeOwners.begin(), edgeOwners.end(), EdgeOwner{from, to, ~0u}, edgeLess);
+            if (it == edgeOwners.begin())
+                return -1;
+            const EdgeOwner& owner = *(it - 1);
+            const bool match = !less(owner.from_, from) && !less(from, owner.from_) && !less(owner.to_, to)
+                && !less(to, owner.to_);
+            return match ? static_cast<int>(owner.face_) : -1;
+        };
+
         ea::vector<unsigned> scratch;
+        ea::vector<bool> straight;
+        CsgTriangulationScratch triangulationScratch;
         unsigned triangleCount = 0;
         for (unsigned i = 0; i < faceCount; ++i)
         {
@@ -1351,11 +1413,38 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
             if (vertices.size() < 3)
                 continue;
             if (vertices.size() == 3)
-                appendTriangle(0, 1, 2);
-            // The triangulator of step 10 gives the shared runs and tells if it needed the fallback.
-            // That port adds the faces that needed the fallback to fallbackFaces_.
-            else if (CsgTriangulatePolygon(*faces_[i], scratch))
             {
+                appendTriangle(0, 1, 2);
+                continue;
+            }
+
+            // Only the later face of a pair refrains from clipping a vertex of a shared run. This is enough to keep
+            // the sliver from being claimed twice, and it leaves the earlier face free to triangulate as it must.
+            const unsigned vertexCount = vertices.size();
+            straight.resize(vertexCount);
+            bool anyStraight = false;
+            for (unsigned k = 0; k < vertexCount; ++k)
+            {
+                const Vector3 previous = vertices[(k + vertexCount - 1) % vertexCount].GetPosition();
+                const Vector3 current = vertices[k].GetPosition();
+                const Vector3 next = vertices[(k + 1) % vertexCount].GetPosition();
+                bool interior = false;
+                if (!edgeOwners.empty())
+                {
+                    const int before = findOwner(current, previous);
+                    const int after = before >= 0 ? findOwner(next, current) : -1;
+                    interior = before >= 0 && before == after && static_cast<unsigned>(before) < i;
+                }
+                straight[k] = interior;
+                anyStraight |= interior;
+            }
+            bool clean = true;
+            if (CsgTriangulatePolygon(*faces_[i], scratch,
+                    anyStraight ? ea::span<const bool>(straight.data(), vertexCount) : ea::span<const bool>(), clean,
+                    triangulationScratch))
+            {
+                if (!clean)
+                    fallbackFaces_.push_back(i);
                 for (unsigned t = 0; t + 2 < scratch.size(); t += 3)
                     appendTriangle(scratch[t], scratch[t + 1], scratch[t + 2]);
             }

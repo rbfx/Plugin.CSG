@@ -223,8 +223,10 @@ public:
     /// Copy the triangles of a face as face-local vertex indices. Return false if there is no triangle.
     ///
     /// A face that needed the fallback of the triangulator is triangulated again without the shared runs.
-    /// The fallback set is empty until the triangulator port of step 10.
     bool CopyTriangles(unsigned face, ea::vector<unsigned>& output) const;
+    /// Return true if the stored triangles of the face needed the fallback of the triangulator.
+    /// Then the triangles can be flat or inverted.
+    bool IsFallbackFace(unsigned face) const;
     /// Return a point on the first triangle of the face. A face without triangles gives its first corner.
     Vector3 FaceSample(unsigned face) const;
     /// Return a point on the first face of the component.
@@ -310,9 +312,6 @@ private:
     bool CopyOrigin(unsigned index, const CsgFaceOrigin& origin);
     /// Compute the bounds of the solid and of the components from the bounds of the faces. Reset the trees.
     void BuildBounds();
-    /// Return true if the face is in the fallback set.
-    bool IsFallbackFace(unsigned face) const;
-
     ea::vector<CsgSharedPolygon> faces_;
     // Face f owns the triangles [triangleStart_[f], triangleStart_[f + 1]). A triangle has three entries in
     // trianglePositions_ and in triangleVertices_. The second array has the face-local vertex indices.
@@ -326,7 +325,7 @@ private:
     ea::vector<unsigned> componentFaces_;
     ea::vector<unsigned> faceComponents_;
     // Faces whose triangulation needed the fallback of the triangulator, in ascending order.
-    // The triangulator port of step 10 fills the set. Until then it is empty.
+    // The build fills the set. The solid keeps a face in the set if a boolean copies the face.
     ea::vector<unsigned> fallbackFaces_;
     // Corners welded by identical position. The booleans of the next steps use them.
     ea::unique_ptr<CsgWeldedLoops> exact_;

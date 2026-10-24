@@ -16,6 +16,7 @@ set (SOURCE_FILES
     TestCorefine.cpp
     TestSplit.cpp
     TestBoolean.cpp
+    TestTriangulation.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.

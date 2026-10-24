@@ -329,9 +329,9 @@ TEST_CASE("Boolean takes the default epsilon for an epsilon that is not positive
 }
 
 
-// The union of boxes with coplanar faces has faces with a zero-width spike. The triangulator cannot triangulate
-// such a face, so the next corefinement does not see it. The triangulator port of step 10 must fix this.
-TEST_CASE("Boolean of a result with coplanar faces is associative", "[boolean][!mayfail]")
+// The union of boxes with coplanar faces has faces with a zero-width spike. The old triangulator could not triangulate
+// such a face. The triangulator gives it triangles, so the next corefinement sees it.
+TEST_CASE("Boolean of a result with coplanar faces is associative", "[boolean]")
 {
     const auto a = MakeBox(Vector3::ZERO, 1);
     const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2);
@@ -343,4 +343,25 @@ TEST_CASE("Boolean of a result with coplanar faces is associative", "[boolean][!
     CHECK(Volume(left) == Catch::Approx(Volume(right)).margin(VOLUME_TOLERANCE));
     CheckClosed(left);
     CheckClosed(right);
+}
+
+// Rotation rounds the positions, so the vertices of a coplanar face are on a shared edge only within rounding.
+TEST_CASE("Boolean of a rotated result with coplanar faces is associative", "[boolean]")
+{
+    for (const float angle : {30.0f, 12.5f, 77.0f, 4.5f, 9.4f, 14.3f})
+    {
+        CAPTURE(angle);
+        const Quaternion world(angle, Vector3::ONE.Normalized());
+        const Quaternion own(37.0f, Vector3(1.0f, 1.0f, 0.0f).Normalized());
+        const auto a = MakeBox(world * Vector3::ZERO, 1, Matrix3x4(Vector3::ZERO, world, 1.0f));
+        const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, Matrix3x4(Vector3::ZERO, world, 1.0f));
+        const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
+
+        const auto left = Run(Run(a, b, CsgOperation::Union), c, CsgOperation::Union);
+        const auto right = Run(a, Run(b, c, CsgOperation::Union), CsgOperation::Union);
+        CHECK(Volume(right) == Catch::Approx(16.051433).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(left) == Catch::Approx(Volume(right)).margin(VOLUME_TOLERANCE));
+        CheckClosed(left);
+        CheckClosed(right);
+    }
 }
