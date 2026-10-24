@@ -9,9 +9,11 @@
 #include <Urho3D/IO/Log.h>
 
 #include <EASTL/algorithm.h>
+#include <EASTL/sort.h>
 #include <EASTL/unique_ptr.h>
 
 #include <cmath>
+#include <limits>
 
 namespace Urho3D
 {
@@ -473,6 +475,795 @@ void Corefinement::EdgeCrossings(
         ea::reverse(output.begin(), output.end());
 }
 
+namespace
+{
+
+/// Compare as double.CompareTo does in the C# reference: a NaN is smaller than any number and equal to a NaN.
+int CompareDouble(double a, double b)
+{
+    if (a < b)
+        return -1;
+    if (a > b)
+        return 1;
+    if (a == b)
+        return 0;
+    if (std::isnan(a))
+        return std::isnan(b) ? 0 : -1;
+    return 1;
+}
+
+struct Point2
+{
+    double x_{};
+    double y_{};
+};
+
+double DistanceSquared(const Point2& a, const Point2& b)
+{
+    return (a.x_ - b.x_) * (a.x_ - b.x_) + (a.y_ - b.y_) * (a.y_ - b.y_);
+}
+
+double Cross2(const Point2& o, const Point2& a, const Point2& b)
+{
+    return (a.x_ - o.x_) * (b.y_ - o.y_) - (a.y_ - o.y_) * (b.x_ - o.x_);
+}
+
+bool SegmentsCross(const Point2& a0, const Point2& a1, const Point2& b0, const Point2& b1)
+{
+    const double d1 = Cross2(a0, a1, b0);
+    const double d2 = Cross2(a0, a1, b1);
+    const double d3 = Cross2(b0, b1, a0);
+    const double d4 = Cross2(b0, b1, a1);
+    return (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0);
+}
+
+uint64_t DirectedEdgeKey(int from, int to)
+{
+    return CsgDirectedKey(static_cast<unsigned>(from), static_cast<unsigned>(to));
+}
+
+/// Hash of a sorted id list. Equal lists give equal hashes.
+uint64_t HashSortedIds(const int* ids, int count)
+{
+    const CsgPackedKeyHash mix;
+    uint64_t hash = static_cast<uint64_t>(count) * 0x9E3779B97F4A7C15ULL;
+    for (int i = 0; i < count; ++i)
+        hash = mix(hash + static_cast<uint32_t>(ids[i]) + 0x9E3779B97F4A7C15ULL);
+    return hash;
+}
+
+/// A full turn in double. The macro M_PI is a float constant.
+constexpr double TAU = 6.283185307179586;
+
+float ClampFloat(float value, float min, float max)
+{
+    if (value < min)
+        return min;
+    if (value > max)
+        return max;
+    return value;
+}
+
+/// Divides one triangle along its curve segments into regions of global ids.
+///
+/// The regions are traced over directed edges. The boundary pieces run in the face direction. The curve segments run
+/// in both directions. Each directed edge belongs to one region. Each closed curve inside the triangle gives an island
+/// and a hole. Two bridges join a hole to the region around it. All the memory comes from the scratch.
+class TriangleSplitter
+{
+public:
+    TriangleSplitter(const Corefinement& core, const Mesh& mesh, CsgScratch& scratch)
+        : core_(core)
+        , mesh_(mesh)
+        , scratch_(scratch)
+        , s_(scratch.split_)
+    {
+    }
+
+    /// Split the triangle. Return false if the trace of the regions does not close.
+    /// The regions are in the scratch: regions_ holds the loops of the pool and regionBridged_ the flags.
+    bool Split(int face, int triangle, const CsgSegmentLists& segments)
+    {
+        s_.boundary_.clear();
+        s_.boundaryOut_.Clear();
+        s_.curve_.Clear();
+        s_.boundaryEdges_.Clear();
+        s_.visited_.Clear();
+        s_.pool_.Clear();
+        s_.cycles_.clear();
+        s_.closedCycles_.clear();
+        s_.holes_.clear();
+        s_.regions_.clear();
+        s_.regionBridged_.clear();
+        failed_ = false;
+        holeCount_ = 0;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            const int from = mesh_.triangleIds_[triangle * 3 + i];
+            const int to = mesh_.triangleIds_[triangle * 3 + (i + 1) % 3];
+            s_.boundary_.push_back(core_.Global(mesh_, from));
+            core_.EdgeCrossings(mesh_, from, to, scratch_, s_.edgePoints_);
+            s_.boundary_.insert(s_.boundary_.end(), s_.edgePoints_.begin(), s_.edgePoints_.end());
+        }
+        const int boundaryCount = static_cast<int>(s_.boundary_.size());
+        // A face may visit a vertex twice, so a vertex can have more than one boundary edge leaving it.
+        for (int i = 0; i < boundaryCount; ++i)
+        {
+            const int from = s_.boundary_[i];
+            const int to = s_.boundary_[(i + 1) % boundaryCount];
+            s_.boundaryOut_.Add(from, to);
+            s_.boundaryEdges_.Insert(DirectedEdgeKey(from, to));
+        }
+        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+        {
+            const CsgSegment& segment = segments.At(node);
+            s_.curve_.Add(segment.p_, segment.q_);
+            s_.curve_.Add(segment.q_, segment.p_);
+        }
+
+        const CsgPolygon& source = *mesh_.solid_.GetFace(face);
+        MakeAxesFromNormal(source.plane_.normal_, axisU_, axisV_);
+        edgeCount_ = static_cast<int>(s_.boundaryEdges_.Size()) + segments.Count(triangle) * 2;
+        for (int i = 0; i < boundaryCount; ++i)
+            Trace(s_.boundary_[i], s_.boundary_[(i + 1) % boundaryCount]);
+        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+        {
+            const CsgSegment& segment = segments.At(node);
+            Trace(segment.p_, segment.q_);
+            Trace(segment.q_, segment.p_);
+        }
+        if (failed_ || static_cast<int>(s_.visited_.Size()) != edgeCount_)
+            return false;
+
+        ClassifyClosedCycles();
+        s_.regions_ = s_.cycles_;
+        s_.regionBridged_.assign(s_.regions_.size(), 0);
+        if (!s_.holes_.empty())
+        {
+            holeCount_ = static_cast<int>(s_.holes_.size());
+            if (!PlaceHoles())
+                return false;
+        }
+        return true;
+    }
+
+    /// Number of holes joined by bridges in the last split.
+    int HoleCount() const { return holeCount_; }
+
+private:
+    using List = CsgAdjacency::List;
+
+    Vector2 ProjectFloat(int id) const
+    {
+        const Vector3 p = PointPosition(core_, id);
+        return Vector2(p.DotProduct(axisU_), p.DotProduct(axisV_));
+    }
+
+    static double Angle(const Vector2& d) { return std::atan2(static_cast<double>(d.y_), static_cast<double>(d.x_)); }
+
+    /// Twice the signed area in the face plane. The math is in double, relative to the first vertex.
+    double SignedArea(int loop) const
+    {
+        const int* cycle = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        const Vector3 origin = PointPosition(core_, cycle[0]);
+        const auto along = [&origin](const Vector3& p, const Vector3& axis)
+        {
+            return (static_cast<double>(p.x_) - origin.x_) * axis.x_ + (static_cast<double>(p.y_) - origin.y_) * axis.y_
+                + (static_cast<double>(p.z_) - origin.z_) * axis.z_;
+        };
+        double area = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const Vector3 p = PointPosition(core_, cycle[i]);
+            const Vector3 q = PointPosition(core_, cycle[(i + 1) % count]);
+            area += along(p, axisU_) * along(q, axisV_) - along(q, axisU_) * along(p, axisV_);
+        }
+        return area;
+    }
+
+    void Trace(int from, int to)
+    {
+        if (s_.visited_.Contains(DirectedEdgeKey(from, to)))
+            return;
+        s_.cycle_.clear();
+        bool touchesBoundary = false;
+        int u = from;
+        int v = to;
+        while (s_.visited_.Insert(DirectedEdgeKey(u, v)))
+        {
+            s_.cycle_.push_back(u);
+            touchesBoundary |= s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v));
+            const int w = Next(u, v);
+            if (w < 0)
+            {
+                failed_ = true;
+                break;
+            }
+            u = v;
+            v = w;
+            if (static_cast<int>(s_.cycle_.size()) > edgeCount_)
+                break;
+        }
+        if (s_.cycle_.size() < 3)
+            return;
+        const int loop = s_.pool_.Add(s_.cycle_.data(), static_cast<int>(s_.cycle_.size()));
+        (touchesBoundary ? s_.cycles_ : s_.closedCycles_).push_back(loop);
+    }
+
+    /// The edge that follows u -> v around the region on its left. Return -1 if there is none.
+    int Next(int u, int v)
+    {
+        const List* branches = s_.curve_.Find(v);
+        const List* outs = s_.boundaryOut_.Find(v);
+        if (outs)
+        {
+            if (outs->count_ == 1 && !branches)
+                return s_.boundaryOut_.At(outs->head_).to_;
+            if (outs->count_ == 1 && branches->count_ == 1)
+            {
+                return s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)) ? s_.curve_.At(branches->head_).to_
+                                                                         : s_.boundaryOut_.At(outs->head_).to_;
+            }
+            return Turn(u, v, outs, branches);
+        }
+        if (!branches)
+            return -1;
+        if (branches->count_ == 2)
+        {
+            const int first = s_.curve_.At(branches->head_).to_;
+            return first == u ? s_.curve_.At(s_.curve_.At(branches->head_).next_).to_ : first;
+        }
+        return Turn(u, v, nullptr, branches);
+    }
+
+    /// Among the outgoing directions at v, the first one clockwise from the way back to u.
+    /// The outgoing directions are the boundary targets, then the curve targets.
+    int Turn(int u, int v, const List* outs, const List* branches)
+    {
+        const Vector2 origin = ProjectFloat(v);
+        const double back = Angle(ProjectFloat(u) - origin);
+        const int total = (outs ? outs->count_ : 0) + (branches ? branches->count_ : 0);
+        int best = -1;
+        int firstOutgoing = -1;
+        double bestSweep = std::numeric_limits<double>::infinity();
+        const auto visit = [&](const CsgAdjacency& adjacency, const List* list)
+        {
+            if (!list)
+                return;
+            for (int node = list->head_; node >= 0; node = adjacency.At(node).next_)
+            {
+                const int w = adjacency.At(node).to_;
+                if (firstOutgoing < 0)
+                    firstOutgoing = w;
+                if (w == u && total > 1)
+                    continue;
+                double sweep = back - Angle(ProjectFloat(w) - origin);
+                // The angles are in [-pi, pi], so two additions are enough. The bound keeps a NaN away from a hang.
+                for (int k = 0; k < 4 && sweep <= 0.0; ++k)
+                    sweep += TAU;
+                if (sweep < bestSweep)
+                {
+                    bestSweep = sweep;
+                    best = w;
+                }
+            }
+        };
+        visit(s_.boundaryOut_, outs);
+        visit(s_.curve_, branches);
+        return best >= 0 ? best : firstOutgoing;
+    }
+
+    /// A closed curve inside the triangle is traced once in each direction. The turn that encloses more area is the
+    /// island and the other is the hole around it, even when rounding gives both the same sign.
+    void ClassifyClosedCycles()
+    {
+        const int closedCount = static_cast<int>(s_.closedCycles_.size());
+        if (closedCount == 0)
+            return;
+        s_.closedSorted_.clear();
+        s_.closedSortedStart_.clear();
+        s_.closedHash_.clear();
+        s_.groupHead_.clear();
+        s_.groupTail_.clear();
+        s_.groupSameHash_.clear();
+        s_.groupByHash_.Clear();
+        s_.memberNext_.assign(closedCount, -1);
+        // The groups keep the order of their first member. A group holds the cycles with the same sorted ids.
+        for (int k = 0; k < closedCount; ++k)
+        {
+            const int loop = s_.closedCycles_[k];
+            const int count = s_.pool_.Count(loop);
+            const int start = static_cast<int>(s_.closedSorted_.size());
+            s_.closedSortedStart_.push_back(start);
+            s_.closedSorted_.insert(s_.closedSorted_.end(), s_.pool_.Data(loop), s_.pool_.Data(loop) + count);
+            ea::sort(s_.closedSorted_.begin() + start, s_.closedSorted_.end());
+            const uint64_t hash = HashSortedIds(s_.closedSorted_.data() + start, count);
+            s_.closedHash_.push_back(hash);
+
+            bool existed = false;
+            int& chainHead = s_.groupByHash_.FindOrAdd(hash, existed);
+            int found = -1;
+            int last = -1;
+            if (existed)
+            {
+                for (int g = chainHead; g >= 0 && found < 0; g = s_.groupSameHash_[g])
+                {
+                    last = g;
+                    const int representative = s_.groupHead_[g];
+                    const int representativeCount = s_.pool_.Count(s_.closedCycles_[representative]);
+                    if (representativeCount == count
+                        && ea::equal(s_.closedSorted_.begin() + start, s_.closedSorted_.begin() + start + count,
+                            s_.closedSorted_.begin() + s_.closedSortedStart_[representative]))
+                        found = g;
+                }
+            }
+            if (found >= 0)
+            {
+                s_.memberNext_[s_.groupTail_[found]] = k;
+                s_.groupTail_[found] = k;
+                continue;
+            }
+            const int group = static_cast<int>(s_.groupHead_.size());
+            s_.groupHead_.push_back(k);
+            s_.groupTail_.push_back(k);
+            s_.groupSameHash_.push_back(-1);
+            if (existed)
+                s_.groupSameHash_[last] = group;
+            else
+                chainHead = group;
+        }
+
+        for (unsigned g = 0; g < s_.groupHead_.size(); ++g)
+        {
+            const int head = s_.groupHead_[g];
+            const int second = s_.memberNext_[head];
+            if (second >= 0 && s_.memberNext_[second] < 0)
+            {
+                const int m0 = s_.closedCycles_[head];
+                const int m1 = s_.closedCycles_[second];
+                if (SignedArea(m0) >= SignedArea(m1))
+                {
+                    s_.cycles_.push_back(m0);
+                    s_.holes_.push_back(m1);
+                }
+                else
+                {
+                    s_.cycles_.push_back(m1);
+                    s_.holes_.push_back(m0);
+                }
+                continue;
+            }
+            for (int k = head; k >= 0; k = s_.memberNext_[k])
+            {
+                const int loop = s_.closedCycles_[k];
+                (SignedArea(loop) > 0.0 ? s_.cycles_ : s_.holes_).push_back(loop);
+            }
+        }
+    }
+
+    // ---- Holes. The math is in double, relative to the first vertex of the first hole.
+
+    Point2 ProjectDouble(int id) const
+    {
+        const Vector3 p = PointPosition(core_, id);
+        const double dx = static_cast<double>(p.x_) - origin_.x_;
+        const double dy = static_cast<double>(p.y_) - origin_.y_;
+        const double dz = static_cast<double>(p.z_) - origin_.z_;
+        return {dx * axisU_.x_ + dy * axisU_.y_ + dz * axisU_.z_, dx * axisV_.x_ + dy * axisV_.y_ + dz * axisV_.z_};
+    }
+
+    double Area(int loop) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        double area = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const Point2 p = ProjectDouble(ids[i]);
+            const Point2 q = ProjectDouble(ids[(i + 1) % count]);
+            area += p.x_ * q.y_ - q.x_ * p.y_;
+        }
+        return area * 0.5;
+    }
+
+    bool Contains(int loop, const Point2& point) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        bool inside = false;
+        for (int i = 0, j = count - 1; i < count; j = i++)
+        {
+            const Point2 p = ProjectDouble(ids[i]);
+            const Point2 q = ProjectDouble(ids[j]);
+            if ((p.y_ > point.y_) != (q.y_ > point.y_)
+                && point.x_ < (q.x_ - p.x_) * (point.y_ - p.y_) / (q.y_ - p.y_) + p.x_)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    bool Blocked(int loop, const Point2& from, const Point2& to, int endA, int endB) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        for (int i = 0; i < count; ++i)
+        {
+            const int p = ids[i];
+            const int q = ids[(i + 1) % count];
+            if (p == endA || p == endB || q == endA || q == endB)
+                continue;
+            if (SegmentsCross(from, to, ProjectDouble(p), ProjectDouble(q)))
+                return true;
+        }
+        return false;
+    }
+
+    /// Index pair of the closest vertices of the loops.
+    ea::pair<int, int> Nearest(int outer, int hole) const
+    {
+        const int* outerIds = s_.pool_.Data(outer);
+        const int* holeIds = s_.pool_.Data(hole);
+        ea::pair<int, int> best(0, 0);
+        double bestDistance = std::numeric_limits<double>::infinity();
+        for (int i = 0; i < s_.pool_.Count(outer); ++i)
+        {
+            for (int j = 0; j < s_.pool_.Count(hole); ++j)
+            {
+                const double distance = DistanceSquared(ProjectDouble(outerIds[i]), ProjectDouble(holeIds[j]));
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = ea::make_pair(i, j);
+                }
+            }
+        }
+        return best;
+    }
+
+    /// Return the vertex of the outer loop that the vertex from of the hole sees, nearest first. Return -1 if none.
+    int Visible(int outer, int hole, int from, int avoidOuter, int avoidHole)
+    {
+        const int* outerIds = s_.pool_.Data(outer);
+        const int outerCount = s_.pool_.Count(outer);
+        const int* holeIds = s_.pool_.Data(hole);
+        const Point2 start = ProjectDouble(holeIds[from]);
+        s_.order_.resize(outerCount);
+        s_.keys_.resize(outerCount);
+        for (int i = 0; i < outerCount; ++i)
+        {
+            s_.order_[i] = i;
+            s_.keys_[i] = DistanceSquared(ProjectDouble(outerIds[i]), start);
+        }
+        const ea::vector<double>& keys = s_.keys_;
+        SortIds(s_.order_, s_.merge_, [&keys](int x, int y) { return CompareDouble(keys[x], keys[y]); });
+        for (const int candidate : s_.order_)
+        {
+            if (candidate == avoidOuter)
+                continue;
+            const Point2 target = ProjectDouble(outerIds[candidate]);
+            // Holes not yet joined also lie in the region, so a bridge must not cut through them either.
+            bool blocked = Blocked(outer, start, target, outerIds[candidate], holeIds[from])
+                || Blocked(hole, start, target, outerIds[candidate], holeIds[from]);
+            for (int other = pendingFrom_; !blocked && other < static_cast<int>(s_.holes_.size()); ++other)
+                blocked = Blocked(s_.holes_[other], start, target, outerIds[candidate], holeIds[from]);
+            if (blocked)
+                continue;
+            if (avoidOuter >= 0
+                && SegmentsCross(start, target, ProjectDouble(holeIds[avoidHole]), ProjectDouble(outerIds[avoidOuter])))
+                continue;
+            const Point2 midpoint{(start.x_ + target.x_) * 0.5, (start.y_ + target.y_) * 0.5};
+            if (!Contains(outer, midpoint) || Contains(hole, midpoint))
+                continue;
+            return candidate;
+        }
+        return -1;
+    }
+
+    /// Two bridges from the extreme hole vertices along the first axis to visible region vertices.
+    /// On success the two new loops are in temp1_ and temp2_.
+    bool Bridge(int outer, int hole)
+    {
+        const int* outerIds = s_.pool_.Data(outer);
+        const int outerCount = s_.pool_.Count(outer);
+        const int* holeIds = s_.pool_.Data(hole);
+        const int holeSize = s_.pool_.Count(hole);
+        int low = 0;
+        int high = 0;
+        for (int i = 1; i < holeSize; ++i)
+        {
+            const double x = ProjectDouble(holeIds[i]).x_;
+            if (x < ProjectDouble(holeIds[low]).x_)
+                low = i;
+            if (x > ProjectDouble(holeIds[high]).x_)
+                high = i;
+        }
+        if (low == high)
+            return false;
+        const int lowTarget = Visible(outer, hole, low, -1, -1);
+        if (lowTarget < 0)
+            return false;
+        const int highTarget = Visible(outer, hole, high, lowTarget, low);
+        if (highTarget < 0)
+            return false;
+
+        // The targets and the indices are valid, so each walk below ends at its target.
+        s_.temp1_.clear();
+        for (int k = lowTarget;; k = (k + 1) % outerCount)
+        {
+            s_.temp1_.push_back(outerIds[k]);
+            if (k == highTarget)
+                break;
+        }
+        for (int k = high;; k = (k + 1) % holeSize)
+        {
+            s_.temp1_.push_back(holeIds[k]);
+            if (k == low)
+                break;
+        }
+        s_.temp2_.clear();
+        for (int k = highTarget;; k = (k + 1) % outerCount)
+        {
+            s_.temp2_.push_back(outerIds[k]);
+            if (k == lowTarget)
+                break;
+        }
+        for (int k = low;; k = (k + 1) % holeSize)
+        {
+            s_.temp2_.push_back(holeIds[k]);
+            if (k == high)
+                break;
+        }
+        return true;
+    }
+
+    /// Return true if the sorted unique ids of the loop equal the twin set.
+    bool SameSetAsTwin(const int* ids, int count)
+    {
+        s_.twinTest_.assign(ids, ids + count);
+        ea::sort(s_.twinTest_.begin(), s_.twinTest_.end());
+        s_.twinTest_.erase(ea::unique(s_.twinTest_.begin(), s_.twinTest_.end()), s_.twinTest_.end());
+        return s_.twinTest_ == s_.twin_;
+    }
+
+    /// Join each hole to the region around it with two bridges. If no pair of bridges is clear, one bridge makes a
+    /// region that visits it twice. Return false if there is no region to join.
+    bool PlaceHoles()
+    {
+        if (s_.regions_.empty())
+            return false;
+        origin_ = PointPosition(core_, s_.pool_.Data(s_.holes_[0])[0]);
+
+        // Outer holes first, so a hole inside an island is placed after the island exists. The sort is stable.
+        const int holeTotal = static_cast<int>(s_.holes_.size());
+        s_.keys_.resize(holeTotal);
+        s_.order_.resize(holeTotal);
+        for (int i = 0; i < holeTotal; ++i)
+        {
+            s_.keys_[i] = std::fabs(Area(s_.holes_[i]));
+            s_.order_[i] = i;
+        }
+        {
+            const ea::vector<double>& keys = s_.keys_;
+            SortIds(s_.order_, s_.merge_, [&keys](int x, int y) { return CompareDouble(keys[y], keys[x]); });
+        }
+        s_.temp1_.resize(holeTotal);
+        for (int i = 0; i < holeTotal; ++i)
+            s_.temp1_[i] = s_.holes_[s_.order_[i]];
+        s_.holes_ = s_.temp1_;
+
+        for (int h = 0; h < holeTotal; ++h)
+        {
+            // The holes after this one are the pending holes of the C# reference. Their order does not matter.
+            pendingFrom_ = h + 1;
+            const int hole = s_.holes_[h];
+            const int* holeIds = s_.pool_.Data(hole);
+            const int holeSize = s_.pool_.Count(hole);
+            // The island traced from the same curve has the same vertices. The hole never belongs inside it.
+            s_.twin_.assign(holeIds, holeIds + holeSize);
+            ea::sort(s_.twin_.begin(), s_.twin_.end());
+            s_.twin_.erase(ea::unique(s_.twin_.begin(), s_.twin_.end()), s_.twin_.end());
+            // Probe just to the left of the first hole edge, which is the side of the region around it.
+            const Point2 a = ProjectDouble(holeIds[0]);
+            const Point2 b = ProjectDouble(holeIds[1]);
+            const Point2 probe{(a.x_ + b.x_) * 0.5 - (b.y_ - a.y_) * 1e-3, (a.y_ + b.y_) * 0.5 + (b.x_ - a.x_) * 1e-3};
+            int index = -1;
+            int fallback = -1;
+            double smallest = std::numeric_limits<double>::infinity();
+            for (int r = 0; r < static_cast<int>(s_.regions_.size()); ++r)
+            {
+                const int region = s_.regions_[r];
+                if (s_.pool_.Count(region) == holeSize && SameSetAsTwin(s_.pool_.Data(region), holeSize))
+                    continue;
+                if (fallback < 0)
+                    fallback = r;
+                if (!Contains(region, probe))
+                    continue;
+                const double area = std::fabs(Area(region));
+                if (area < smallest)
+                {
+                    smallest = area;
+                    index = r;
+                }
+            }
+            if (index < 0)
+                index = ea::max(fallback, 0);
+            const int outer = s_.regions_[index];
+            if (Bridge(outer, hole))
+            {
+                const int first = s_.pool_.Add(s_.temp1_.data(), static_cast<int>(s_.temp1_.size()));
+                const int second = s_.pool_.Add(s_.temp2_.data(), static_cast<int>(s_.temp2_.size()));
+                s_.regions_[index] = first;
+                s_.regionBridged_[index] = 1;
+                s_.regions_.push_back(second);
+                s_.regionBridged_.push_back(1);
+            }
+            else
+            {
+                const ea::pair<int, int> nearest = Nearest(outer, hole);
+                const int* outerIds = s_.pool_.Data(outer);
+                const int outerCount = s_.pool_.Count(outer);
+                s_.temp1_.clear();
+                for (int k = 0; k <= outerCount; ++k)
+                    s_.temp1_.push_back(outerIds[(nearest.first + k) % outerCount]);
+                for (int k = 0; k <= holeSize; ++k)
+                    s_.temp1_.push_back(holeIds[(nearest.second + k) % holeSize]);
+                s_.regions_[index] = s_.pool_.Add(s_.temp1_.data(), static_cast<int>(s_.temp1_.size()));
+                s_.regionBridged_[index] = 1;
+            }
+        }
+        return true;
+    }
+
+    const Corefinement& core_;
+    const Mesh& mesh_;
+    CsgScratch& scratch_;
+    CsgSplitScratch& s_;
+    Vector3 axisU_;
+    Vector3 axisV_;
+    int edgeCount_{};
+    bool failed_{};
+    int holeCount_{};
+    int pendingFrom_{};
+    Vector3 origin_;
+};
+
+/// Interpolate the attributes at a point of the triangle a, b, c. The weights are clamped into the triangle.
+ModelVertex Barycentric(const ModelVertex& a, const ModelVertex& b, const ModelVertex& c, const Vector3& point)
+{
+    const Vector3 pa = a.GetPosition();
+    const Vector3 pb = b.GetPosition();
+    const Vector3 pc = c.GetPosition();
+    const Vector3 normal = (pb - pa).CrossProduct(pc - pa);
+    const float area = normal.LengthSquared();
+    if (area <= 0.0f)
+        return a;
+    const float wb = ClampFloat((point - pa).CrossProduct(pc - pa).DotProduct(normal) / area, 0.0f, 1.0f);
+    const float wc = ClampFloat((pb - pa).CrossProduct(point - pa).DotProduct(normal) / area, 0.0f, 1.0f - wb);
+    const float wa = 1.0f - wb - wc;
+    // Blend b and c first, then blend the pair with a.
+    const ModelVertex pair = wb + wc > 0.0f ? LerpModelVertex(b, c, wc / (wb + wc)) : b;
+    return LerpModelVertex(a, pair, 1.0f - wa);
+}
+
+} // namespace
+
+Vector3 PointPosition(const Corefinement& core, int id)
+{
+    if (id >= core.CrossingBase())
+        return core.CrossingAt(id).position_;
+    return id >= core.b_.offset_ ? core.b_.loops_.positions_[id - core.b_.offset_] : core.a_.loops_.positions_[id];
+}
+
+bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const int* ids, int count, CsgPolygon& output)
+{
+    const CsgPolygon& source = *mesh.solid_.GetFace(face);
+    const unsigned start = mesh.loops_.vertexStart_[face];
+    const unsigned end = mesh.loops_.vertexStart_[face + 1];
+    const unsigned vertexCount = static_cast<unsigned>(source.vertices_.size());
+    if (vertexCount == 0 || end - start != vertexCount)
+        return false;
+
+    // The local index of a welded id in the face. The search is bounded by the corners of the face.
+    const auto localVertex = [&](int id) -> int
+    {
+        for (unsigned i = start; i < end; ++i)
+        {
+            if (mesh.loops_.ids_[i] == id)
+                return static_cast<int>(i - start);
+        }
+        return -1;
+    };
+
+    ea::vector<ModelVertex> vertices;
+    vertices.reserve(count);
+    const auto triangleVertices = mesh.solid_.GetTriangleVertices();
+    for (int i = 0; i < count; ++i)
+    {
+        const int id = ids[i];
+        if (id < 0 || id >= core.CrossingBase() + static_cast<int>(core.crossings_.size()))
+            return false;
+        if (id < core.CrossingBase())
+        {
+            const int local = localVertex(id - mesh.offset_);
+            if (local < 0)
+                return false;
+            vertices.push_back(source.vertices_[local]);
+            continue;
+        }
+        const Crossing& crossing = core.CrossingAt(id);
+        ModelVertex vertex;
+        if (crossing.key_.edgeInSecond_ == mesh.isSecond_)
+        {
+            // On an edge of this face, or on a diagonal of its triangulation.
+            const int low = localVertex(crossing.key_.low_);
+            const int high = localVertex(crossing.key_.high_);
+            if (low < 0 || high < 0)
+                return false;
+            vertex = LerpModelVertex(source.vertices_[low], source.vertices_[high], static_cast<float>(crossing.t_));
+        }
+        else
+        {
+            const int triangle = crossing.key_.triangle_;
+            if (triangle < 0 || triangle >= static_cast<int>(mesh.triangleFace_.size())
+                || mesh.triangleFace_[triangle] != face)
+                return false;
+            const unsigned a = triangleVertices[triangle * 3];
+            const unsigned b = triangleVertices[triangle * 3 + 1];
+            const unsigned c = triangleVertices[triangle * 3 + 2];
+            if (a >= vertexCount || b >= vertexCount || c >= vertexCount)
+                return false;
+            vertex = Barycentric(source.vertices_[a], source.vertices_[b], source.vertices_[c], crossing.position_);
+        }
+        vertex.SetPosition(crossing.position_);
+        vertices.push_back(vertex);
+    }
+    output = CsgPolygon(ea::move(vertices), source.shared_);
+    output.plane_ = source.plane_;
+    return true;
+}
+
+void Corefinement::SplitFaces(CsgScratch& scratch)
+{
+    SplitOperand(a_, segmentsA_, scratch, splitA_);
+    SplitOperand(b_, segmentsB_, scratch, splitB_);
+}
+
+void Corefinement::SplitOperand(
+    const Mesh& mesh, const CsgSegmentLists& segments, CsgScratch& scratch, CsgSplitResult& result) const
+{
+    const int triangleCount = static_cast<int>(mesh.triangleFace_.size());
+    result.Reset(static_cast<unsigned>(triangleCount));
+    TriangleSplitter splitter(*this, mesh, scratch);
+    const CsgSplitScratch& s = scratch.split_;
+    for (int triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        result.triangleRegionStart_[triangle] = result.RegionCount();
+        // A collapsed triangle has no segments. A triangle without segments stays whole.
+        if (segments.Count(triangle) == 0 || mesh.IsCollapsed(triangle))
+            continue;
+        if (!splitter.Split(mesh.triangleFace_[triangle], triangle, segments))
+        {
+            result.state_[triangle] = static_cast<uint8_t>(CsgSplitResult::State::Failed);
+            continue;
+        }
+        result.state_[triangle] = static_cast<uint8_t>(CsgSplitResult::State::Split);
+        result.holeCount_[triangle] = splitter.HoleCount();
+        for (unsigned r = 0; r < s.regions_.size(); ++r)
+        {
+            const int loop = s.regions_[r];
+            const int count = s.pool_.Count(loop);
+            if (count < 3)
+                continue;
+            result.ids_.insert(result.ids_.end(), s.pool_.Data(loop), s.pool_.Data(loop) + count);
+            result.regionStart_.push_back(static_cast<int>(result.ids_.size()));
+            result.bridged_.push_back(s.regionBridged_[r]);
+        }
+    }
+    result.triangleRegionStart_[triangleCount] = result.RegionCount();
+}
+
 CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSolid& b)
 {
     CsgCorefineTestResult result;
@@ -519,6 +1310,61 @@ CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSo
         result.curveEdges_.push_back(ea::make_pair(
             entry.value_.first - core.CrossingBase(), entry.value_.second - core.CrossingBase()));
     }
+    return result;
+}
+
+namespace
+{
+
+void FillSplitOperand(const Corefinement& core, const Mesh& mesh, const CsgSplitResult& split, CsgSplitTestOperand& output)
+{
+    output.triangleState_ = split.state_;
+    output.holeCount_ = split.holeCount_;
+    const int triangleCount = static_cast<int>(mesh.triangleFace_.size());
+    for (int triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        for (int r = split.triangleRegionStart_[triangle]; r < split.triangleRegionStart_[triangle + 1]; ++r)
+        {
+            CsgSplitTestRegion& region = output.regions_.emplace_back();
+            region.triangle_ = triangle;
+            region.ids_.assign(split.RegionIds(r), split.RegionIds(r) + split.RegionSize(r));
+            region.bridged_ = split.bridged_[r] != 0;
+            CsgPolygon polygon;
+            if (!RegionPolygon(core, mesh, mesh.triangleFace_[triangle], region.ids_.data(),
+                    static_cast<int>(region.ids_.size()), polygon))
+                continue;
+            region.polygon_ = polygon;
+            for (const ModelVertex& vertex : polygon.vertices_)
+                region.polygonPositions_.push_back(vertex.GetPosition());
+        }
+    }
+}
+
+} // namespace
+
+CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
+{
+    CsgSplitTestResult result;
+    if (a.FaceCount() == 0 || b.FaceCount() == 0)
+        return result;
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    core.SplitFaces(scratch);
+
+    result.outOfRange_ = core.outOfRange_;
+    result.vertexCountA_ = core.a_.VertexCount();
+    result.vertexCountB_ = core.b_.VertexCount();
+    result.crossingBase_ = core.CrossingBase();
+    const int total = core.CrossingBase() + static_cast<int>(core.crossings_.size());
+    result.positions_.reserve(total);
+    for (int id = 0; id < total; ++id)
+        result.positions_.push_back(PointPosition(core, id));
+    for (const auto& entry : core.curveEdges_)
+        result.curveEdges_.push_back(entry.value_);
+    FillSplitOperand(core, core.a_, core.splitA_, result.a_);
+    FillSplitOperand(core, core.b_, core.splitB_, result.b_);
     return result;
 }
 

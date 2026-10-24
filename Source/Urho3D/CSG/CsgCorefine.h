@@ -13,6 +13,7 @@
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Math/Vector3.h>
 
+#include <EASTL/span.h>
 #include <EASTL/utility.h>
 #include <EASTL/vector.h>
 
@@ -123,6 +124,166 @@ private:
     ea::vector<CsgSegment> pool_;
 };
 
+/// Pool of loops of global ids. Each loop is a span of one shared vector.
+/// An Add can move the ids. Do not pass a pointer into the pool to Add, and do not keep a Data pointer over an Add.
+struct CsgLoopPool
+{
+    struct Span
+    {
+        int start_{};
+        int count_{};
+    };
+
+    void Clear()
+    {
+        ids_.clear();
+        spans_.clear();
+    }
+
+    /// Copy the ids to the pool. Return the index of the new loop.
+    int Add(const int* data, int count)
+    {
+        const int index = static_cast<int>(spans_.size());
+        spans_.push_back(Span{static_cast<int>(ids_.size()), count});
+        ids_.insert(ids_.end(), data, data + count);
+        return index;
+    }
+
+    int Count(int loop) const { return spans_[loop].count_; }
+    const int* Data(int loop) const { return ids_.data() + spans_[loop].start_; }
+
+    ea::vector<int> ids_;
+    ea::vector<Span> spans_;
+};
+
+/// Directed links between ids. The targets of one id keep the order of the appends.
+class CsgAdjacency
+{
+public:
+    struct List
+    {
+        int head_{-1};
+        int tail_{-1};
+        int count_{};
+    };
+    struct Node
+    {
+        int to_{};
+        int next_{-1};
+    };
+
+    void Clear()
+    {
+        lists_.Clear();
+        nodes_.clear();
+    }
+
+    void Add(int from, int to)
+    {
+        bool existed = false;
+        List& list = lists_.FindOrAdd(static_cast<uint64_t>(static_cast<uint32_t>(from)), existed);
+        const int node = static_cast<int>(nodes_.size());
+        nodes_.push_back(Node{to, -1});
+        if (list.tail_ < 0)
+            list.head_ = node;
+        else
+            nodes_[list.tail_].next_ = node;
+        list.tail_ = node;
+        ++list.count_;
+    }
+
+    /// Return the list of the id or null. An append invalidates the pointer.
+    const List* Find(int from) const { return lists_.Find(static_cast<uint64_t>(static_cast<uint32_t>(from))); }
+    const Node& At(int node) const { return nodes_[node]; }
+
+private:
+    CsgFlatMap<uint64_t, List, CsgPackedKeyHash> lists_;
+    ea::vector<Node> nodes_;
+};
+
+/// Reusable vectors of the split of a triangle.
+struct CsgSplitScratch
+{
+    /// Boundary of the triangle: corners and the crossings on the edges, as global ids.
+    ea::vector<int> boundary_;
+    ea::vector<int> edgePoints_;
+    CsgAdjacency boundaryOut_;
+    CsgAdjacency curve_;
+    CsgFlatSet<uint64_t, CsgPackedKeyHash> boundaryEdges_;
+    CsgFlatSet<uint64_t, CsgPackedKeyHash> visited_;
+    /// All the loops of one triangle. The lists below hold loop indices.
+    CsgLoopPool pool_;
+    ea::vector<int> cycles_;
+    ea::vector<int> closedCycles_;
+    ea::vector<int> holes_;
+    ea::vector<int> regions_;
+    /// One byte for each entry of regions_. Not zero if a bridge to a hole made the region.
+    ea::vector<uint8_t> regionBridged_;
+    ea::vector<int> cycle_;
+    ea::vector<int> temp1_;
+    ea::vector<int> temp2_;
+    ea::vector<int> twin_;
+    ea::vector<int> twinTest_;
+    /// Grouping of the closed cycles by their sorted ids.
+    ea::vector<int> closedSorted_;
+    ea::vector<int> closedSortedStart_;
+    ea::vector<uint64_t> closedHash_;
+    ea::vector<int> groupHead_;
+    ea::vector<int> groupTail_;
+    ea::vector<int> groupSameHash_;
+    ea::vector<int> memberNext_;
+    CsgFlatMap<uint64_t, int, CsgPackedKeyHash> groupByHash_;
+    /// Sort buffers.
+    ea::vector<double> keys_;
+    ea::vector<int> order_;
+    ea::vector<int> merge_;
+};
+
+/// Result of the split of the triangles of one operand.
+///
+/// A triangle without curve segments is Whole: the boolean keeps it as its three corners.
+/// A Failed triangle has segments, but the trace of its regions did not close. The boolean keeps it whole too.
+/// A Split triangle has regions. A region is a loop of global ids in the orientation of the face.
+/// The loops have at least three ids. A region joined to a hole by a bridge is flagged. Holes are never output alone.
+struct CsgSplitResult
+{
+    enum class State : uint8_t
+    {
+        Whole,
+        Split,
+        Failed
+    };
+
+    void Reset(unsigned triangleCount)
+    {
+        state_.assign(triangleCount, static_cast<uint8_t>(State::Whole));
+        holeCount_.assign(triangleCount, 0);
+        triangleRegionStart_.assign(triangleCount + 1, 0);
+        regionStart_.assign(1, 0);
+        ids_.clear();
+        bridged_.clear();
+    }
+
+    int RegionCount() const { return static_cast<int>(bridged_.size()); }
+    /// Number of ids of a region.
+    int RegionSize(int region) const { return regionStart_[region + 1] - regionStart_[region]; }
+    const int* RegionIds(int region) const { return ids_.data() + regionStart_[region]; }
+    State GetState(int triangle) const { return static_cast<State>(state_[triangle]); }
+
+    /// State of each triangle.
+    ea::vector<uint8_t> state_;
+    /// Number of closed curves in a triangle that needed a bridge. It is zero if the triangle is not Split.
+    ea::vector<int> holeCount_;
+    /// The regions of triangle t are [triangleRegionStart_[t], triangleRegionStart_[t + 1]), in the order of the C# reference.
+    ea::vector<int> triangleRegionStart_;
+    /// Region r owns [regionStart_[r], regionStart_[r + 1]) in ids_.
+    ea::vector<int> regionStart_;
+    /// Global ids of all the region loops.
+    ea::vector<int> ids_;
+    /// One byte for each region. Not zero if a bridge to a hole made the region.
+    ea::vector<uint8_t> bridged_;
+};
+
 /// Reusable vectors. A boolean makes one scratch and passes it to every step.
 struct CsgScratch
 {
@@ -131,6 +292,7 @@ struct CsgScratch
     ea::vector<CsgFaceBvh::ItemPair> stack_;
     /// Merge buffer for the sort of the crossings of an edge.
     ea::vector<int> merge_;
+    CsgSplitScratch split_;
 };
 
 /// The intersection of two operands: crossing vertices and the curve segments on each triangle.
@@ -154,6 +316,11 @@ public:
     /// Write the crossings on an edge of the mesh to the output, ordered from the vertex from to the vertex to.
     /// The ids are local welded ids of the mesh.
     void EdgeCrossings(const Mesh& mesh, int from, int to, CsgScratch& scratch, ea::vector<int>& output) const;
+    /// Split every triangle of both operands that has curve segments into regions. Fill splitA_ and splitB_.
+    /// Call this after CollectCrossings.
+    void SplitFaces(CsgScratch& scratch);
+    /// Split the triangles of one operand with the segments of its triangles.
+    void SplitOperand(const Mesh& mesh, const CsgSegmentLists& segments, CsgScratch& scratch, CsgSplitResult& result) const;
 
     Mesh a_;
     Mesh b_;
@@ -163,6 +330,9 @@ public:
     /// Curve segments on each triangle of the first and the second operand. The lists are by triangle index.
     CsgSegmentLists segmentsA_;
     CsgSegmentLists segmentsB_;
+    /// Regions of the split triangles of the first and the second operand. SplitFaces fills them.
+    CsgSplitResult splitA_;
+    CsgSplitResult splitB_;
     /// Curve segments by their undirected ends, oriented from entering to exiting along n_A x n_B.
     CsgFlatMap<uint64_t, ea::pair<int, int>, CsgPackedKeyHash> curveEdges_;
     /// True if a coordinate of an operand is outside the range of the exact math. The results are not exact then.
@@ -192,6 +362,15 @@ private:
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;
 };
+
+/// Return the position of a global id: a vertex of the first operand, a vertex of the second operand or a crossing.
+Vector3 PointPosition(const Corefinement& core, int id);
+
+/// Build the polygon of a region with the vertex attributes interpolated inside the source face.
+/// The ids are the global ids of a region of a triangle of the face. The polygon keeps the plane and the group of the face.
+/// Return false and leave the output unchanged if an id does not belong to the face. The caller then keeps the
+/// triangle whole, as for a Failed split.
+bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const int* ids, int count, CsgPolygon& output);
 
 /// Convert a portable 128 bit number to double with one correct rounding (round to nearest even).
 /// The native 128 bit type has its own conversion. This function exists in both modes for the tests.
@@ -225,6 +404,50 @@ struct CsgCorefineTestResult
 
 /// Compute the crossings of two solids and return a summary. Both solids must have faces.
 CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSolid& b);
+
+/// One region of the split for the tests.
+struct CsgSplitTestRegion
+{
+    int triangle_{};
+    /// Global ids of the loop.
+    ea::vector<int> ids_;
+    /// True if a bridge to a hole made the region.
+    bool bridged_{};
+    /// Positions of the vertices of the polygon of the region. The vector is empty if RegionPolygon fails.
+    ea::vector<Vector3> polygonPositions_;
+    /// The polygon of the region with the interpolated attributes. It is empty if RegionPolygon fails.
+    CsgPolygon polygon_;
+};
+
+/// Split of one operand for the tests.
+struct CsgSplitTestOperand
+{
+    /// State of each triangle: 0 whole, 1 split, 2 failed.
+    ea::vector<uint8_t> triangleState_;
+    /// Number of holes joined by bridges in each triangle.
+    ea::vector<int> holeCount_;
+    /// Regions of the split triangles in the output order.
+    ea::vector<CsgSplitTestRegion> regions_;
+};
+
+/// Result of the split step for the tests.
+struct CsgSplitTestResult
+{
+    CsgSplitTestOperand a_;
+    CsgSplitTestOperand b_;
+    int vertexCountA_{};
+    int vertexCountB_{};
+    /// Global id of the first crossing.
+    int crossingBase_{};
+    /// Position of each global id.
+    ea::vector<Vector3> positions_;
+    /// Curve segments oriented as in curveEdges_, as global ids.
+    ea::vector<ea::pair<int, int>> curveEdges_;
+    bool outOfRange_{};
+};
+
+/// Compute the crossings of two solids and split the triangles along the curve. Both solids must have faces.
+CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b);
 
 } // namespace CsgInternal
 

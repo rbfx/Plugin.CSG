@@ -210,3 +210,73 @@ TEST_CASE("Flat set basics", "[flatmap]")
         set.Insert(i);
     CHECK(set.Size() == 10000);
 }
+
+TEST_CASE("Flat map Clear after a big fill then a small fill gives correct results", "[flatmap]")
+{
+    PackedMap map;
+    for (unsigned i = 0; i < 5000; ++i)
+        map.TryAdd(MakeKey(i), static_cast<int>(i));
+    for (unsigned round = 0; round < 200; ++round)
+    {
+        map.Clear();
+        CHECK(map.Size() == 0);
+        const unsigned count = 1 + round % 7;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            bool existed = true;
+            map.FindOrAdd(MakeKey(i + round), existed) = static_cast<int>(round * 100 + i);
+            REQUIRE_FALSE(existed);
+        }
+        REQUIRE(map.Size() == count);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const int* value = map.Find(MakeKey(i + round));
+            REQUIRE(value != nullptr);
+            CHECK(*value == static_cast<int>(round * 100 + i));
+        }
+        // A key of the big fill is gone, and the dense vector keeps the insertion order.
+        CHECK(map.Find(MakeKey(4000 + round)) == nullptr);
+        unsigned expected = round;
+        for (const auto& entry : map)
+            CHECK(entry.key_ == MakeKey(expected++));
+    }
+}
+
+TEST_CASE("Flat map Clear frees chains of one bucket", "[flatmap]")
+{
+    // All keys share one probe chain. The targeted clear frees slots in the middle of the chain.
+    CsgFlatMap<uint64_t, int, ConstantHash> map;
+    for (unsigned i = 0; i < 4000; ++i)
+        map.TryAdd(i, 1);
+    // Few entries after the fill: the next clear takes the targeted path only while entries * 8 < table size.
+    for (unsigned round = 0; round < 50; ++round)
+    {
+        map.Clear();
+        for (unsigned i = 0; i < 10; ++i)
+            REQUIRE(map.TryAdd(i + round, static_cast<int>(i)));
+        for (unsigned i = 0; i < 10; ++i)
+            REQUIRE(map.Find(i + round) != nullptr);
+        CHECK(map.Find(round + 10) == nullptr);
+        CHECK(map.Find(3999) == nullptr);
+    }
+}
+
+TEST_CASE("Flat set Clear is cheap after one big fill", "[flatmap]")
+{
+    CsgFlatSet<uint64_t, CsgPackedKeyHash> set;
+    for (unsigned i = 0; i < 100000; ++i)
+        set.Insert(MakeKey(i));
+    CHECK(set.Size() == 100000);
+    // A full reset of the table would cost about 1e5 * 2.6e5 slot writes. The targeted clear costs a few probes.
+    unsigned long long checksum = 0;
+    for (unsigned round = 0; round < 100000; ++round)
+    {
+        set.Clear();
+        CHECK(set.Insert(MakeKey(round % 5)));
+        CHECK(set.Insert(MakeKey(round % 5 + 5)));
+        CHECK_FALSE(set.Insert(MakeKey(round % 5)));
+        CHECK_FALSE(set.Contains(MakeKey(round % 5 + 10)));
+        checksum += set.Size();
+    }
+    CHECK(checksum == 200000ull);
+}

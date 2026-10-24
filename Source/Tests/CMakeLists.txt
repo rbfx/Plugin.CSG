@@ -14,6 +14,7 @@ set (SOURCE_FILES
     TestSolid.cpp
     TestBvh.cpp
     TestCorefine.cpp
+    TestSplit.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.

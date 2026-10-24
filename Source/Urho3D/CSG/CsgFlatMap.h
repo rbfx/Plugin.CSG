@@ -86,11 +86,30 @@ public:
     }
 
     /// Remove all entries. The map keeps the memory.
+    ///
+    /// The cost is proportional to the number of entries if they are few compared to the table.
+    /// Then the function frees only the slots of the stored entries. Otherwise it frees the whole table.
     void Clear()
     {
+        if (entries_.size() * CLEAR_RATIO < table_.size())
+        {
+            // Each entry owns one slot. The search for a slot does not stop at a free slot, because a slot that
+            // the loop freed earlier can lie in the probe chain. The slot of an entry is not free until its turn.
+            const size_t mask = table_.size() - 1;
+            for (size_t i = 0; i < entries_.size(); ++i)
+            {
+                size_t slot = Hash{}(entries_[i].key_) & mask;
+                while (table_[slot] != static_cast<int32_t>(i))
+                    slot = (slot + 1) & mask;
+                table_[slot] = EMPTY_SLOT;
+            }
+        }
+        else
+        {
+            for (int32_t& slot : table_)
+                slot = EMPTY_SLOT;
+        }
         entries_.clear();
-        for (int32_t& slot : table_)
-            slot = EMPTY_SLOT;
     }
 
     /// Make room for n entries without a rehash.
@@ -116,6 +135,8 @@ public:
 private:
     static constexpr int32_t EMPTY_SLOT = -1;
     static constexpr size_t MIN_CAPACITY = 16;
+    /// Clear frees single slots if the entries times this ratio are fewer than the slots.
+    static constexpr size_t CLEAR_RATIO = 8;
 
     int32_t FindIndex(const Key& key) const
     {
