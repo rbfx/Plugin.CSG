@@ -11,6 +11,7 @@ set (SOURCE_FILES
     TestGeometry.h
     TestCommon.cpp
     TestFlatMap.cpp
+    TestSolid.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
@@ -20,6 +21,10 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgBsp.cpp
     ${CSG_DIR}/CsgCommon.cpp
     ${CSG_DIR}/CsgExact.cpp
+    ${CSG_DIR}/CsgOptimization.cpp
+    ${CSG_DIR}/CsgPolygon.cpp
+    ${CSG_DIR}/CsgSolid.cpp
+    ${CSG_DIR}/CsgTriangulation.cpp
 )
 
 add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES})

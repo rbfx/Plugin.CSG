@@ -5,8 +5,8 @@
 #pragma once
 
 #include "Urho3D/CSG/CsgCommon.h"
+#include "Urho3D/CSG/CsgPolygon.h"
 #include "Urho3D/CSG/_Plugin.h"
-#include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Math/Plane.h>
 
 #include <EASTL/unique_ptr.h>
@@ -19,25 +19,6 @@ enum class CsgClipMode
 {
     ClipToInside,
     ClipToOutside
-};
-
-struct PLUGIN_RBFXCSG_API CsgPolygon
-{
-    ea::vector<ModelVertex> vertices_;
-    unsigned shared_{};  // Canonical representative of a compatible (sourceMeshId << 16) | sourceGeometryIndex group.
-    Plane plane_;
-
-    CsgPolygon();
-    CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey);
-
-    CsgPolygon(CsgPolygon&&);
-    CsgPolygon& operator=(CsgPolygon&&);
-
-    CsgPolygon(const CsgPolygon&);
-    CsgPolygon& operator=(const CsgPolygon&);
-
-    void Flip();
-    bool IsConvex() const;
 };
 
 struct PLUGIN_RBFXCSG_API BspNode

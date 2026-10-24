@@ -10,6 +10,8 @@ set (SOURCE_FILES
     Csg.cpp
     CsgBrush.cpp
     CsgBsp.cpp
+    CsgPolygon.cpp
+    CsgSolid.cpp
     CsgCommon.cpp
     CsgComponent.cpp
     CsgExact.cpp
@@ -19,6 +21,8 @@ set (SOURCE_FILES
     Csg.h
     CsgBrush.h
     CsgBsp.h
+    CsgPolygon.h
+    CsgSolid.h
     CsgCommon.h
     CsgComponent.h
     CsgExact.h
