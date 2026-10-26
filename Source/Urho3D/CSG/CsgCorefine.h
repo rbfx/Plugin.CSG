@@ -28,9 +28,16 @@ namespace CsgInternal
 /// Coordinates with an absolute value of this limit or more are outside the range of the exact math.
 constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 
+/// Whether crossings that round to one grid point share one id. The merge is off now.
+/// The merge needs every position on the grid. The next step, persistent grid points, turns it on.
+constexpr bool MergeCrossingsOnGrid = false;
+
 /// Crossing of an edge of one operand through a triangle of the other.
 struct Crossing
 {
+    /// The crossing of the edge between the grid points of its ends, rounded to the grid.
+    /// position_ is the crossing on the float edge, so it can be off the grid.
+    CsgGridPoint grid_;
     Vector3 position_;
     /// Parameter along the edge from its lower to its higher welded id.
     double t_{};
@@ -41,6 +48,9 @@ struct Crossing
     CsgExactVolume difference_{};
     /// Normal of the crossed triangle. It breaks ties between crossings on one edge.
     CsgNormal normal_{};
+    /// Index of the next alias with the same id, or -1. A crossing of a grid point holds the first one.
+    /// An alias holds the next one. An alias keeps the order data of a key that merged into the crossing.
+    int alias_{-1};
 };
 
 /// Order two crossings of one edge by their parameter from its lower to its higher end.
@@ -238,6 +248,8 @@ struct CsgSplitScratch
     ea::vector<double> keys_;
     ea::vector<int> order_;
     ea::vector<int> merge_;
+    /// Projected grid points of a loop for the exact tests.
+    ea::vector<CsgGridPoint2> points_;
 };
 
 /// Result of the split of the triangles of one operand.
@@ -371,6 +383,19 @@ public:
     int CrossingBase() const { return a_.VertexCount() + b_.VertexCount(); }
     int Global(const Mesh& mesh, int id) const { return mesh.offset_ + id; }
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
+    /// Return the first record of the crossing that satisfies the predicate, or null.
+    /// The records are the crossing and the aliases of the keys that merged into it. Each one has its own key.
+    template <class Predicate> const Crossing* FindRecord(int globalId, const Predicate& predicate) const
+    {
+        const Crossing* record = &CrossingAt(globalId);
+        while (!predicate(*record))
+        {
+            if (record->alias_ < 0)
+                return nullptr;
+            record = &aliases_[record->alias_];
+        }
+        return record;
+    }
 
     /// Find all the face pairs of the operands in the order of the C# reference and intersect them.
     /// The parallel options only change how the face pairs are found. The order of the pairs stays the same.
@@ -407,7 +432,10 @@ private:
     /// Entry in the pool list of the crossings of an edge.
     struct EdgeNode
     {
+        /// Global id of the crossing.
         int id_{};
+        /// Record with the order data of this edge: a crossing index, or -(alias index + 1) for an alias.
+        int record_{};
         int next_{-1};
     };
     /// Head and tail of the list of the crossings of an edge, as indices into the pool.
@@ -422,7 +450,18 @@ private:
     int CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0, const CsgGridPoint& t1,
         const CsgGridPoint& t2);
 
+    /// Order data of an edge list record: a crossing or an alias.
+    const Crossing& Record(int record) const { return record >= 0 ? crossings_[record] : aliases_[-record - 1]; }
+    /// Global id of an edge list record.
+    int RecordId(int record) const { return record >= 0 ? CrossingBase() + record : aliasIds_[-record - 1]; }
+
     CsgFlatMap<CsgCrossingKey, int, CsgCrossingKeyHash> crossingIds_;
+    /// Crossing id by grid point. Crossings that round to one grid point share one id.
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> gridIds_;
+    /// Order data of the keys that merged into an existing crossing. The data belongs to the key and its edge.
+    ea::vector<Crossing> aliases_;
+    /// Global id of each alias.
+    ea::vector<int> aliasIds_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;

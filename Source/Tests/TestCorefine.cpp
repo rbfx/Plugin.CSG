@@ -30,7 +30,8 @@ namespace
 {
 
 // The grid step is 2^-10 units, so a snapped position moves up to 2^-11 units.
-constexpr float Tolerance = 1e-3f;
+// One grid step: 2^-10 units in float mode and 2^-16 units in double mode.
+constexpr float Tolerance = static_cast<float>(1.0 / CsgGridScale);
 
 bool Near(const Vector3& a, const Vector3& b, float tolerance = Tolerance)
 {
@@ -238,7 +239,8 @@ TEST_CASE("Corefine crossings of two overlapping boxes", "[corefine]")
     // box edges cross the other surface. The face diagonals that miss the corner enter and leave the other box,
     // two crossings each. Three faces meet at each corner, and all three diagonals avoid the corner.
     // Each operand adds 3 + 3 * 2 = 9 crossings: 18 in total.
-    CHECK(result.positions_.size() == 18);
+    // With the grid merge, crossings that round to one grid point share one id. The 18 crossings give 10 ids.
+    CHECK(result.positions_.size() == (MergeCrossingsOnGrid ? 10u : 18u));
     // An independent count with a small numeric displacement gives the same number.
     const double none[3] = {0.0, 0.0, 0.0};
     const double shift[3] = {1e-3, 1e-6, 1e-9};
@@ -658,4 +660,112 @@ TEST_CASE("Corefine sorts more than 16 crossings of one edge", "[corefine]")
     }
     // The four long edges have 24 crossings each.
     CHECK(longEdges >= 4);
+}
+
+TEST_CASE("Corefine crossings have their rounded grid points", "[corefine]")
+{
+    const Matrix3x4 transform(Vector3::ZERO, Quaternion(23.0f, Vector3(1.0f, 2.0f, 3.0f).Normalized()), 1.0f);
+    const Vector3 half(1.0f, 1.0f, 1.0f);
+    const CsgSolid a(MakeBoxPolygons(Vector3::ZERO, half, 1, transform));
+    const CsgSolid b(MakeBoxPolygons(Vector3(0.7f, 0.4f, 0.2f), half, 2));
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    REQUIRE(core.crossings_.size() > 0);
+    const double step = 1.0 / CsgGridScale;
+    for (const Crossing& crossing : core.crossings_)
+    {
+        // The grid point lies within one grid step of the float position.
+        CHECK(std::fabs(crossing.grid_.x_ * step - crossing.position_.x_) <= step);
+        CHECK(std::fabs(crossing.grid_.y_ * step - crossing.position_.y_) <= step);
+        CHECK(std::fabs(crossing.grid_.z_ * step - crossing.position_.z_) <= step);
+        // Without the grid merge, no crossing has an alias.
+        if constexpr (!MergeCrossingsOnGrid)
+            CHECK(crossing.alias_ < 0);
+    }
+    if constexpr (MergeCrossingsOnGrid)
+    {
+        // The crossings have unique grid points.
+        for (unsigned i = 0; i < core.crossings_.size(); ++i)
+        {
+            for (unsigned j = i + 1; j < core.crossings_.size(); ++j)
+                CHECK(core.crossings_[i].grid_ != core.crossings_[j].grid_);
+        }
+    }
+}
+
+TEST_CASE("Corefine handles crossings of one edge that round to one grid point", "[corefine]")
+{
+    // The wedge B has a flat bottom at z = 0 and a top that rises one step in each half unit along x.
+    // At x = -0.75 the top is 1/4 step above the bottom. A vertical edge of A crosses both faces there.
+    // Both crossings round to the same grid point.
+    const float step = static_cast<float>(1.0 / CsgGridScale);
+    const auto polygon = [](std::initializer_list<Vector3> corners)
+    {
+        ea::vector<ModelVertex> vertices;
+        for (const Vector3& corner : corners)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(corner);
+            vertices.push_back(vertex);
+        }
+        return CsgPolygon(ea::move(vertices), 2);
+    };
+    ea::vector<CsgPolygon> wedge;
+    wedge.push_back(polygon({{-1, -1, 0}, {-1, 1, 0}, {1, 1, 0}, {1, -1, 0}}));
+    wedge.push_back(polygon({{1, -1, 0}, {1, 1, 0}, {1, 1, 2 * step}, {1, -1, 2 * step}}));
+    wedge.push_back(polygon({{-1, -1, 0}, {1, -1, 2 * step}, {1, 1, 2 * step}, {-1, 1, 0}}));
+    wedge.push_back(polygon({{-1, -1, 0}, {1, -1, 0}, {1, -1, 2 * step}}));
+    wedge.push_back(polygon({{-1, 1, 0}, {1, 1, 2 * step}, {1, 1, 0}}));
+    const CsgSolid b(wedge);
+    const CsgSolid a(MakeBoxPolygons(Vector3(-0.125f, 0.0f, 0.0f), Vector3(0.625f, 0.25f, 1.0f), 1));
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+
+    // Find the vertical edges of A at x = -0.75. Each one crosses the bottom and the top of the wedge.
+    unsigned verticalEdges = 0;
+    ea::vector<int> forward;
+    ea::vector<int> backward;
+    for (int low = 0; low < a.GetTriangleVertices().size() && low < core.a_.VertexCount(); ++low)
+    {
+        for (int high = low + 1; high < core.a_.VertexCount(); ++high)
+        {
+            const Vector3& p = core.a_.loops_.positions_[low];
+            const Vector3& q = core.a_.loops_.positions_[high];
+            if (p.x_ != -0.75f || q.x_ != -0.75f || p.y_ != q.y_ || std::fabs(p.y_) != 0.25f || p.z_ == q.z_)
+                continue;
+            core.EdgeCrossings(core.a_, low, high, scratch, forward);
+            core.EdgeCrossings(core.a_, high, low, scratch, backward);
+            if constexpr (MergeCrossingsOnGrid)
+            {
+                // The two crossings of the edge have one id.
+                REQUIRE(forward.size() == 1);
+                REQUIRE(backward.size() == 1);
+                CHECK(forward[0] == backward[0]);
+                const Vector3 position = core.CrossingAt(forward[0]).position_;
+                CHECK(position.x_ == -0.75f);
+                CHECK(position.z_ == 0.0f);
+            }
+            else
+            {
+                // The two crossings of the edge keep two ids, but they have one grid point.
+                REQUIRE(forward.size() == 2);
+                REQUIRE(backward.size() == 2);
+                CHECK(forward[0] != forward[1]);
+                CHECK(forward[0] == backward[1]);
+                CHECK(forward[1] == backward[0]);
+                CHECK(core.CrossingAt(forward[0]).grid_ == core.CrossingAt(forward[1]).grid_);
+            }
+            ++verticalEdges;
+        }
+    }
+    CHECK(verticalEdges == 2);
+
+    // No curve segment has the same id at both ends.
+    const CsgCorefineTestResult result = CsgCorefineCrossingsForTest(a, b);
+    for (const CsgCorefineTestSegment& segment : result.segments_)
+        CHECK(segment.p_ != segment.q_);
+    CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
 }

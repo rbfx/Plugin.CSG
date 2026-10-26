@@ -366,30 +366,76 @@ int Corefinement::CrossingId(
     const CsgNormal normal = CsgExact::Normal(t0, t1, t2);
     const CsgExactVolume lowVolume = CsgExact::Dot(normal, t0, edges.grid_[key.low_]);
     const CsgExactVolume difference = CsgExact::Dot(normal, edges.grid_[key.high_], edges.grid_[key.low_]);
+    const CsgGridPoint& lowGrid = edges.grid_[key.low_];
+    const CsgGridPoint& highGrid = edges.grid_[key.high_];
     double t = 0.5;
+    CsgGridPoint grid;
     if (difference.Sign() != 0)
     {
         t = lowVolume.Approximate() / difference.Approximate();
         t = std::isnan(t) ? 0.5 : (t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t));
+        // The rounding is exact and it ignores the sign of the difference.
+        grid = CsgExact::RoundCrossing(lowGrid, highGrid, lowVolume, difference);
     }
+    else
+    {
+        // An edge in the plane has no crossing point. Use the middle, as for t.
+        grid.x_ = static_cast<CsgGridInt>((static_cast<int64_t>(lowGrid.x_) + highGrid.x_ + 1) >> 1);
+        grid.y_ = static_cast<CsgGridInt>((static_cast<int64_t>(lowGrid.y_) + highGrid.y_ + 1) >> 1);
+        grid.z_ = static_cast<CsgGridInt>((static_cast<int64_t>(lowGrid.z_) + highGrid.z_ + 1) >> 1);
+    }
+
+    Crossing data;
+    data.grid_ = grid;
+    // The float position is the exact parameter on the float edge. The positions of the operands are not on the
+    // grid, so a position from the grid point would move the output by up to half a grid step.
     const Vector3& lowPosition = edges.loops_.positions_[key.low_];
     const Vector3& highPosition = edges.loops_.positions_[key.high_];
-    const int id = CrossingBase() + static_cast<int>(crossings_.size());
-    idRef = id;
+    data.position_ = lowPosition + (highPosition - lowPosition) * static_cast<float>(t);
+    data.t_ = t;
+    data.key_ = key;
+    data.lowVolume_ = lowVolume;
+    data.difference_ = difference;
+    data.normal_ = normal;
 
-    Crossing& crossing = crossings_.emplace_back();
-    crossing.position_ = lowPosition + (highPosition - lowPosition) * static_cast<float>(t);
-    crossing.t_ = t;
-    crossing.key_ = key;
-    crossing.lowVolume_ = lowVolume;
-    crossing.difference_ = difference;
-    crossing.normal_ = normal;
+    int id = CrossingBase() + static_cast<int>(crossings_.size());
+    int record = static_cast<int>(crossings_.size());
+    bool merged = false;
+    if constexpr (MergeCrossingsOnGrid)
+    {
+        // A crossing that rounds to an existing grid point is the same vertex.
+        // Its order data stays in an alias, because the order is for the edge of this key.
+        CsgVec3Key gridKey;
+        gridKey.x_ = static_cast<uint32_t>(grid.x_);
+        gridKey.y_ = static_cast<uint32_t>(grid.y_);
+        gridKey.z_ = static_cast<uint32_t>(grid.z_);
+        bool gridExisted = false;
+        int& gridIdRef = gridIds_.FindOrAdd(gridKey, gridExisted);
+        if (gridExisted)
+        {
+            id = gridIdRef;
+            const int alias = static_cast<int>(aliases_.size());
+            record = -alias - 1;
+            aliases_.push_back(data);
+            aliasIds_.push_back(id);
+            Crossing* tail = &crossings_[id - CrossingBase()];
+            while (tail->alias_ >= 0)
+                tail = &aliases_[tail->alias_];
+            tail->alias_ = alias;
+            merged = true;
+        }
+        else
+            gridIdRef = id;
+    }
+    if (!merged)
+        crossings_.push_back(data);
+    idRef = id;
 
     bool listExisted = false;
     EdgeList& list = edgeCrossings_[key.edgeInSecond_ ? 1 : 0].FindOrAdd(
         CsgDirectedKey(static_cast<unsigned>(key.low_), static_cast<unsigned>(key.high_)), listExisted);
     const int node = static_cast<int>(edgeNodes_.size());
-    edgeNodes_.push_back(EdgeNode{id, -1});
+    edgeNodes_.push_back(EdgeNode{id, record, -1});
     if (list.tail_ < 0)
         list.head_ = node;
     else
@@ -406,22 +452,34 @@ void Corefinement::EdgeCrossings(
         CsgDirectedKey(static_cast<unsigned>(ea::min(from, to)), static_cast<unsigned>(ea::max(from, to))));
     if (!list)
         return;
+    // The output holds the records while it is sorted.
     for (int node = list->head_; node >= 0; node = edgeNodes_[node].next_)
-        output.push_back(edgeNodes_[node].id_);
+        output.push_back(edgeNodes_[node].record_);
 
-    const int baseId = CrossingBase();
-    const ea::vector<Crossing>& crossings = crossings_;
     SortIds(output, scratch.merge_,
-        [&crossings, baseId](int x, int y)
+        [this](int x, int y)
         {
-            const Crossing& cx = crossings[x - baseId];
-            const Crossing& cy = crossings[y - baseId];
+            const Crossing& cx = Record(x);
+            const Crossing& cy = Record(y);
             // Doubles separate all but nearly coincident crossings. Those are ordered exactly.
             if (std::fabs(cx.t_ - cy.t_) > EDGE_ORDER_TOLERANCE)
                 return cx.t_ < cy.t_ ? -1 : 1;
             const int order = CompareOnEdge(cx, cy);
-            return order != 0 ? order : (x < y ? -1 : (x > y ? 1 : 0));
+            if (order != 0)
+                return order;
+            const int idX = RecordId(x);
+            const int idY = RecordId(y);
+            return idX < idY ? -1 : (idX > idY ? 1 : 0);
         });
+    // Crossings of one edge that round to one grid point have one id. They are next to each other.
+    int kept = 0;
+    for (int i = 0; i < static_cast<int>(output.size()); ++i)
+    {
+        const int id = RecordId(output[i]);
+        if (kept == 0 || output[kept - 1] != id)
+            output[kept++] = id;
+    }
+    output.resize(kept);
     if (from > to)
         ea::reverse(output.begin(), output.end());
 }
@@ -443,29 +501,43 @@ int CompareDouble(double a, double b)
     return 1;
 }
 
-struct Point2
+/// Compare the magnitudes of two exact minors: the sign of |a| - |b|.
+/// The double values select the result when they differ clearly. Otherwise the expansions decide.
+int CompareMagnitude(const CsgExactMinor& a, const CsgExactMinor& b)
 {
-    double x_{};
-    double y_{};
-};
-
-double DistanceSquared(const Point2& a, const Point2& b)
-{
-    return (a.x_ - b.x_) * (a.x_ - b.x_) + (a.y_ - b.y_) * (a.y_ - b.y_);
+    // The approximations have a relative error far below 2^-40, so the factor separates only safe cases.
+    const double fa = std::fabs(a.Approximate());
+    const double fb = std::fabs(b.Approximate());
+    if (fa > fb * (1.0 + 1e-9))
+        return 1;
+    if (fb > fa * (1.0 + 1e-9))
+        return -1;
+    CsgReal ta[4];
+    CsgReal tb[4];
+    const CsgReal sa = a.Sign() < 0 ? CsgReal(-1) : CsgReal(1);
+    const CsgReal sb = b.Sign() < 0 ? CsgReal(-1) : CsgReal(1);
+    for (int i = 0; i < a.count_; ++i)
+        ta[i] = a.terms_[i] * sa;
+    for (int i = 0; i < b.count_; ++i)
+        tb[i] = b.terms_[i] * sb;
+    const CsgReal one = 1;
+    return CsgExpansionProductDifferenceSign(a.count_, ta, 1, &one, b.count_, tb, 1, &one);
 }
 
-double Cross2(const Point2& o, const Point2& a, const Point2& b)
+/// Whether the bridge from-to is blocked by the edge pq.
+/// A contact only at an end of the bridge does not block it. A collinear overlap blocks it.
+bool BridgeBlockedBy(const CsgGridPoint2& from, const CsgGridPoint2& to, const CsgGridPoint2& p, const CsgGridPoint2& q)
 {
-    return (a.x_ - o.x_) * (b.y_ - o.y_) - (a.y_ - o.y_) * (b.x_ - o.x_);
-}
-
-bool SegmentsCross(const Point2& a0, const Point2& a1, const Point2& b0, const Point2& b1)
-{
-    const double d1 = Cross2(a0, a1, b0);
-    const double d2 = Cross2(a0, a1, b1);
-    const double d3 = Cross2(b0, b1, a0);
-    const double d4 = Cross2(b0, b1, a1);
-    return (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0);
+    if (!CsgExact::SegmentsCross(from, to, p, q))
+        return false;
+    const int o1 = CsgExact::Orient2(from, to, p);
+    const int o2 = CsgExact::Orient2(from, to, q);
+    if (o1 == 0 && o2 == 0)
+        return true;
+    // The lines are not the same, so the segments have one common point.
+    if (p == from || p == to || q == from || q == to)
+        return false;
+    return CsgExact::Orient2(p, q, from) != 0 && CsgExact::Orient2(p, q, to) != 0;
 }
 
 uint64_t DirectedEdgeKey(int from, int to)
@@ -482,9 +554,6 @@ uint64_t HashSortedIds(const int* ids, int count)
         hash = mix(hash + static_cast<uint32_t>(ids[i]) + 0x9E3779B97F4A7C15ULL);
     return hash;
 }
-
-/// A full turn in double. The macro M_PI is a float constant.
-constexpr double TAU = 6.283185307179586;
 
 float ClampFloat(float value, float min, float max)
 {
@@ -554,8 +623,7 @@ public:
             s_.curve_.Add(segment.q_, segment.p_);
         }
 
-        const CsgPolygon& source = *mesh_.solid_.GetFace(face);
-        MakeAxesFromNormal(source.plane_.normal_, axisU_, axisV_);
+        ChooseProjection(face, triangle);
         edgeCount_ = static_cast<int>(s_.boundaryEdges_.Size()) + segments.Count(triangle) * 2;
         for (int i = 0; i < boundaryCount; ++i)
             Trace(s_.boundary_[i], s_.boundary_[(i + 1) % boundaryCount]);
@@ -586,37 +654,116 @@ public:
 private:
     using List = CsgAdjacency::List;
 
-    Vector2 ProjectFloat(int id) const
+    /// Grid point of a global id: a vertex of an operand or a crossing.
+    const CsgGridPoint& GridOf(int id) const
     {
-        const Vector3 p = PointPosition(core_, id);
-        return Vector2(p.DotProduct(axisU_), p.DotProduct(axisV_));
+        if (id >= core_.CrossingBase())
+            return core_.CrossingAt(id).grid_;
+        return id >= core_.b_.offset_ ? core_.b_.grid_[id - core_.b_.offset_] : core_.a_.grid_[id];
     }
 
-    static double Angle(const Vector2& d) { return std::atan2(static_cast<double>(d.y_), static_cast<double>(d.x_)); }
+    /// Point of a global id in the plane of the projection.
+    CsgGridPoint2 Point(int id) const { return CsgExact::Project(GridOf(id), dropAxis_, flip_); }
 
-    /// Twice the signed area in the face plane. The math is in double, relative to the first vertex.
-    double SignedArea(int loop) const
+    /// Coordinate of a global id on the dropped axis.
+    CsgGridInt Dropped(int id) const
     {
-        const int* cycle = s_.pool_.Data(loop);
-        const int count = s_.pool_.Count(loop);
-        const Vector3 origin = PointPosition(core_, cycle[0]);
-        const auto along = [&origin](const Vector3& p, const Vector3& axis)
+        const CsgGridPoint& p = GridOf(id);
+        return dropAxis_ == 0 ? p.x_ : (dropAxis_ == 1 ? p.y_ : p.z_);
+    }
+
+    /// Project the components of a 3D vector as CsgExact::Project does.
+    void ProjectVector(double x, double y, double z, double& u, double& v) const
+    {
+        const double c[3] = {x, y, z};
+        u = c[(dropAxis_ + 1) % 3];
+        v = c[(dropAxis_ + 2) % 3];
+        if (flip_)
+            ea::swap(u, v);
+    }
+
+    /// Choose the projection of the triangle to a coordinate plane. Drop the axis of the largest exact normal
+    /// component. Flip the projection if that component is negative, so the face order is counterclockwise.
+    void ChooseProjection(int face, int triangle)
+    {
+        const CsgNormal normal = CsgExact::Normal(mesh_.grid_[mesh_.triangleIds_[triangle * 3]],
+            mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 1]], mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 2]]);
+        const CsgExactMinor* components[3] = {&normal.x_, &normal.y_, &normal.z_};
+        int best = 0;
+        for (int axis = 1; axis < 3; ++axis)
         {
-            return (static_cast<double>(p.x_) - origin.x_) * axis.x_ + (static_cast<double>(p.y_) - origin.y_) * axis.y_
-                + (static_cast<double>(p.z_) - origin.z_) * axis.z_;
-        };
-        double area = 0.0;
-        for (int i = 0; i < count; ++i)
-        {
-            const Vector3 p = PointPosition(core_, cycle[i]);
-            const Vector3 q = PointPosition(core_, cycle[(i + 1) % count]);
-            area += along(p, axisU_) * along(q, axisV_) - along(q, axisU_) * along(p, axisV_);
+            if (CompareMagnitude(*components[axis], *components[best]) > 0)
+                best = axis;
         }
-        return area;
+        int sign = components[best]->Sign();
+        if (sign == 0)
+        {
+            // The corners are collinear on the grid. The plane of the face gives the axis.
+            const Vector3& n = mesh_.solid_.GetFace(face)->plane_.normal_;
+            const float values[3] = {n.x_, n.y_, n.z_};
+            best = 0;
+            for (int axis = 1; axis < 3; ++axis)
+            {
+                if (std::fabs(values[axis]) > std::fabs(values[best]))
+                    best = axis;
+            }
+            sign = values[best] < 0.0f ? -1 : 1;
+        }
+        dropAxis_ = best;
+        flip_ = sign < 0;
+    }
+
+    /// Direction from one id to another in the plane. It is never zero.
+    /// Two ids at one point of the plane get a symbolic direction: the projection is moved by a tiny tilt.
+    /// The tilt adds e * w to the first coordinate, with w the coordinate on the dropped axis.
+    /// Ids at one grid point get a second, smaller displacement along the second coordinate by the id.
+    /// The direction from b to a is the opposite of the direction from a to b, so the turns stay consistent.
+    CsgGridPoint2 Direction(int from, int to) const
+    {
+        const CsgGridPoint2 d = CsgExact::Difference(Point(to), Point(from));
+        if (d.u_ != 0 || d.v_ != 0)
+            return d;
+        const CsgGridInt wFrom = Dropped(from);
+        const CsgGridInt wTo = Dropped(to);
+        CsgGridPoint2 result;
+        if (wFrom != wTo)
+            result.u_ = wTo > wFrom ? 1 : -1;
+        else
+            result.v_ = to > from ? 1 : -1;
+        return result;
+    }
+
+    /// Copy the points of a loop to the scratch.
+    const CsgGridPoint2* LoopPoints(int loop)
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        s_.points_.resize(count);
+        for (int i = 0; i < count; ++i)
+            s_.points_[i] = Point(ids[i]);
+        return s_.points_.data();
+    }
+
+    /// Exact sign of the area of a loop. It is positive for the counterclockwise order of the face.
+    int AreaSign(int loop) { return CsgExact::LoopAreaSign(LoopPoints(loop), s_.pool_.Count(loop)); }
+
+    /// Magnitude of the area of a loop in double. It orders loops by size only. No topology depends on it.
+    double AreaMagnitude(int loop)
+    {
+        const CsgGridPoint2* points = LoopPoints(loop);
+        const int count = s_.pool_.Count(loop);
+        double area = 0.0;
+        for (int i = 1; i + 1 < count; ++i)
+        {
+            const CsgGridPoint2 p = CsgExact::Difference(points[i], points[0]);
+            const CsgGridPoint2 q = CsgExact::Difference(points[i + 1], points[0]);
+            area += static_cast<double>(p.u_) * q.v_ - static_cast<double>(p.v_) * q.u_;
+        }
+        return std::fabs(area);
     }
 
     /// Twice the signed area of a closed cycle whose points are crossings at one vertex of the other operand.
-    /// The vertex lies on the plane of the triangle. The positions of such crossings are equal in float.
+    /// The vertex lies on the plane of the triangle. The positions of such crossings are equal on the grid.
     /// The perturbation moves the crossing of the edge low-high to the vertex plus k * (high - low) / D.
     /// D is the exact difference of the crossing, and k is one factor for all the crossings of the triangle.
     /// The area of the offsets (high - low) / D has the sign of the perturbed area.
@@ -632,22 +779,26 @@ private:
         {
             if (id < core_.CrossingBase())
                 return false;
-            const Crossing& crossing = core_.CrossingAt(id);
+            // A merged crossing has one record for each key. Use the record of an edge through this triangle.
+            const Crossing* found = core_.FindRecord(id,
+                [this](const Crossing& c) { return c.key_.triangle_ == triangle_ && c.key_.edgeInSecond_ != mesh_.isSecond_; });
+            if (!found)
+                return false;
+            const Crossing& crossing = *found;
             const CsgCrossingKey& key = crossing.key_;
             const double difference = crossing.difference_.Approximate();
-            if (key.triangle_ != triangle_ || key.edgeInSecond_ == mesh_.isSecond_ || difference == 0.0)
+            if (difference == 0.0)
                 return false;
             const int onPlane = crossing.lowVolume_.Sign() == 0 ? key.low_
                 : CsgExact::Dot(crossing.normal_, t0, edges.grid_[key.high_]).Sign() == 0 ? key.high_ : -1;
             if (onPlane < 0 || (vertex >= 0 && onPlane != vertex))
                 return false;
             vertex = onPlane;
-            const Vector3& low = edges.loops_.positions_[key.low_];
-            const Vector3& high = edges.loops_.positions_[key.high_];
-            const double d[3] = {(static_cast<double>(high.x_) - low.x_) / difference,
-                (static_cast<double>(high.y_) - low.y_) / difference, (static_cast<double>(high.z_) - low.z_) / difference};
-            u = d[0] * axisU_.x_ + d[1] * axisU_.y_ + d[2] * axisU_.z_;
-            v = d[0] * axisV_.x_ + d[1] * axisV_.y_ + d[2] * axisV_.z_;
+            const CsgGridPoint& low = edges.grid_[key.low_];
+            const CsgGridPoint& high = edges.grid_[key.high_];
+            ProjectVector((static_cast<double>(high.x_) - low.x_) / difference,
+                (static_cast<double>(high.y_) - low.y_) / difference, (static_cast<double>(high.z_) - low.z_) / difference,
+                u, v);
             return true;
         };
         area = 0.0;
@@ -724,14 +875,19 @@ private:
 
     /// Among the outgoing directions at v, the first one clockwise from the way back to u.
     /// The outgoing directions are the boundary targets, then the curve targets.
+    ///
+    /// The directions around v have a cyclic order: the clockwise angle, then the global id for equal directions.
+    /// The result is the next direction after v -> u in this order. So a direction equal to v -> u comes first
+    /// if its id is higher than u, and last if its id is lower. The order is exact.
     int Turn(int u, int v, const List* outs, const List* branches)
     {
-        const Vector2 origin = ProjectFloat(v);
-        const double back = Angle(ProjectFloat(u) - origin);
+        const CsgGridPoint2 zero;
+        const CsgGridPoint2 back = Direction(v, u);
         const int total = (outs ? outs->count_ : 0) + (branches ? branches->count_ : 0);
         int best = -1;
+        int bestGroup = 0;
+        CsgGridPoint2 bestDirection;
         int firstOutgoing = -1;
-        double bestSweep = std::numeric_limits<double>::infinity();
         const auto visit = [&](const CsgAdjacency& adjacency, const List* list)
         {
             if (!list)
@@ -743,14 +899,21 @@ private:
                     firstOutgoing = w;
                 if (w == u && total > 1)
                     continue;
-                double sweep = back - Angle(ProjectFloat(w) - origin);
-                // The angles are in [-pi, pi], so two additions are enough. The bound keeps a NaN away from a hang.
-                for (int k = 0; k < 4 && sweep <= 0.0; ++k)
-                    sweep += TAU;
-                if (sweep < bestSweep)
+                const CsgGridPoint2 direction = Direction(v, w);
+                // Group 0: the direction of v -> u with a higher id. Group 2: the same with a lower id.
+                const bool alongBack = CsgExact::Cross2(back, direction) == 0 && CsgExact::Dot2(back, direction) > 0;
+                const int group = alongBack ? (w > u ? 0 : 2) : 1;
+                bool better = best < 0 || group < bestGroup;
+                if (best >= 0 && group == bestGroup)
                 {
-                    bestSweep = sweep;
+                    const int order = group == 1 ? CsgExact::DirectionCompare(zero, back, direction, bestDirection) : 0;
+                    better = order < 0 || (order == 0 && w < best);
+                }
+                if (better)
+                {
                     best = w;
+                    bestGroup = group;
+                    bestDirection = direction;
                 }
             }
         };
@@ -827,12 +990,18 @@ private:
             {
                 const int m0 = s_.closedCycles_[head];
                 const int m1 = s_.closedCycles_[second];
-                double area0 = 0.0;
-                double area1 = 0.0;
-                if (!PerturbedArea(m0, area0) || !PerturbedArea(m1, area1))
+                // The exact signs decide. Equal signs mean a curve of zero size: the perturbation decides.
+                double area0 = AreaSign(m0);
+                double area1 = AreaSign(m1);
+                if (area0 == area1)
                 {
-                    area0 = SignedArea(m0);
-                    area1 = SignedArea(m1);
+                    double perturbed0 = 0.0;
+                    double perturbed1 = 0.0;
+                    if (PerturbedArea(m0, perturbed0) && PerturbedArea(m1, perturbed1))
+                    {
+                        area0 = perturbed0;
+                        area1 = perturbed1;
+                    }
                 }
                 if (area0 >= area1)
                 {
@@ -849,53 +1018,41 @@ private:
             for (int k = head; k >= 0; k = s_.memberNext_[k])
             {
                 const int loop = s_.closedCycles_[k];
-                (SignedArea(loop) > 0.0 ? s_.cycles_ : s_.holes_).push_back(loop);
+                (AreaSign(loop) > 0 ? s_.cycles_ : s_.holes_).push_back(loop);
             }
         }
     }
 
-    // ---- Holes. The math is in double, relative to the first vertex of the first hole.
+    // ---- Holes. The tests are exact on the grid points of the projection.
 
-    Point2 ProjectDouble(int id) const
-    {
-        const Vector3 p = PointPosition(core_, id);
-        const double dx = static_cast<double>(p.x_) - origin_.x_;
-        const double dy = static_cast<double>(p.y_) - origin_.y_;
-        const double dz = static_cast<double>(p.z_) - origin_.z_;
-        return {dx * axisU_.x_ + dy * axisU_.y_ + dz * axisU_.z_, dx * axisV_.x_ + dy * axisV_.y_ + dz * axisV_.z_};
-    }
-
-    double Area(int loop) const
-    {
-        const int* ids = s_.pool_.Data(loop);
-        const int count = s_.pool_.Count(loop);
-        double area = 0.0;
-        for (int i = 0; i < count; ++i)
-        {
-            const Point2 p = ProjectDouble(ids[i]);
-            const Point2 q = ProjectDouble(ids[(i + 1) % count]);
-            area += p.x_ * q.y_ - q.x_ * p.y_;
-        }
-        return area * 0.5;
-    }
-
-    bool Contains(int loop, const Point2& point) const
+    /// Whether the loop contains the point. A point on an edge of the loop counts as inside.
+    /// The parity test uses the half open rule on the second coordinate.
+    bool Contains(int loop, const CsgGridPoint2& point) const
     {
         const int* ids = s_.pool_.Data(loop);
         const int count = s_.pool_.Count(loop);
         bool inside = false;
         for (int i = 0, j = count - 1; i < count; j = i++)
         {
-            const Point2 p = ProjectDouble(ids[i]);
-            const Point2 q = ProjectDouble(ids[j]);
-            if ((p.y_ > point.y_) != (q.y_ > point.y_)
-                && point.x_ < (q.x_ - p.x_) * (point.y_ - p.y_) / (q.y_ - p.y_) + p.x_)
-                inside = !inside;
+            const CsgGridPoint2 p = Point(ids[i]);
+            const CsgGridPoint2 q = Point(ids[j]);
+            const int side = CsgExact::Orient2(q, p, point);
+            if (side == 0 && ea::min(p.u_, q.u_) <= point.u_ && point.u_ <= ea::max(p.u_, q.u_)
+                && ea::min(p.v_, q.v_) <= point.v_ && point.v_ <= ea::max(p.v_, q.v_))
+                return true;
+            if ((p.v_ > point.v_) != (q.v_ > point.v_))
+            {
+                // The edge goes up from q to p, or down. The ray to the plus side of u crosses it if the point
+                // lies to the left of the upward edge.
+                if ((p.v_ > q.v_) ? side > 0 : side < 0)
+                    inside = !inside;
+            }
         }
         return inside;
     }
 
-    bool Blocked(int loop, const Point2& from, const Point2& to, int endA, int endB) const
+    /// Whether the loop blocks the bridge from-to. The edges at the end ids do not block it.
+    bool Blocked(int loop, const CsgGridPoint2& from, const CsgGridPoint2& to, int endA, int endB) const
     {
         const int* ids = s_.pool_.Data(loop);
         const int count = s_.pool_.Count(loop);
@@ -905,10 +1062,43 @@ private:
             const int q = ids[(i + 1) % count];
             if (p == endA || p == endB || q == endA || q == endB)
                 continue;
-            if (SegmentsCross(from, to, ProjectDouble(p), ProjectDouble(q)))
+            if (BridgeBlockedBy(from, to, Point(p), Point(q)))
                 return true;
         }
         return false;
+    }
+
+    /// Whether the direction from the vertex index of the loop to the target point lies on the left of the loop.
+    /// The left side is the inside of a region and the outside of a hole. The neighbors are the nearest loop
+    /// vertices at other points. A zero direction, or a loop without other points, counts as on the left.
+    bool OnLeft(int loop, int index, const CsgGridPoint2& target) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        const CsgGridPoint2 v = Point(ids[index]);
+        const CsgGridPoint2 d = CsgExact::Difference(target, v);
+        if (d.u_ == 0 && d.v_ == 0)
+            return true;
+        int prev = -1;
+        int next = -1;
+        for (int k = 1; k < count && prev < 0; ++k)
+        {
+            if (Point(ids[(index - k + count) % count]) != v)
+                prev = (index - k + count) % count;
+        }
+        for (int k = 1; k < count && next < 0; ++k)
+        {
+            if (Point(ids[(index + k) % count]) != v)
+                next = (index + k) % count;
+        }
+        if (prev < 0 || next < 0)
+            return true;
+        const CsgGridPoint2 e0 = CsgExact::Difference(Point(ids[prev]), v);
+        const CsgGridPoint2 e1 = CsgExact::Difference(Point(ids[next]), v);
+        // The left side runs counterclockwise from e1 to e0.
+        if (CsgExact::Cross2(e1, e0) > 0)
+            return CsgExact::Cross2(e1, d) > 0 && CsgExact::Cross2(d, e0) > 0;
+        return !(CsgExact::Cross2(e0, d) >= 0 && CsgExact::Cross2(d, e1) >= 0);
     }
 
     /// Index pair of the closest vertices of the loops.
@@ -916,16 +1106,17 @@ private:
     {
         const int* outerIds = s_.pool_.Data(outer);
         const int* holeIds = s_.pool_.Data(hole);
+        const CsgGridPoint2 zero;
         ea::pair<int, int> best(0, 0);
-        double bestDistance = std::numeric_limits<double>::infinity();
+        CsgGridPoint2 bestDifference = CsgExact::Difference(Point(holeIds[0]), Point(outerIds[0]));
         for (int i = 0; i < s_.pool_.Count(outer); ++i)
         {
             for (int j = 0; j < s_.pool_.Count(hole); ++j)
             {
-                const double distance = DistanceSquared(ProjectDouble(outerIds[i]), ProjectDouble(holeIds[j]));
-                if (distance < bestDistance)
+                const CsgGridPoint2 difference = CsgExact::Difference(Point(holeIds[j]), Point(outerIds[i]));
+                if (CsgExact::SquaredDistanceCompare(zero, difference, bestDifference) < 0)
                 {
-                    bestDistance = distance;
+                    bestDifference = difference;
                     best = ea::make_pair(i, j);
                 }
             }
@@ -939,23 +1130,23 @@ private:
         const int* outerIds = s_.pool_.Data(outer);
         const int outerCount = s_.pool_.Count(outer);
         const int* holeIds = s_.pool_.Data(hole);
-        const Point2 start = ProjectDouble(holeIds[from]);
+        const CsgGridPoint2 start = Point(holeIds[from]);
         s_.order_.resize(outerCount);
-        s_.keys_.resize(outerCount);
+        s_.points_.resize(outerCount);
         for (int i = 0; i < outerCount; ++i)
         {
             s_.order_[i] = i;
-            s_.keys_[i] = DistanceSquared(ProjectDouble(outerIds[i]), start);
+            s_.points_[i] = Point(outerIds[i]);
         }
-        const ea::vector<double>& keys = s_.keys_;
+        const ea::vector<CsgGridPoint2>& points = s_.points_;
         s_.merge_.resize(outerCount);
         ea::merge_sort_buffer(s_.order_.begin(), s_.order_.end(), s_.merge_.data(),
-            [&keys](int x, int y) { return CompareDouble(keys[x], keys[y]) < 0; });
+            [&points, &start](int x, int y) { return CsgExact::SquaredDistanceCompare(start, points[x], points[y]) < 0; });
         for (const int candidate : s_.order_)
         {
             if (candidate == avoidOuter)
                 continue;
-            const Point2 target = ProjectDouble(outerIds[candidate]);
+            const CsgGridPoint2 target = Point(outerIds[candidate]);
             // Holes not yet joined also lie in the region, so a bridge must not cut through them either.
             bool blocked = Blocked(outer, start, target, outerIds[candidate], holeIds[from])
                 || Blocked(hole, start, target, outerIds[candidate], holeIds[from]);
@@ -964,10 +1155,11 @@ private:
             if (blocked)
                 continue;
             if (avoidOuter >= 0
-                && SegmentsCross(start, target, ProjectDouble(holeIds[avoidHole]), ProjectDouble(outerIds[avoidOuter])))
+                && BridgeBlockedBy(start, target, Point(holeIds[avoidHole]), Point(outerIds[avoidOuter])))
                 continue;
-            const Point2 midpoint{(start.x_ + target.x_) * 0.5, (start.y_ + target.y_) * 0.5};
-            if (!Contains(outer, midpoint) || Contains(hole, midpoint))
+            // The bridge does not cross the loops. It lies inside the region and outside the hole if it leaves
+            // both ends on the left side of the loops.
+            if (!OnLeft(outer, candidate, start) || !OnLeft(hole, from, target))
                 continue;
             return candidate;
         }
@@ -986,10 +1178,10 @@ private:
         int high = 0;
         for (int i = 1; i < holeSize; ++i)
         {
-            const double x = ProjectDouble(holeIds[i]).x_;
-            if (x < ProjectDouble(holeIds[low]).x_)
+            const CsgGridInt x = Point(holeIds[i]).u_;
+            if (x < Point(holeIds[low]).u_)
                 low = i;
-            if (x > ProjectDouble(holeIds[high]).x_)
+            if (x > Point(holeIds[high]).u_)
                 high = i;
         }
         if (low == high)
@@ -1046,7 +1238,6 @@ private:
     {
         if (s_.regions_.empty())
             return false;
-        origin_ = PointPosition(core_, s_.pool_.Data(s_.holes_[0])[0]);
 
         // Outer holes first, so a hole inside an island is placed after the island exists. The sort is stable.
         const int holeTotal = static_cast<int>(s_.holes_.size());
@@ -1054,7 +1245,7 @@ private:
         s_.order_.resize(holeTotal);
         for (int i = 0; i < holeTotal; ++i)
         {
-            s_.keys_[i] = std::fabs(Area(s_.holes_[i]));
+            s_.keys_[i] = AreaMagnitude(s_.holes_[i]);
             s_.order_[i] = i;
         }
         {
@@ -1079,10 +1270,9 @@ private:
             s_.twin_.assign(holeIds, holeIds + holeSize);
             ea::sort(s_.twin_.begin(), s_.twin_.end());
             s_.twin_.erase(ea::unique(s_.twin_.begin(), s_.twin_.end()), s_.twin_.end());
-            // Probe just to the left of the first hole edge, which is the side of the region around it.
-            const Point2 a = ProjectDouble(holeIds[0]);
-            const Point2 b = ProjectDouble(holeIds[1]);
-            const Point2 probe{(a.x_ + b.x_) * 0.5 - (b.y_ - a.y_) * 1e-3, (a.y_ + b.y_) * 0.5 + (b.x_ - a.x_) * 1e-3};
+            // Probe with the first hole vertex. A point on an edge counts as inside, so the region around the hole
+            // contains it. The smallest such region is the nearest one around the hole.
+            const CsgGridPoint2 probe = Point(holeIds[0]);
             int index = -1;
             int fallback = -1;
             double smallest = std::numeric_limits<double>::infinity();
@@ -1095,7 +1285,7 @@ private:
                     fallback = r;
                 if (!Contains(region, probe))
                     continue;
-                const double area = std::fabs(Area(region));
+                const double area = AreaMagnitude(region);
                 if (area < smallest)
                 {
                     smallest = area;
@@ -1135,14 +1325,14 @@ private:
     const Mesh& mesh_;
     CsgScratch& scratch_;
     CsgSplitScratch& s_;
-    Vector3 axisU_;
-    Vector3 axisV_;
+    /// Projection of the current triangle: the dropped axis and the swap of the two other axes.
+    int dropAxis_{2};
+    bool flip_{};
     int edgeCount_{};
     int triangle_{};
     bool failed_{};
     int holeCount_{};
     int pendingFrom_{};
-    Vector3 origin_;
 };
 
 /// Interpolate the attributes at a point of the triangle a, b, c. The weights are clamped into the triangle.
@@ -1208,7 +1398,18 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
             vertices.push_back(source.vertices_[local]);
             continue;
         }
-        const Crossing& crossing = core.CrossingAt(id);
+        // A merged crossing has one record for each key. Use the record that belongs to this face.
+        const Crossing* found = core.FindRecord(id,
+            [&](const Crossing& c)
+            {
+                if (c.key_.edgeInSecond_ == mesh.isSecond_)
+                    return localVertex(c.key_.low_) >= 0 && localVertex(c.key_.high_) >= 0;
+                const int t = c.key_.triangle_;
+                return t >= 0 && t < static_cast<int>(mesh.triangleFace_.size()) && mesh.triangleFace_[t] == face;
+            });
+        if (!found)
+            return false;
+        const Crossing& crossing = *found;
         ModelVertex vertex;
         if (crossing.key_.edgeInSecond_ == mesh.isSecond_)
         {
