@@ -48,7 +48,6 @@ CsgTest::Int128Native ToNative(const CsgTest::Int128Portable& value)
 }
 #endif
 
-
 template <typename Int>
 Int Make(int64_t hi, uint64_t lo)
 {
@@ -454,6 +453,83 @@ TEST_CASE("Orient matches the int128 oracle", "[exact]")
     }
 }
 
+TEST_CASE("Orient stress test against the int128 oracle", "[exact][stress]")
+{
+    std::mt19937_64 random(987654321);
+    const int64_t range = (int64_t(1) << 23) - 1;
+    std::uniform_int_distribution<int64_t> coordinate(-range, range);
+    std::uniform_int_distribution<int> mask(0, 15);
+    std::uniform_int_distribution<int> factor(-2, 3);
+    std::uniform_int_distribution<int> kind(0, 3);
+    std::uniform_int_distribution<int> axisPick(0, 2);
+    std::uniform_int_distribution<int> offsetPick(-1, 1);
+    const auto inRange = [&](const CsgGridPoint& p)
+    { return std::abs(p.x_) <= range && std::abs(p.y_) <= range && std::abs(p.z_) <= range; };
+    const auto randomPoint = [&]() { return P(coordinate(random), coordinate(random), coordinate(random)); };
+
+    constexpr int caseCount = 60000;
+    int zeroCount = 0;
+    int nearZeroCount = 0;
+    for (int n = 0; n < caseCount; ++n)
+    {
+        const CsgGridPoint a = randomPoint();
+        const CsgGridPoint b = randomPoint();
+        const CsgGridPoint c = randomPoint();
+        CsgGridPoint d = randomPoint();
+        const int selected = kind(random);
+        if (selected != 0)
+        {
+            // Try to place d on the plane of a, b and c.
+            for (int attempt = 0; attempt < 16; ++attempt)
+            {
+                const int i = factor(random);
+                const int j = factor(random);
+                const CsgGridPoint candidate = P(a.x_ + i * (b.x_ - a.x_) + j * (c.x_ - a.x_),
+                    a.y_ + i * (b.y_ - a.y_) + j * (c.y_ - a.y_), a.z_ + i * (b.z_ - a.z_) + j * (c.z_ - a.z_));
+                if (inRange(candidate))
+                {
+                    d = candidate;
+                    break;
+                }
+            }
+            if (selected == 2)
+            {
+                // Move d by one grid unit on one axis. The point is nearly coplanar.
+                const int offset = offsetPick(random);
+                const int axis = axisPick(random);
+                if (axis == 0 && std::abs(d.x_ + offset) <= range)
+                    d.x_ += offset;
+                else if (axis == 1 && std::abs(d.y_ + offset) <= range)
+                    d.y_ += offset;
+                else if (axis == 2 && std::abs(d.z_ + offset) <= range)
+                    d.z_ += offset;
+            }
+            else if (selected == 3)
+            {
+                // Collinear points a, b and d with a coplanar fourth point.
+                const int i = factor(random);
+                const CsgGridPoint candidate = P(
+                    a.x_ + i * (b.x_ - a.x_), a.y_ + i * (b.y_ - a.y_), a.z_ + i * (b.z_ - a.z_));
+                if (inRange(candidate))
+                    d = candidate;
+            }
+        }
+
+        const int second = mask(random);
+        const int expected = CsgTest::ReferenceOrient(a, b, c, d, second);
+        REQUIRE(CsgExact::Orient(a, b, c, d, second) == expected);
+        const int volumeSign = CsgTest::ReferenceOrient(a, b, c, d, 0);
+        REQUIRE(CsgExact::Orient(a, b, c, d, 0) == volumeSign);
+        if (volumeSign == 0)
+            ++zeroCount;
+        else if (selected == 2)
+            ++nearZeroCount;
+    }
+    // The test must reach the degenerate and the nearly degenerate cases.
+    REQUIRE(zeroCount > caseCount / 10);
+    REQUIRE(nearZeroCount > caseCount / 20);
+}
+
 TEST_CASE("Crosses and PassesInside match the int128 oracle", "[exact]")
 {
     std::mt19937_64 random(777);
@@ -568,6 +644,34 @@ TEST_CASE("Approximate of an expansion with large values", "[exact]")
         const double expected = std::ldexp(1.0, 74) + 12345.0;
         REQUIRE(withinOneUlp(value.Approximate(), expected));
         REQUIRE(withinOneUlp(CsgExpansionApproximate(value.count_, value.terms_), expected));
+    }
+
+    SECTION("Low terms change the rounding")
+    {
+        // The double ulp of 2^70 is 2^18. The value 2^70 + 2^17 is a tie and rounds to even.
+        // The extra low term 1 breaks the tie and the result rounds up.
+        const double tieDown = std::ldexp(1.0, 70);
+        const double roundedUp = std::ldexp(1.0, 70) + std::ldexp(1.0, 18);
+        const auto check = [&](const CsgTest::Int128& value, double expected)
+        {
+            CsgExactVolume volume;
+            build(value, volume);
+            REQUIRE(volume.Approximate() == expected);
+            REQUIRE(CsgExpansionApproximate(volume.count_, volume.terms_) == expected);
+            CsgExactVolume negated;
+            build(CsgTest::Int128(int64_t(0)) - value, negated);
+            REQUIRE(negated.Approximate() == -expected);
+            REQUIRE(CsgExpansionApproximate(negated.count_, negated.terms_) == -expected);
+        };
+        const CsgTest::Int128 half = CsgTest::ShiftLeft(CsgTest::Int128(int64_t(1)), 17);
+        check(pow70 + CsgTest::ShiftLeft(CsgTest::Int128(int64_t(1)), 20), tieDown + std::ldexp(1.0, 20));
+        check(pow70 + half, tieDown);
+        check(pow70 + half + CsgTest::Int128(int64_t(1)), roundedUp);
+        check(pow74 + CsgTest::ShiftLeft(CsgTest::Int128(int64_t(3)), 21) + CsgTest::Int128(int64_t(1)),
+            std::ldexp(1.0, 74) + 3.0 * std::ldexp(1.0, 21) + 1.0);
+        // The double ulp of 2^74 is 2^22. The value 2^74 + 2^21 + 1 rounds up.
+        check(pow74 + CsgTest::ShiftLeft(CsgTest::Int128(int64_t(1)), 21) + CsgTest::Int128(int64_t(1)),
+            std::ldexp(1.0, 74) + std::ldexp(1.0, 22));
     }
 
     SECTION("Zero")
@@ -724,6 +828,31 @@ TEST_CASE("Two product is exact", "[exact]")
         }
     }
 }
+
+#if defined(CSG_HAS_HARDWARE_FMA)
+TEST_CASE("Dekker two product equals the FMA two product", "[exact]")
+{
+    std::mt19937_64 random(424242);
+    std::uniform_int_distribution<int> exponentPick(-20, 20);
+    std::uniform_real_distribution<double> mantissa(0.5, 1.0);
+    const auto makeValue = [&]
+    {
+        const CsgReal value = static_cast<CsgReal>(std::ldexp(mantissa(random), exponentPick(random)));
+        return (random() & 1) ? -value : value;
+    };
+    for (int i = 0; i < 100000; ++i)
+    {
+        const CsgReal a = makeValue();
+        const CsgReal b = makeValue();
+        CsgReal dekkerError = 0;
+        CsgReal fmaError = 0;
+        const CsgReal dekkerProduct = CsgTwoProductDekker(a, b, dekkerError);
+        const CsgReal fmaProduct = CsgTwoProductFma(a, b, fmaError);
+        REQUIRE(dekkerProduct == fmaProduct);
+        REQUIRE(dekkerError == fmaError);
+    }
+}
+#endif
 
 TEST_CASE("Fixed size expansion values", "[exact]")
 {
