@@ -459,16 +459,31 @@ void RunSweep(float step, unsigned maxFailures)
 
 // The sweep covers rotations of the coplanar contact: 4 axes and 257 angles from 0.3 to 179.5 degrees.
 // The grid step is 2^-10 units. The exact tests snap the corners of rotated boxes one by one.
-// The snapped corners do not stay coplanar. This gives wrong unions.
-// Some samples fail because of this. The measured count of failed samples is 126 of 1028.
-// In 31 of them the union of A and B is wrong. All of these are about the axis (1, 1, 1).
-// In the others, the next boolean fails because of zero-width spikes in the faces of the union.
-// The failed samples are about the axis (1, 1, 1) (76), the z axis (25), the y axis (18) and the x axis (7).
+// The snapped corners do not stay coplanar. The measured count of failed samples is 114 of 1028.
+// In all of them the union of A and B is right. The next boolean fails because of zero-width spikes in its faces.
+// The failed samples are about the axis (1, 1, 1) (64), the z axis (25), the y axis (18) and the x axis (7).
 // The test fails if more than 48 samples fail. It is a known limit, so the failure is expected.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units. Then 27 samples fail and 4 unions are wrong.
-// The test passes in double mode.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units. Then 25 samples fail and the test passes.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
 {
     RunSweep(0.7f, 48);
+}
+
+// A rotation about the axis (1, 1, 1) keeps the corner (1, 1, 1) of A. The corner lies at the middle of an edge of B.
+// The snapped corner is often exactly on the snapped edge. The edges of A at the corner then cross a face of B
+// at the corner, and the crossings make a closed curve of zero size. The perturbation gives the orientation of
+// the curve. The angles are samples of the sweep that gave wrong unions in float mode or in double mode.
+TEST_CASE("Union of rotated boxes with a corner on an edge of the other box is right", "[boolean]")
+{
+    for (const int step : {9, 24, 37, 50, 109, 116})
+    {
+        const float angle = 0.3f + 0.7f * static_cast<float>(step);
+        CAPTURE(angle);
+        const Matrix3x4 transform(Vector3::ZERO, Quaternion(angle, Vector3::ONE.Normalized()), 1.0f);
+        const auto ab = Run(MakeBox(Vector3::ZERO, 1, transform), MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, transform),
+            CsgOperation::Union);
+        CHECK(Volume(ab) == Catch::Approx(12.0).margin(VOLUME_TOLERANCE));
+        CHECK(IsClosed(ab));
+    }
 }

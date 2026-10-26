@@ -51,7 +51,7 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 
 - The predicates see positions that are snapped to the grid (1/1024 units in float mode). The output keeps the unsnapped float positions.
 - Rotated coplanar brushes can lose the coplanar contact. A union of such brushes can be wrong.
-- `CSG_EXACT_USE_DOUBLE` makes this problem smaller. In a sweep of 1028 rotations, 126 samples fail in float mode (31 wrong unions). In double mode 27 samples fail (4 wrong unions).
+- `CSG_EXACT_USE_DOUBLE` makes this problem smaller. In a sweep of 1028 rotations, 114 samples fail in float mode and 25 samples fail in double mode. In these samples the union of the first two brushes is right, and the next boolean fails.
 - In both modes a union of rotated brushes can keep zero-width spikes in its faces. The next boolean can then leave a hole.
 
 ## Components

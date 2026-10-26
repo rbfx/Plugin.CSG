@@ -528,6 +528,7 @@ public:
         s_.regionBridged_.clear();
         failed_ = false;
         holeCount_ = 0;
+        triangle_ = triangle;
 
         for (int i = 0; i < 3; ++i)
         {
@@ -612,6 +613,58 @@ private:
             area += along(p, axisU_) * along(q, axisV_) - along(q, axisU_) * along(p, axisV_);
         }
         return area;
+    }
+
+    /// Twice the signed area of a closed cycle whose points are crossings at one vertex of the other operand.
+    /// The vertex lies on the plane of the triangle. The positions of such crossings are equal in float.
+    /// The perturbation moves the crossing of the edge low-high to the vertex plus k * (high - low) / D.
+    /// D is the exact difference of the crossing, and k is one factor for all the crossings of the triangle.
+    /// The area of the offsets (high - low) / D has the sign of the perturbed area.
+    /// Return false if a point of the cycle is not such a crossing.
+    bool PerturbedArea(int loop, double& area) const
+    {
+        const int* cycle = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        const CsgGridPoint& t0 = mesh_.grid_[mesh_.triangleIds_[triangle_ * 3]];
+        const Mesh& edges = mesh_.isSecond_ ? core_.a_ : core_.b_;
+        int vertex = -1;
+        const auto offset = [&](int id, double& u, double& v)
+        {
+            if (id < core_.CrossingBase())
+                return false;
+            const Crossing& crossing = core_.CrossingAt(id);
+            const CsgCrossingKey& key = crossing.key_;
+            const double difference = crossing.difference_.Approximate();
+            if (key.triangle_ != triangle_ || key.edgeInSecond_ == mesh_.isSecond_ || difference == 0.0)
+                return false;
+            const int onPlane = crossing.lowVolume_.Sign() == 0 ? key.low_
+                : CsgExact::Dot(crossing.normal_, t0, edges.grid_[key.high_]).Sign() == 0 ? key.high_ : -1;
+            if (onPlane < 0 || (vertex >= 0 && onPlane != vertex))
+                return false;
+            vertex = onPlane;
+            const Vector3& low = edges.loops_.positions_[key.low_];
+            const Vector3& high = edges.loops_.positions_[key.high_];
+            const double d[3] = {(static_cast<double>(high.x_) - low.x_) / difference,
+                (static_cast<double>(high.y_) - low.y_) / difference, (static_cast<double>(high.z_) - low.z_) / difference};
+            u = d[0] * axisU_.x_ + d[1] * axisU_.y_ + d[2] * axisU_.z_;
+            v = d[0] * axisV_.x_ + d[1] * axisV_.y_ + d[2] * axisV_.z_;
+            return true;
+        };
+        area = 0.0;
+        double u0 = 0.0, v0 = 0.0;
+        if (!offset(cycle[0], u0, v0))
+            return false;
+        double pu = u0, pv = v0;
+        for (int i = 1; i <= count; ++i)
+        {
+            double qu = u0, qv = v0;
+            if (i < count && !offset(cycle[i], qu, qv))
+                return false;
+            area += pu * qv - qu * pv;
+            pu = qu;
+            pv = qv;
+        }
+        return true;
     }
 
     void Trace(int from, int to)
@@ -774,7 +827,14 @@ private:
             {
                 const int m0 = s_.closedCycles_[head];
                 const int m1 = s_.closedCycles_[second];
-                if (SignedArea(m0) >= SignedArea(m1))
+                double area0 = 0.0;
+                double area1 = 0.0;
+                if (!PerturbedArea(m0, area0) || !PerturbedArea(m1, area1))
+                {
+                    area0 = SignedArea(m0);
+                    area1 = SignedArea(m1);
+                }
+                if (area0 >= area1)
                 {
                     s_.cycles_.push_back(m0);
                     s_.holes_.push_back(m1);
@@ -1078,6 +1138,7 @@ private:
     Vector3 axisU_;
     Vector3 axisV_;
     int edgeCount_{};
+    int triangle_{};
     bool failed_{};
     int holeCount_{};
     int pendingFrom_{};
