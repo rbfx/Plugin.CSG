@@ -4,11 +4,13 @@
 
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
+#include "Urho3D/CSG/CsgExpansion.h"
 
 #include "TestExactReference.h"
 
 #include <catch2/catch_amalgamated.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -361,6 +363,318 @@ TEST_CASE("Float expansion of a 128 bit number is exact", "[exact]")
         REQUIRE(CsgTest::ToInt128(terms.data(), static_cast<int>(terms.size())) == value);
     }
     REQUIRE(CsgTest::FromInt128(CsgTest::Int128(int64_t(0))).empty());
+}
+
+namespace
+{
+
+using Int128 = CsgTest::Int128;
+
+constexpr int RealDigits = std::numeric_limits<CsgReal>::digits;
+
+Int128 MakeInt128(int64_t value)
+{
+    return Int128(value);
+}
+
+/// Convert a number with an integer value to the oracle type. The conversion is exact.
+Int128 RealToInt128(CsgReal value)
+{
+    if (value == CsgReal(0))
+        return MakeInt128(0);
+    int exponent = 0;
+    const CsgReal fraction = std::frexp(value, &exponent);
+    const int64_t mantissa = static_cast<int64_t>(std::ldexp(fraction, RealDigits));
+    const int shift = exponent - RealDigits;
+    if (shift >= 0)
+        return CsgTest::ShiftLeft(MakeInt128(mantissa), shift);
+    REQUIRE(shift > -63);
+    REQUIRE(mantissa % (int64_t(1) << -shift) == 0);
+    return MakeInt128(mantissa / (int64_t(1) << -shift));
+}
+
+/// Exact value of an expansion with integer terms.
+Int128 ExpansionValue(const CsgReal* terms, int count)
+{
+    Int128 result = MakeInt128(0);
+    for (int i = 0; i < count; ++i)
+        result = result + RealToInt128(terms[i]);
+    return result;
+}
+
+ea::vector<CsgReal> ToExpansion(const Int128& value)
+{
+    const ea::vector<float> terms = CsgTest::FromInt128(value);
+    ea::vector<CsgReal> result;
+    for (const float term : terms)
+        result.push_back(static_cast<CsgReal>(term));
+    return result;
+}
+
+/// Position of the highest set bit of a nonzero number.
+int HighBit(CsgReal value)
+{
+    int exponent = 0;
+    std::frexp(value, &exponent);
+    return exponent - 1;
+}
+
+/// Position of the lowest set bit of a nonzero number.
+int LowBit(CsgReal value)
+{
+    int exponent = 0;
+    const CsgReal fraction = std::frexp(value, &exponent);
+    int64_t mantissa = static_cast<int64_t>(std::ldexp(std::fabs(fraction), RealDigits));
+    int position = exponent - RealDigits;
+    while ((mantissa & 1) == 0)
+    {
+        mantissa /= 2;
+        ++position;
+    }
+    return position;
+}
+
+/// Check that the terms do not overlap, have no zero and have increasing magnitudes.
+bool IsNonOverlapping(const CsgReal* terms, int count)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        if (terms[i] == CsgReal(0))
+            return false;
+        if (i + 1 < count && !(std::fabs(terms[i]) < std::fabs(terms[i + 1])))
+            return false;
+        if (i + 1 < count && HighBit(terms[i]) >= LowBit(terms[i + 1]))
+            return false;
+    }
+    return true;
+}
+
+/// Random 128 bit number with a random size up to maxBits bits and a random sign.
+Int128 RandomInt128(std::mt19937_64& random, int maxBits)
+{
+    const int bits = static_cast<int>(random() % static_cast<uint64_t>(maxBits + 1));
+    Int128 value = MakeInt128(0);
+    for (int done = 0; done < bits; done += 32)
+    {
+        const int chunkBits = bits - done < 32 ? bits - done : 32;
+        const int64_t chunk = static_cast<int64_t>(random() & ((uint64_t{1} << chunkBits) - 1));
+        value = CsgTest::ShiftLeft(value, chunkBits) + MakeInt128(chunk);
+    }
+    return (random() & 1) ? MakeInt128(0) - value : value;
+}
+
+Int128 Power2(int bits)
+{
+    return CsgTest::ShiftLeft(MakeInt128(1), bits);
+}
+
+} // namespace
+
+TEST_CASE("Two product is exact", "[exact]")
+{
+    using TwoProductFunction = CsgReal (*)(CsgReal, CsgReal, CsgReal&);
+    ea::vector<TwoProductFunction> functions{&CsgTwoProduct, &CsgTwoProductDekker};
+#if defined(CSG_HAS_HARDWARE_FMA)
+    functions.push_back(&CsgTwoProductFma);
+#endif
+
+    std::mt19937_64 random(2024);
+    for (const TwoProductFunction function : functions)
+    {
+        for (int i = 0; i < 10000; ++i)
+        {
+            // Integers up to 2^digits. The exact product has up to 2 * digits bits.
+            const int64_t limit = int64_t(1) << RealDigits;
+            const auto makeValue = [&]
+            {
+                const int bits = static_cast<int>(random() % (RealDigits + 1));
+                const int64_t magnitude = static_cast<int64_t>(random() % (uint64_t{1} << bits));
+                return (random() & 1) ? -magnitude : magnitude;
+            };
+            const int64_t a = i % 100 == 0 ? limit : makeValue();
+            const int64_t b = i % 100 == 1 ? -limit : makeValue();
+            const Int128 expected = MakeInt128(a) * MakeInt128(b);
+
+            CsgReal error = 0;
+            const CsgReal product = function(static_cast<CsgReal>(a), static_cast<CsgReal>(b), error);
+            REQUIRE(product == static_cast<CsgReal>(a) * static_cast<CsgReal>(b));
+            REQUIRE(RealToInt128(product) + RealToInt128(error) == expected);
+
+            // Scale the second factor by 2^-80. The exact result is scaled by 2^-80 too.
+            const CsgReal scaledB = static_cast<CsgReal>(b) * CsgReal(0x1p-80);
+            CsgReal scaledError = 0;
+            const CsgReal scaledProduct = function(static_cast<CsgReal>(a), scaledB, scaledError);
+            REQUIRE(
+                RealToInt128(std::ldexp(scaledProduct, 80)) + RealToInt128(std::ldexp(scaledError, 80)) == expected);
+        }
+    }
+}
+
+TEST_CASE("Fixed size expansion values", "[exact]")
+{
+    CsgExactMinor minor;
+    minor.count_ = 0;
+    REQUIRE(minor.Sign() == 0);
+    REQUIRE(minor.Approximate() == 0.0);
+
+    const ea::vector<CsgReal> terms = ToExpansion(MakeInt128(-1234567) * Power2(30) + MakeInt128(77));
+    CsgExactVolume volume;
+    volume.count_ = static_cast<int>(terms.size());
+    for (int i = 0; i < volume.count_; ++i)
+        volume.terms_[i] = terms[i];
+    REQUIRE(volume.Sign() == -1);
+    REQUIRE(volume.Approximate() == -1234567.0 * 1073741824.0 + 77.0);
+}
+
+TEST_CASE("Expansion scale, sum and compress are exact", "[exact]")
+{
+    std::mt19937_64 random(777);
+    for (int i = 0; i < 5000; ++i)
+    {
+        const Int128 x = RandomInt128(random, 100);
+        const Int128 y = RandomInt128(random, 100);
+        const ea::vector<CsgReal> ex = ToExpansion(x);
+        const ea::vector<CsgReal> ey = ToExpansion(y);
+        const int cx = static_cast<int>(ex.size());
+        const int cy = static_cast<int>(ey.size());
+        REQUIRE(ExpansionValue(ex.data(), cx) == x);
+
+        // Scale by an integer with up to 24 bits.
+        const int64_t factor = static_cast<int64_t>(random() % (uint64_t{1} << 24)) * ((random() & 1) ? -1 : 1);
+        ea::vector<CsgReal> scaled(2 * cx + 1);
+        const int scaledCount = CsgScaleExpansion(cx, ex.data(), static_cast<CsgReal>(factor), scaled.data());
+        REQUIRE(scaledCount >= 0);
+        REQUIRE(scaledCount <= 2 * cx);
+        REQUIRE(ExpansionValue(scaled.data(), scaledCount) == CsgTest::Mul(x, factor));
+        REQUIRE(IsNonOverlapping(scaled.data(), scaledCount));
+        if (cx == 0 || factor == 0)
+            REQUIRE(scaledCount == 0);
+
+        // Sum of two expansions. The expansions can overlap each other.
+        ea::vector<CsgReal> sum(cx + cy + 1);
+        const int sumCount = CsgExpansionSum(cx, ex.data(), cy, ey.data(), sum.data());
+        REQUIRE(sumCount >= 0);
+        REQUIRE(sumCount <= cx + cy);
+        REQUIRE(ExpansionValue(sum.data(), sumCount) == x + y);
+        REQUIRE(IsNonOverlapping(sum.data(), sumCount));
+
+        // The sum of a number and its negation is empty.
+        ea::vector<CsgReal> negated(ex);
+        for (CsgReal& term : negated)
+            term = -term;
+        ea::vector<CsgReal> zero(2 * cx + 1);
+        REQUIRE(CsgExpansionSum(cx, ex.data(), cx, negated.data(), zero.data()) == 0);
+
+        // Compress a sum of three terms. The value stays the same.
+        ea::vector<CsgReal> chain(2 * cx + cy + 1);
+        const int chainCount = CsgExpansionSum(sumCount, sum.data(), scaledCount, scaled.data(), chain.data());
+        REQUIRE(IsNonOverlapping(chain.data(), chainCount));
+        const int compressedCount = CsgCompress(chainCount, chain.data());
+        REQUIRE(compressedCount >= 0);
+        REQUIRE(compressedCount <= chainCount);
+        REQUIRE(ExpansionValue(chain.data(), compressedCount) == x + y + CsgTest::Mul(x, factor));
+        REQUIRE(IsNonOverlapping(chain.data(), compressedCount));
+    }
+
+    SECTION("Empty inputs")
+    {
+        CsgReal out[4];
+        const CsgReal one[1] = {1};
+        REQUIRE(CsgScaleExpansion(0, one, 3, out) == 0);
+        REQUIRE(CsgExpansionSum(0, one, 0, one, out) == 0);
+        REQUIRE(CsgExpansionSum(1, one, 0, one, out) == 1);
+        REQUIRE(out[0] == 1);
+        REQUIRE(CsgExpansionSum(0, one, 1, one, out) == 1);
+        REQUIRE(CsgCompress(0, out) == 0);
+        REQUIRE(CsgExpansionSign(0, out) == 0);
+    }
+}
+
+TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
+{
+    const Int128 limit = Power2(75);
+    const Int128 zero = MakeInt128(0);
+    const Int128 one = MakeInt128(1);
+
+    const auto check = [](const Int128& a, const Int128& b, const Int128& c, const Int128& d)
+    {
+        const ea::vector<CsgReal> ta = ToExpansion(a);
+        const ea::vector<CsgReal> tb = ToExpansion(b);
+        const ea::vector<CsgReal> tc = ToExpansion(c);
+        const ea::vector<CsgReal> td = ToExpansion(d);
+        const int expected = CsgTest::SignOfProductDifference(a, b, c, d);
+        const int actual = CsgExpansionProductDifferenceSign(static_cast<int>(ta.size()), ta.data(),
+            static_cast<int>(tb.size()), tb.data(), static_cast<int>(tc.size()), tc.data(),
+            static_cast<int>(td.size()), td.data());
+        REQUIRE(actual == expected);
+    };
+
+    std::mt19937_64 random(4242);
+
+    SECTION("Random values")
+    {
+        for (int i = 0; i < 20000; ++i)
+            check(RandomInt128(random, 75), RandomInt128(random, 75), RandomInt128(random, 75),
+                RandomInt128(random, 75));
+    }
+
+    SECTION("Equal products")
+    {
+        for (int i = 0; i < 5000; ++i)
+        {
+            const Int128 a = RandomInt128(random, 25);
+            const Int128 b = RandomInt128(random, 25);
+            const Int128 k = RandomInt128(random, 25);
+            check(a, b, b, a);
+            check(a, b, zero - a, zero - b);
+            check(a * k, b, a, b * k);
+            check(a * k, zero - b, zero - a, b * k);
+        }
+    }
+
+    SECTION("Products that differ by one")
+    {
+        for (int i = 0; i < 5000; ++i)
+        {
+            // n * n - (n - 1) * (n + 1) = 1
+            Int128 n = RandomInt128(random, 74);
+            if (n < zero)
+                n = zero - n;
+            check(n, n, n - one, n + one);
+            check(n - one, n + one, n, n);
+            check(zero - n, n, n - one, zero - n - one);
+            check(n, n - one, n - one, n);
+        }
+        const Int128 n = limit - MakeInt128(2);
+        check(n, n, n - one, n + one);
+        check(n - one, n + one, n, n);
+    }
+
+    SECTION("Zeros")
+    {
+        for (int i = 0; i < 2000; ++i)
+        {
+            const Int128 a = RandomInt128(random, 75);
+            const Int128 b = RandomInt128(random, 75);
+            check(zero, a, b, zero);
+            check(zero, a, zero, b);
+            check(a, b, zero, a);
+            check(a, zero, a, b);
+            check(zero, zero, zero, zero);
+        }
+    }
+
+    SECTION("Values near 2^75")
+    {
+        const Int128 values[] = {limit - one, zero - (limit - one), limit - MakeInt128(2),
+            zero - (limit - MakeInt128(2)), Power2(74), zero - Power2(74), Power2(74) + one, Power2(50), one,
+            zero - one};
+        for (const Int128& a : values)
+            for (const Int128& b : values)
+                for (const Int128& c : values)
+                    for (const Int128& d : values)
+                        check(a, b, c, d);
+    }
 }
 
 TEST_CASE("Exact filter", "[exact]")

@@ -37,6 +37,7 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgCommon.cpp
     ${CSG_DIR}/CsgCorefine.cpp
     ${CSG_DIR}/CsgExact.cpp
+    ${CSG_DIR}/CsgExpansion.cpp
     ${CSG_DIR}/CsgFaceBvh.cpp
     ${CSG_DIR}/CsgOptimization.cpp
     ${CSG_DIR}/CsgPolygon.cpp

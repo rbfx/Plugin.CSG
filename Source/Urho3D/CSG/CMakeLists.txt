@@ -16,6 +16,7 @@ set (SOURCE_FILES
     CsgComponent.cpp
     CsgCorefine.cpp
     CsgExact.cpp
+    CsgExpansion.cpp
     CsgFaceBvh.cpp
     CsgOptimization.cpp
     CsgRoot.cpp
@@ -31,6 +32,7 @@ set (SOURCE_FILES
     CsgExact.h
     CsgFlatMap.h
     CsgExactFilter.h
+    CsgExpansion.h
     CsgFaceBvh.h
     CsgOptimization.h
     CsgRoot.h
