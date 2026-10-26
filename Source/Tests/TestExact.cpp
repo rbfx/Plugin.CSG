@@ -64,6 +64,29 @@ CsgGridPoint P(int64_t x, int64_t y, int64_t z)
 
 constexpr int64_t Unit = 1 << 10;
 
+/// Crosses with the oracle orientation. The structure is the same as in the library.
+bool ReferencePassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0,
+    const CsgGridPoint& t1, const CsgGridPoint& t2, bool edgeInSecond)
+{
+    const int linesMask = edgeInSecond ? 0b0011 : 0b1100;
+    const int s0 = CsgTest::ReferenceOrient(e0, e1, t0, t1, linesMask);
+    const int s1 = CsgTest::ReferenceOrient(e0, e1, t1, t2, linesMask);
+    const int s2 = CsgTest::ReferenceOrient(e0, e1, t2, t0, linesMask);
+    return s0 != 0 && s1 == s0 && s2 == s0;
+}
+
+bool ReferenceCrosses(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1,
+    const CsgGridPoint& t2, bool edgeInSecond, bool& e1Above)
+{
+    const int sidesMask = edgeInSecond ? 0b1000 : 0b0111;
+    const int s0 = CsgTest::ReferenceOrient(t0, t1, t2, e0, sidesMask);
+    const int s1 = CsgTest::ReferenceOrient(t0, t1, t2, e1, sidesMask);
+    e1Above = s1 > 0;
+    if (s0 == 0 || s1 == 0 || s0 == s1)
+        return false;
+    return ReferencePassesInside(e0, e1, t0, t1, t2, edgeInSecond);
+}
+
 } // namespace
 
 TEST_CASE("Portable 128 bit product matches the compiler type", "[exact]")
@@ -180,7 +203,44 @@ TEMPLATE_LIST_TEST_CASE("Sign of product difference", "[exact]", CsgTestTypes)
     }
 }
 
-TEMPLATE_LIST_TEST_CASE("Orient on tetrahedra", "[exact]", CsgTestTypes)
+TEST_CASE("Orient on tetrahedra", "[exact]")
+{
+    const CsgGridPoint a = P(0, 0, 0);
+    const CsgGridPoint b = P(Unit, 0, 0);
+    const CsgGridPoint c = P(0, Unit, 0);
+    const CsgGridPoint d = P(0, 0, Unit);
+
+    REQUIRE(CsgExact::Orient(a, b, c, d, 0) == 1);
+    REQUIRE(CsgExact::Orient(a, c, b, d, 0) == -1);
+    // The perturbation never changes a nonzero determinant.
+    for (int second = 0; second < 16; ++second)
+    {
+        REQUIRE(CsgExact::Orient(a, b, c, d, second) == 1);
+        REQUIRE(CsgExact::Orient(a, c, b, d, second) == -1);
+    }
+
+    SECTION("Coplanar points")
+    {
+        const CsgGridPoint coplanar = P(Unit, Unit, 0);
+        REQUIRE(CsgExact::Orient(a, b, c, coplanar, 0) == 0);
+        REQUIRE(CsgExact::Orient(a, b, c, coplanar, 0b1111) == 0);
+        // Moving d by (eps, eps^2, eps^3) lifts it by eps^3: u x v = (0, 0, 1) gives plus.
+        REQUIRE(CsgExact::Orient(a, b, c, coplanar, 0b1000) == 1);
+        // Moving a lowers the plane through b and c by the same amount: G = -(v x w + w x u + u x v) = (0, 0, +1).
+        REQUIRE(CsgExact::Orient(a, b, c, coplanar, 0b0001) == 1);
+        // Moving b and c: weights (1, 1, 0), the sum v x w + w x u has z = -2.
+        REQUIRE(CsgExact::Orient(a, b, c, coplanar, 0b0110) == -1);
+        // The same plane with a normal along x: the first component of G decides.
+        const CsgGridPoint b2 = P(0, Unit, 0);
+        const CsgGridPoint c2 = P(0, 0, Unit);
+        REQUIRE(CsgExact::Orient(a, b2, c2, P(0, Unit, Unit), 0b1000) == 1);
+        REQUIRE(CsgExact::Orient(a, c2, b2, P(0, Unit, Unit), 0b1000) == -1);
+        // Collinear points have no gradient.
+        REQUIRE(CsgExact::Orient(a, b, P(2 * Unit, 0, 0), P(3 * Unit, 0, 0), 0b1010) == 0);
+    }
+}
+
+TEMPLATE_LIST_TEST_CASE("Volume and normal on tetrahedra", "[exact]", CsgTestTypes)
 {
     using Int = TestType;
 
@@ -189,36 +249,6 @@ TEMPLATE_LIST_TEST_CASE("Orient on tetrahedra", "[exact]", CsgTestTypes)
     const CsgGridPoint c = P(0, Unit, 0);
     const CsgGridPoint d = P(0, 0, Unit);
 
-    REQUIRE(CsgExact::OrientT<Int>(a, b, c, d, 0) == 1);
-    REQUIRE(CsgExact::OrientT<Int>(a, c, b, d, 0) == -1);
-    // The perturbation never changes a nonzero determinant.
-    for (int second = 0; second < 16; ++second)
-    {
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, d, second) == 1);
-        REQUIRE(CsgExact::OrientT<Int>(a, c, b, d, second) == -1);
-    }
-
-    SECTION("Coplanar points")
-    {
-        const CsgGridPoint coplanar = P(Unit, Unit, 0);
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, coplanar, 0) == 0);
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, coplanar, 0b1111) == 0);
-        // Moving d by (eps, eps^2, eps^3) lifts it by eps^3: u x v = (0, 0, 1) gives plus.
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, coplanar, 0b1000) == 1);
-        // Moving a lowers the plane through b and c by the same amount: G = -(v x w + w x u + u x v) = (0, 0, +1).
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, coplanar, 0b0001) == 1);
-        // Moving b and c: weights (1, 1, 0), the sum v x w + w x u has z = -2.
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, coplanar, 0b0110) == -1);
-        // The same plane with a normal along x: the first component of G decides.
-        const CsgGridPoint b2 = P(0, Unit, 0);
-        const CsgGridPoint c2 = P(0, 0, Unit);
-        REQUIRE(CsgExact::OrientT<Int>(a, b2, c2, P(0, Unit, Unit), 0b1000) == 1);
-        REQUIRE(CsgExact::OrientT<Int>(a, c2, b2, P(0, Unit, Unit), 0b1000) == -1);
-        // Collinear points have no gradient.
-        REQUIRE(CsgExact::OrientT<Int>(a, b, P(2 * Unit, 0, 0), P(3 * Unit, 0, 0), 0b1010) == 0);
-    }
-
-    SECTION("Volume and normal")
     {
         const CsgNormal<Int> normal = CsgExact::NormalT<Int>(a, b, c);
         REQUIRE(normal.x_ == Int(0));
@@ -230,10 +260,8 @@ TEMPLATE_LIST_TEST_CASE("Orient on tetrahedra", "[exact]", CsgTestTypes)
     }
 }
 
-TEMPLATE_LIST_TEST_CASE("Orient perturbation matches the numeric displacement", "[exact]", CsgTestTypes)
+TEST_CASE("Orient perturbation matches the numeric displacement", "[exact]")
 {
-    using Int = TestType;
-
     // The determinant is linear in the displacement, so a small numeric epsilon reproduces the symbolic one.
     std::mt19937 random(99);
     std::uniform_int_distribution<int> coordinate(-4, 4);
@@ -249,7 +277,7 @@ TEMPLATE_LIST_TEST_CASE("Orient perturbation matches the numeric displacement", 
         const int t = factor(random);
         const CsgGridPoint d = P(a.x_ + s * (b.x_ - a.x_) + t * (c.x_ - a.x_),
             a.y_ + s * (b.y_ - a.y_) + t * (c.y_ - a.y_), a.z_ + s * (b.z_ - a.z_) + t * (c.z_ - a.z_));
-        REQUIRE(CsgExact::OrientT<Int>(a, b, c, d, 0) == 0);
+        REQUIRE(CsgExact::Orient(a, b, c, d, 0) == 0);
 
         for (int second = 1; second < 15; ++second)
         {
@@ -274,7 +302,7 @@ TEMPLATE_LIST_TEST_CASE("Orient perturbation matches the numeric displacement", 
             }
             const long double det = u[0] * (v[1] * w[2] - v[2] * w[1]) + u[1] * (v[2] * w[0] - v[0] * w[2])
                 + u[2] * (v[0] * w[1] - v[1] * w[0]);
-            const int result = CsgExact::OrientT<Int>(a, b, c, d, second);
+            const int result = CsgExact::Orient(a, b, c, d, second);
             if (result == 0)
             {
                 // A 53 bit long double is too coarse for this bound.
@@ -293,7 +321,7 @@ TEMPLATE_LIST_TEST_CASE("Orient perturbation matches the numeric displacement", 
     REQUIRE(nonzero > 1000);
 }
 
-TEST_CASE("Orient results are equal for both 128 bit types", "[exact]")
+TEST_CASE("Volume and normal results are equal for both 128 bit types", "[exact]")
 {
 #if CSG_HAS_NATIVE_INT128
     std::mt19937_64 random(4242);
@@ -308,12 +336,10 @@ TEST_CASE("Orient results are equal for both 128 bit types", "[exact]")
             const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
             const CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
             const int second = static_cast<int>(random() % 16);
-            REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, d, second)
-                == CsgExact::OrientT<CsgCompilerInt128>(a, b, c, d, second));
             // The volume has no filter. A nonzero volume gives the sign of Orient for every mask.
             const int volumeSign = CsgSign(CsgExact::VolumeT<CsgCompilerInt128>(a, b, c, d));
             if (volumeSign != 0)
-                REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, d, second) == volumeSign);
+                REQUIRE(CsgExact::Orient(a, b, c, d, second) == volumeSign);
             REQUIRE(CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d)) == volumeSign);
             REQUIRE(ToNative(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d))
                 == CsgExact::VolumeT<CsgCompilerInt128>(a, b, c, d));
@@ -349,6 +375,172 @@ TEST_CASE("Reference oracle matches the library Orient", "[exact]")
                 REQUIRE(CsgTest::ReferenceOrient(a, b, c, d, 0) == volumeSign);
         }
     }
+}
+
+TEST_CASE("Orient matches the int128 oracle", "[exact]")
+{
+    std::mt19937_64 random(20240601);
+    const int64_t limit = (int64_t(1) << 23) - 1;
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, limit})
+    {
+        std::uniform_int_distribution<int64_t> coordinate(-range, range);
+        std::uniform_int_distribution<int> small(-1, 1);
+        std::uniform_int_distribution<int> axisPick(0, 2);
+        std::uniform_int_distribution<int> extremePick(0, 5);
+        const auto inRange = [&](const CsgGridPoint& p)
+        { return std::abs(p.x_) <= range && std::abs(p.y_) <= range && std::abs(p.z_) <= range; };
+        const auto randomPoint = [&]() { return P(coordinate(random), coordinate(random), coordinate(random)); };
+        // Coordinates at the limits of the range and next to them.
+        const auto extremeValue = [&]()
+        {
+            const int64_t values[6] = {range, -range, range - 1, -range + 1, 0, 1};
+            return values[extremePick(random)];
+        };
+        const auto extremePoint = [&]() { return P(extremeValue(), extremeValue(), extremeValue()); };
+        const auto combination = [](const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int i, int j)
+        {
+            return P(a.x_ + i * (b.x_ - a.x_) + j * (c.x_ - a.x_), a.y_ + i * (b.y_ - a.y_) + j * (c.y_ - a.y_),
+                a.z_ + i * (b.z_ - a.z_) + j * (c.z_ - a.z_));
+        };
+
+        int nonzeroPerturbed = 0;
+        for (int n = 0; n < 20000; ++n)
+        {
+            CsgGridPoint a = randomPoint();
+            CsgGridPoint b = randomPoint();
+            CsgGridPoint c = randomPoint();
+            CsgGridPoint d = randomPoint();
+            switch (n % 10)
+            {
+            case 0: // Random points.
+                break;
+            case 1: // Coplanar.
+            case 2:
+            {
+                const CsgGridPoint moved = combination(a, b, c, small(random), small(random));
+                if (inRange(moved))
+                    d = moved;
+                break;
+            }
+            case 3: // Collinear.
+            {
+                const CsgGridPoint onLine = combination(a, b, b, small(random), 0);
+                if (inRange(onLine))
+                    c = onLine;
+                const CsgGridPoint second = combination(a, b, b, small(random), 0);
+                if (inRange(second))
+                    d = second;
+                break;
+            }
+            case 4: // Duplicate points.
+            {
+                const CsgGridPoint* sources[3] = {&a, &b, &c};
+                CsgGridPoint* targets[3] = {&b, &c, &d};
+                *targets[n / 10 % 3] = *sources[(n / 30) % (n / 10 % 3 + 1)];
+                break;
+            }
+            case 5: // Coplanar points moved by one unit on one axis.
+            case 6:
+            {
+                CsgGridPoint moved = combination(a, b, c, small(random), small(random));
+                const int axis = axisPick(random);
+                const int64_t step = (random() & 1) != 0 ? 1 : -1;
+                (axis == 0 ? moved.x_ : axis == 1 ? moved.y_ : moved.z_) += step;
+                if (inRange(moved))
+                    d = moved;
+                break;
+            }
+            case 7: // Extreme coordinates.
+                a = extremePoint();
+                b = extremePoint();
+                c = extremePoint();
+                d = extremePoint();
+                break;
+            case 8: // Extreme coordinates with a coplanar point.
+            {
+                a = extremePoint();
+                b = extremePoint();
+                c = extremePoint();
+                const CsgGridPoint moved = combination(a, b, c, small(random), small(random));
+                d = inRange(moved) ? moved : extremePoint();
+                break;
+            }
+            default: // All points equal, or three equal.
+                b = a;
+                if (n % 20 < 10)
+                {
+                    c = a;
+                    d = a;
+                }
+                break;
+            }
+
+            for (int second = 0; second < 16; ++second)
+            {
+                const int expected = CsgTest::ReferenceOrient(a, b, c, d, second);
+                REQUIRE(CsgExact::Orient(a, b, c, d, second) == expected);
+                if (second != 0 && second != 15 && CsgTest::ReferenceOrient(a, b, c, d, 0) == 0 && expected != 0)
+                    ++nonzeroPerturbed;
+            }
+        }
+        // The perturbation resolves many degenerate cases.
+        REQUIRE(nonzeroPerturbed > 1000);
+    }
+}
+
+TEST_CASE("Crosses and PassesInside match the int128 oracle", "[exact]")
+{
+    std::mt19937_64 random(777);
+    const int64_t limit = (int64_t(1) << 23) - 1;
+    int crossings = 0;
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, limit})
+    {
+        std::uniform_int_distribution<int64_t> coordinate(-range, range);
+        std::uniform_int_distribution<int> small(-1, 1);
+        const auto randomPoint = [&]() { return P(coordinate(random), coordinate(random), coordinate(random)); };
+        for (int n = 0; n < 20000; ++n)
+        {
+            const CsgGridPoint t0 = randomPoint();
+            const CsgGridPoint t1 = randomPoint();
+            const CsgGridPoint t2 = randomPoint();
+            CsgGridPoint e0 = randomPoint();
+            CsgGridPoint e1 = randomPoint();
+            if (n % 4 == 1)
+            {
+                // An end point in the plane of the triangle.
+                const int i = small(random);
+                const int j = small(random);
+                const CsgGridPoint moved = P(t0.x_ + i * (t1.x_ - t0.x_) + j * (t2.x_ - t0.x_),
+                    t0.y_ + i * (t1.y_ - t0.y_) + j * (t2.y_ - t0.y_), t0.z_ + i * (t1.z_ - t0.z_) + j * (t2.z_ - t0.z_));
+                if (std::abs(moved.x_) <= range && std::abs(moved.y_) <= range && std::abs(moved.z_) <= range)
+                    e1 = moved;
+            }
+            else if (n % 4 == 2)
+            {
+                // An edge that ends at a vertex of the triangle.
+                e1 = (n % 3 == 0) ? t0 : (n % 3 == 1) ? t1 : t2;
+            }
+            else if (n % 4 == 3)
+            {
+                // The edge starts and ends at the same point.
+                e1 = e0;
+            }
+
+            for (const bool edgeInSecond : {false, true})
+            {
+                bool above = false;
+                bool expectedAbove = false;
+                const bool expected = ReferenceCrosses(e0, e1, t0, t1, t2, edgeInSecond, expectedAbove);
+                REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, edgeInSecond, above) == expected);
+                REQUIRE(above == expectedAbove);
+                REQUIRE(CsgExact::PassesInside(e0, e1, t0, t1, t2, edgeInSecond)
+                    == ReferencePassesInside(e0, e1, t0, t1, t2, edgeInSecond));
+                if (expected)
+                    ++crossings;
+            }
+        }
+    }
+    REQUIRE(crossings > 1000);
 }
 
 TEST_CASE("Float expansion of a 128 bit number is exact", "[exact]")
@@ -712,7 +904,6 @@ TEST_CASE("Exact filter", "[exact]")
         float det = 0.0f;
         REQUIRE((runFilter(a, b, c, d, det) & 1) == 0);
         REQUIRE(CsgExact::Orient(a, b, c, d, 0) == 0);
-        REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, d, 0) == 0);
         // The volume has no filter. It is exactly zero.
         REQUIRE(CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d)) == 0);
         // One grid unit above the plane: the exact sign is nonzero.
@@ -720,7 +911,6 @@ TEST_CASE("Exact filter", "[exact]")
         const int exactSign = CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, above));
         REQUIRE(exactSign != 0);
         REQUIRE(CsgExact::Orient(a, b, c, above, 0) == exactSign);
-        REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, above, 0) == exactSign);
     }
 
     SECTION("Clear cases are decided")
@@ -864,7 +1054,6 @@ TEST_CASE("Exact crossing tests", "[exact]")
         REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, true, above));
         REQUIRE(CsgExact::Crosses(e1, e0, t0, t1, t2, false, above));
         REQUIRE_FALSE(above);
-        REQUIRE(CsgExact::CrossesT<CsgInt128Portable>(e0, e1, t0, t1, t2, false, above));
         REQUIRE(CsgExact::PassesInside(e0, e1, t0, t1, t2, false));
         // The orientation of the triangle does not matter for the inside test.
         REQUIRE(CsgExact::PassesInside(e0, e1, t0, t2, t1, false));
@@ -877,13 +1066,11 @@ TEST_CASE("Exact crossing tests", "[exact]")
         REQUIRE_FALSE(CsgExact::Crosses(P(Unit, Unit, Unit), P(Unit, Unit, 2 * Unit), t0, t1, t2, false, above));
         REQUIRE(above);
         REQUIRE_FALSE(CsgExact::PassesInside(P(3 * Unit, 3 * Unit, -Unit), P(3 * Unit, 3 * Unit, Unit), t0, t1, t2, false));
-        REQUIRE_FALSE(CsgExact::PassesInsideT<CsgInt128Portable>(
-            P(3 * Unit, 3 * Unit, -Unit), P(3 * Unit, 3 * Unit, Unit), t0, t1, t2, false));
     }
 
     SECTION("An edge through a vertex is claimed by the displacement")
     {
-        // The edge passes the vertex t0. The displaced operand decides which side. The result is the same for both types.
+        // The edge passes the vertex t0. The displaced operand decides which side. The result must match the oracle.
         const CsgGridPoint e0 = P(0, 0, -Unit);
         const CsgGridPoint e1 = P(0, 0, Unit);
         for (const bool edgeInSecond : {false, true})
@@ -891,7 +1078,7 @@ TEST_CASE("Exact crossing tests", "[exact]")
             bool aboveA = false;
             bool aboveB = false;
             REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, edgeInSecond, aboveA)
-                == CsgExact::CrossesT<CsgInt128Portable>(e0, e1, t0, t1, t2, edgeInSecond, aboveB));
+                == ReferenceCrosses(e0, e1, t0, t1, t2, edgeInSecond, aboveB));
             REQUIRE(aboveA == aboveB);
         }
     }

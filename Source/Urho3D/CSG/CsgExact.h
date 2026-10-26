@@ -5,6 +5,7 @@
 #pragma once
 
 #include "Urho3D/CSG/_Plugin.h"
+#include "Urho3D/CSG/CsgExpansion.h"
 #include <Urho3D/Core/AssertBase.h>
 #include <Urho3D/Math/Vector3.h>
 
@@ -339,8 +340,8 @@ struct CsgNormal
 };
 
 /// Exact orientation tests with the symbolic displacement of the second operand.
-/// Each function with the suffix T works with the 128 bit type Int.
-/// The function without the suffix uses CsgInt128.
+/// The functions Orient, Crosses and PassesInside use float expansions.
+/// The functions with the suffix T work with the 128 bit type Int.
 class PLUGIN_RBFXCSG_API CsgExact
 {
 public:
@@ -350,6 +351,9 @@ public:
     /// The result is zero only for a degenerate case that the displacement cannot resolve.
     static int Orient(
         const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second);
+
+    /// Exact a * b - c * d as an expansion. The inputs must be exact differences of grid coordinates.
+    static CsgExactMinor MinorExact(CsgReal a, CsgReal b, CsgReal c, CsgReal d);
 
     /// Unperturbed (d - a) . ((b - a) x (c - a)), exactly.
     static CsgInt128 Volume(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d);
@@ -368,22 +372,10 @@ public:
         const CsgGridPoint& t1, const CsgGridPoint& t2, bool edgeInSecond);
 
     template <typename Int>
-    static int OrientT(
-        const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second);
-
-    template <typename Int>
     static Int VolumeT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d);
 
     template <typename Int>
     static CsgNormal<Int> NormalT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c);
-
-    template <typename Int>
-    static bool CrossesT(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1,
-        const CsgGridPoint& t2, bool edgeInSecond, bool& e1Above);
-
-    template <typename Int>
-    static bool PassesInsideT(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0,
-        const CsgGridPoint& t1, const CsgGridPoint& t2, bool edgeInSecond);
 };
 
 } // namespace Urho3D
