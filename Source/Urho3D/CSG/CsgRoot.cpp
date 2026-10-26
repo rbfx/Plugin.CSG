@@ -848,6 +848,9 @@ void CsgRoot::Rebuild()
             const Vector3& oldScale = baked_->metricScale_;
             const Vector3 factor(job->metricScale_.x_ / oldScale.x_, job->metricScale_.y_ / oldScale.y_,
                 job->metricScale_.z_ / oldScale.z_);
+            // The baked polygons have float positions, and FromOperand snaps them to the grid again.
+            // In float mode, and in double mode below 256 units, each float is its grid point, so nothing moves.
+            // Above 256 units in double mode, a vertex can move by one grid step in this round trip.
             job->rootStep_.polygons_ = CsgInternal::RescalePolygons(*baked_->solid_, factor);
         }
         else

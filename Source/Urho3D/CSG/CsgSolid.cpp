@@ -194,11 +194,113 @@ struct CsgWeldedLoops
     mutable bool edgesBuilt_{};
     /// True if every corner is exactly at the position of its welded id.
     bool canonical_{true};
+    /// Grid point of each welded id. The position of an id is grid / scale of it.
+    ea::vector<CsgGridPoint> grid_;
+    /// True if the position of an id is not finite or is outside the range of the grid.
+    bool outOfRange_{};
     mutable ea::unique_ptr<CsgJunctionFinder> finder_;
 };
 
 namespace
 {
+
+/// Largest coordinate after the clamp of an out of range position.
+constexpr float CLAMPED_COORDINATE = 8191.0f;
+
+/// Return true if the coordinate is finite and its grid coordinate is inside the range of the grid.
+/// The limit is half a grid step below the coordinate limit, so the rounding cannot reach the integer limit.
+bool InGridRange(float value)
+{
+    return std::fabs(static_cast<double>(value)) < static_cast<double>(CsgGridCoordinateLimit) - 0.5 / CsgGridScale;
+}
+
+/// Return true if each coordinate of the position is in the range of the grid.
+bool InGridRange(const Vector3& position)
+{
+    return InGridRange(position.x_) && InGridRange(position.y_) && InGridRange(position.z_);
+}
+
+/// Snap a position to the grid. A coordinate outside of the range is clamped, a NaN becomes zero.
+/// Only the operand entry and a solid without exact grid points call this. A boolean result keeps its grid points.
+CsgGridPoint SnapToGrid(const Vector3& position)
+{
+    float values[3] = {position.x_, position.y_, position.z_};
+    for (float& value : values)
+    {
+        if (!std::isfinite(value))
+            value = 0.0f;
+        else if (!InGridRange(value))
+            value = value < 0.0f ? -CLAMPED_COORDINATE : CLAMPED_COORDINATE;
+    }
+    return CsgGridPoint::From(Vector3(values[0], values[1], values[2]));
+}
+
+/// Return the position at grid / scale of the grid point. A coordinate out of the range of the grid stays as it is.
+Vector3 SnapPosition(const Vector3& position, const CsgGridPoint& point)
+{
+    const Vector3 onGrid = point.ToPosition();
+    return Vector3(InGridRange(position.x_) ? onGrid.x_ : position.x_,
+        InGridRange(position.y_) ? onGrid.y_ : position.y_, InGridRange(position.z_) ? onGrid.z_ : position.z_);
+}
+
+/// Weld the corners within epsilon in face order, and snap the first position of each welded id to the grid.
+/// Return the faces with each corner at the snapped position of its id, and the grid point of each corner.
+/// A face that does not move is the same face. This is the weld and the snap of the operand entry in one pass,
+/// without the T-junction repair. So it is correct only if the faces close up exactly after the snap.
+void PresnappedFaces(const ea::vector<CsgSharedPolygon>& faces, float epsilon, ea::vector<CsgSharedPolygon>& snapped,
+    ea::vector<CsgGridPoint>& grid)
+{
+    unsigned cornerCount = 0;
+    for (const CsgSharedPolygon& face : faces)
+        cornerCount += face->vertices_.size();
+    CsgPointWelder welder(epsilon, cornerCount);
+    ea::vector<Vector3> idPositions;
+    ea::vector<CsgGridPoint> idGrid;
+    idPositions.reserve(cornerCount);
+    idGrid.reserve(cornerCount);
+    ea::vector<int> ids(cornerCount);
+    unsigned corner = 0;
+    for (const CsgSharedPolygon& face : faces)
+    {
+        for (const ModelVertex& vertex : face->vertices_)
+        {
+            const int id = welder.Add(vertex.GetPosition());
+            if (id == static_cast<int>(idGrid.size()))
+            {
+                const Vector3& position = welder.GetPosition(id);
+                idGrid.push_back(SnapToGrid(position));
+                idPositions.push_back(SnapPosition(position, idGrid.back()));
+            }
+            ids[corner++] = id;
+        }
+    }
+
+    snapped.clear();
+    snapped.reserve(faces.size());
+    grid.resize(cornerCount);
+    corner = 0;
+    for (const CsgSharedPolygon& face : faces)
+    {
+        const unsigned start = corner;
+        bool moved = false;
+        for (const ModelVertex& vertex : face->vertices_)
+        {
+            const int id = ids[corner];
+            grid[corner++] = idGrid[id];
+            moved |= idPositions[id] != vertex.GetPosition();
+        }
+        if (!moved)
+        {
+            snapped.push_back(face);
+            continue;
+        }
+        ea::vector<ModelVertex> vertices = face->vertices_;
+        for (unsigned i = 0; i < vertices.size(); ++i)
+            vertices[i].SetPosition(idPositions[ids[start + i]]);
+        // The constructor computes the plane again from the snapped positions.
+        snapped.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), face->shared_));
+    }
+}
 
 void BuildLoops(CsgWeldedLoops& loops, ea::span<const unsigned> vertexStart, ea::span<const unsigned> triangleStart)
 {
@@ -521,23 +623,39 @@ struct Topology
 
 /// Make the loops of the corners welded by identical position.
 ///
-/// With exact ids from a boolean, the corners with one id get one dense id, numbered in the order of first use.
-/// The position of an id is the position of its first corner. The ids must be in [0, idSpace).
-/// If the ids are missing or not valid, the function welds the positions.
+/// With a grid and all corners in the range of the grid, the corners with equal grid points get one id.
+/// The ids are numbered in the order of first use, and the position of an id is the position of its first corner.
+/// If a corner is not at the position of its id, the loops are not canonical, and the solid needs a repair.
+/// Out of range, the exact ids of a boolean weld the corners. The ids must be in [0, idSpace).
+/// Out of range and without valid ids, the function welds the corners by identical position, because two corners
+/// can have one clamped grid point. Then the grid point of an id is the one of its first corner.
+/// Without a grid and without valid ids, the function welds the corners by position.
+/// The grid has one grid point for each corner, or none. The grid point of an id is the one of its first corner.
+/// Without a grid, the function snaps the position of each id to the grid. This is the only place that snaps.
 ea::unique_ptr<CsgWeldedLoops> BuildExactLoops(ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart,
-    ea::span<const unsigned> triangleStart, ea::span<const int> exactIds, int exactIdSpace)
+    ea::span<const unsigned> triangleStart, ea::span<const int> exactIds, int exactIdSpace,
+    ea::span<const CsgGridPoint> exactGrid)
 {
     const unsigned cornerCount = corners.size();
     ea::unique_ptr<CsgWeldedLoops> result;
     // Empty ids are legal. Other ids must have one entry for each corner and a positive id space.
     URHO3D_ASSERT(exactIds.empty() || (exactIds.size() == cornerCount && exactIdSpace > 0),
         "CsgSolid exact ids must have one entry for each corner");
-    if (exactIds.size() == cornerCount && cornerCount != 0 && exactIdSpace > 0)
+    URHO3D_ASSERT(exactGrid.empty() || exactGrid.size() == cornerCount,
+        "CsgSolid exact grid must have one entry for each corner");
+    const bool hasGrid = exactGrid.size() == cornerCount && cornerCount != 0;
+    // A grid point out of range is clamped, so two such corners can have one grid point. Then the ids weld.
+    bool gridInRange = hasGrid;
+    for (unsigned i = 0; i < cornerCount && gridInRange; ++i)
+        gridInRange = InGridRange(corners[i]);
+    ea::vector<CsgGridPoint> grid;
+    if (!gridInRange && exactIds.size() == cornerCount && cornerCount != 0 && exactIdSpace > 0)
     {
         ea::vector<int> dense(exactIdSpace, -1);
         ea::vector<int> denseIds(cornerCount);
         ea::vector<Vector3> positions;
         positions.reserve(cornerCount);
+        grid.reserve(cornerCount);
         bool valid = true;
         for (unsigned i = 0; i < cornerCount; ++i)
         {
@@ -553,7 +671,11 @@ ea::unique_ptr<CsgWeldedLoops> BuildExactLoops(ea::span<const Vector3> corners, 
             {
                 slot = static_cast<int>(positions.size());
                 positions.push_back(corners[i]);
+                grid.push_back(hasGrid ? exactGrid[i] : SnapToGrid(corners[i]));
             }
+            // Corners with one id are one vertex, so they have one grid point.
+            URHO3D_ASSERT(!hasGrid || grid[slot] == exactGrid[i],
+                "CsgSolid corners with one exact id have two grid points");
             denseIds[i] = slot;
         }
         if (valid)
@@ -561,12 +683,64 @@ ea::unique_ptr<CsgWeldedLoops> BuildExactLoops(ea::span<const Vector3> corners, 
             result = ea::make_unique<CsgWeldedLoops>(ea::move(positions), cornerCount);
             result->ids_ = ea::move(denseIds);
         }
+        else
+            grid.clear();
+    }
+    if (!result && gridInRange)
+    {
+        // The grid point is the identity of a vertex: corners with equal grid points weld, also with two exact ids.
+        // Two grid points can have one float position in double mode.
+        CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> gridIds;
+        bool canonical = true;
+        gridIds.Reserve(exactIdSpace > 0 ? ea::min(cornerCount, static_cast<unsigned>(exactIdSpace)) : cornerCount);
+        ea::vector<int> ids(cornerCount);
+        ea::vector<Vector3> positions;
+        positions.reserve(cornerCount);
+        grid.reserve(cornerCount);
+        for (unsigned i = 0; i < cornerCount; ++i)
+        {
+            const CsgGridPoint& point = exactGrid[i];
+            CsgVec3Key key;
+            key.x_ = static_cast<uint32_t>(point.x_);
+            key.y_ = static_cast<uint32_t>(point.y_);
+            key.z_ = static_cast<uint32_t>(point.z_);
+            bool existed = false;
+            int& slot = gridIds.FindOrAdd(key, existed);
+            if (!existed)
+            {
+                slot = static_cast<int>(positions.size());
+                positions.push_back(corners[i]);
+                grid.push_back(point);
+            }
+            ids[i] = slot;
+            // Two corners closer than half a grid step can have one grid point and two positions.
+            canonical &= corners[i] == positions[slot];
+        }
+        result = ea::make_unique<CsgWeldedLoops>(ea::move(positions), cornerCount);
+        result->ids_ = ea::move(ids);
+        result->canonical_ = canonical;
     }
     if (!result)
     {
+        // The weld by identical position. An id takes the given grid point of its first corner, or else the snap.
         result = ea::make_unique<CsgWeldedLoops>(0.0f, cornerCount);
+        grid.reserve(cornerCount);
         for (unsigned i = 0; i < cornerCount; ++i)
-            result->ids_[i] = result->welder_.Add(corners[i]);
+        {
+            const int id = result->welder_.Add(corners[i]);
+            if (id == static_cast<int>(grid.size()))
+                grid.push_back(hasGrid ? exactGrid[i] : SnapToGrid(corners[i]));
+            result->ids_[i] = id;
+        }
+    }
+    result->grid_ = ea::move(grid);
+    for (const Vector3& position : result->welder_.GetPositions())
+    {
+        if (!InGridRange(position))
+        {
+            result->outOfRange_ = true;
+            break;
+        }
     }
     result->vertexStart_.assign(vertexStart.begin(), vertexStart.end());
     BuildLoops(*result, vertexStart, triangleStart);
@@ -582,7 +756,7 @@ ea::unique_ptr<CsgWeldedLoops> BuildExactLoops(ea::span<const Vector3> corners, 
 /// The optional exact ids come from a boolean. See BuildExactLoops.
 void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart,
     ea::span<const unsigned> triangleStart, float epsilon, ea::span<const int> exactIds, int exactIdSpace,
-    Topology& result)
+    ea::span<const CsgGridPoint> exactGrid, Topology& result)
 {
     URHO3D_PROFILE("CsgSolid::BuildTopology");
     const unsigned faceCount = vertexStart.size() - 1;
@@ -597,37 +771,90 @@ void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> ver
             result.closed = false;
     }
 
-    result.exact = BuildExactLoops(corners, vertexStart, triangleStart, exactIds, exactIdSpace);
+    result.exact = BuildExactLoops(corners, vertexStart, triangleStart, exactIds, exactIdSpace, exactGrid);
     CsgWeldedLoops& exact = *result.exact;
 
     // Loops that close up exactly, as boolean results and most modeled meshes do, are closed within epsilon
     // as well and need no second welding. Only float noise between neighboring faces calls for it.
     const bool balanced = IsBalanced(exact);
-    if (!balanced)
+    // A boolean result has exact ids and grid points. Its topology is exact: no weld within epsilon, no junctions
+    // and no crack budget. The surface is closed if every directed edge has an opposite partner.
+    const bool exactOnly = !exactIds.empty();
+    if (!balanced && !exactOnly)
     {
         result.welded = ea::make_unique<CsgWeldedLoops>(epsilon, cornerCount);
         CsgWeldedLoops& welded = *result.welded;
         ea::vector<int> map(exact.welder_.Count());
+        welded.grid_.reserve(map.size());
+        // A corner off the position of its exact id stays off the position of its welded id.
+        welded.canonical_ = exact.canonical_;
         for (unsigned i = 0; i < map.size(); ++i)
         {
             map[i] = welded.welder_.Add(exact.welder_.GetPosition(i));
             welded.canonical_ &= map[i] == static_cast<int>(i);
+            // A new welded id takes the position of exact id i, so it takes its grid point too.
+            if (map[i] == static_cast<int>(welded.grid_.size()))
+                welded.grid_.push_back(exact.grid_[i]);
         }
+        welded.outOfRange_ = exact.outOfRange_;
         for (unsigned i = 0; i < cornerCount; ++i)
             welded.ids_[i] = map[exact.ids_[i]];
         welded.vertexStart_.assign(vertexStart.begin(), vertexStart.end());
         BuildLoops(welded, vertexStart, triangleStart);
     }
-    CsgWeldedLoops& loops = balanced ? exact : *result.welded;
+    CsgWeldedLoops& loops = result.welded ? *result.welded : exact;
     EnsureRawEdges(loops);
     const bool collapsed = HasCollapsedFace(loops, triangleStart);
 
+    // A face that welds to less than three ids takes no part in the edge graph.
+    // It belongs to the component of the faces that share its vertices.
+    const auto joinCollapsed = [&]()
+    {
+        CsgFlatMap<uint64_t, int, CsgPackedKeyHash> vertexOwner;
+        for (unsigned face = 0; face < faceCount; ++face)
+        {
+            if (loops.loopLength_[face] < 3)
+                continue;
+            for (int i = 0; i < loops.loopLength_[face]; ++i)
+            {
+                const int id = loops.vertexIds_[vertexStart[face] + i];
+                vertexOwner.TryAdd(static_cast<uint64_t>(id), static_cast<int>(face));
+            }
+        }
+        for (unsigned face = 0; face < faceCount; ++face)
+        {
+            if (loops.loopLength_[face] >= 3)
+                continue;
+            for (unsigned i = vertexStart[face]; i < vertexStart[face + 1]; ++i)
+            {
+                if (const int* owner = vertexOwner.Find(static_cast<uint64_t>(loops.ids_[i])))
+                {
+                    sets.Union(static_cast<int>(face), *owner);
+                    break;
+                }
+            }
+        }
+    };
+
     // Balanced loops match every edge exactly. Nothing can end at a T-junction, and the faces
-    // that each edge joins are known already.
-    if (balanced && !collapsed)
+    // that each edge joins are known already. Exact loops of a boolean result use the same path.
+    if ((balanced && !collapsed) || exactOnly)
     {
         for (const auto& link : loops.links_)
             sets.Union(link.first, link.second);
+        if (collapsed)
+            joinCollapsed();
+        result.closed &= balanced;
+        if (!balanced)
+        {
+            for (const auto& entry : loops.rawEdges_)
+            {
+                if (entry.value_.winding_ == 0)
+                    continue;
+                result.openEdges.push_back({loops.welder_.GetPosition(static_cast<int>(entry.key_ >> 32)),
+                    loops.welder_.GetPosition(static_cast<int>(static_cast<uint32_t>(entry.key_)))});
+            }
+        }
         GroupComponents(faceCount, sets, result.componentStart, result.componentFaces, result.faceComponents);
         return;
     }
@@ -679,32 +906,9 @@ void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> ver
         }
     }
 
-    // A face smaller than epsilon welds to less than three ids and takes no part in the edge graph.
-    // It belongs to the component of the faces that share its vertices.
+    // A face smaller than epsilon welds to less than three ids.
     if (collapsed)
-    {
-        CsgFlatMap<uint64_t, int, CsgPackedKeyHash> vertexOwner;
-        for (unsigned face = 0; face < faceCount; ++face)
-        {
-            if (loops.loopLength_[face] < 3)
-                continue;
-            for (int i = 0; i < loops.loopLength_[face]; ++i)
-                vertexOwner.TryAdd(static_cast<uint64_t>(loops.vertexIds_[vertexStart[face] + i]), static_cast<int>(face));
-        }
-        for (unsigned face = 0; face < faceCount; ++face)
-        {
-            if (loops.loopLength_[face] >= 3)
-                continue;
-            for (unsigned i = vertexStart[face]; i < vertexStart[face + 1]; ++i)
-            {
-                if (const int* owner = vertexOwner.Find(static_cast<uint64_t>(loops.ids_[i])))
-                {
-                    sets.Union(static_cast<int>(face), *owner);
-                    break;
-                }
-            }
-        }
-    }
+        joinCollapsed();
 
     // Solids that touch along an edge pinch it: four or more faces with balanced winding still bound a volume,
     // so ray parity remains valid. Unbalanced or odd edges are cracks, tolerated up to a budget.
@@ -860,23 +1064,47 @@ CsgSolid::CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon)
     faces.reserve(polygons.size());
     for (const CsgPolygon& polygon : polygons)
         faces.push_back(ea::make_shared<CsgPolygon>(polygon));
+    // The fast entry: weld, snap and one build. It is enough if the snapped faces close up exactly.
+    ea::vector<CsgGridPoint> grid;
+    {
+        ea::vector<CsgSharedPolygon> snapped;
+        PresnappedFaces(faces, epsilon <= 0.0f ? CSG_DEFAULT_EPSILON : epsilon, snapped, grid);
+        Build(ea::move(snapped), epsilon, {}, {}, 0, grid);
+        if (IsCleanOperand())
+            return;
+        grid.clear();
+    }
+    // Otherwise the faces are welded and repaired in float first, so a T-junction vertex is on its edge
+    // before the snap.
     Build(ea::move(faces), epsilon);
     // Corefinement needs the neighboring faces to share their edge vertices at identical positions.
     if (NeedsRepair())
-        Build(WatertightFaces(), epsilon_);
+    {
+        ea::vector<CsgSharedPolygon> repaired = WatertightFaces(grid);
+        Build(ea::move(repaired), epsilon_, {}, {}, 0, grid);
+    }
+    // The only snap of the operand: after it, every position is grid / scale.
+    ea::vector<CsgSharedPolygon> snapped;
+    if (SnappedFaces(snapped, grid))
+        Build(ea::move(snapped), epsilon_, {}, {}, 0, grid);
+    if (NeedsRepair())
+    {
+        ea::vector<CsgSharedPolygon> repaired = WatertightFaces(grid);
+        Build(ea::move(repaired), epsilon_, {}, {}, 0, grid);
+    }
 }
 
-CsgSolid::CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon)
+CsgSolid::CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgGridPoint> grid)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
-    Build(ea::move(faces), epsilon);
+    Build(ea::move(faces), epsilon, {}, {}, 0, grid);
 }
 
 CsgSolid::CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
-    ea::span<const int> exactIds, int exactIdSpace)
+    ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
-    Build(ea::move(faces), epsilon, origins, exactIds, exactIdSpace);
+    Build(ea::move(faces), epsilon, origins, exactIds, exactIdSpace, exactGrid);
 }
 
 CsgSolid::CsgSolid(Builder&& builder)
@@ -892,6 +1120,7 @@ CsgSolid::CsgSolid(Builder&& builder)
     , fallbackFaces_(ea::move(builder.fallbackFaces_))
     , epsilon_(builder.epsilon_ > 0.0f ? builder.epsilon_ : CSG_DEFAULT_EPSILON)
     , closed_(builder.closed_)
+    , outOfRange_(builder.outOfRange_)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
     // The topology is copied. Only the exact loops are built, and the edges of the loops only when someone needs them.
@@ -905,14 +1134,16 @@ CsgSolid::CsgSolid(Builder&& builder)
             corners.push_back(vertex.GetPosition());
     }
     vertexStart.push_back(corners.size());
-    exact_ = BuildExactLoops(corners, vertexStart, triangleStart_, builder.exactIds_, builder.exactIdSpace_);
+    exact_ = BuildExactLoops(
+        corners, vertexStart, triangleStart_, builder.exactIds_, builder.exactIdSpace_, builder.grid_);
     BuildBounds();
 }
 
 SharedPtr<CsgSolid> CsgSolid::FromKeptFaces(ea::vector<CsgSharedPolygon>&& faces, float epsilon,
-    ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace)
+    ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace,
+    ea::span<const CsgGridPoint> exactGrid)
 {
-    return SharedPtr<CsgSolid>(new CsgSolid(ea::move(faces), epsilon, origins, exactIds, exactIdSpace));
+    return SharedPtr<CsgSolid>(new CsgSolid(ea::move(faces), epsilon, origins, exactIds, exactIdSpace, exactGrid));
 }
 
 CsgSharedPolygon CsgSolid::Flipped(const CsgPolygon& face)
@@ -938,6 +1169,7 @@ CsgExactLoops CsgSolid::GetExactLoops() const
     result.vertexIds_ = {exact.vertexIds_.data(), exact.vertexIds_.size()};
     result.loopLength_ = {exact.loopLength_.data(), exact.loopLength_.size()};
     result.positions_ = exact.welder_.GetPositions();
+    result.grid_ = {exact.grid_.data(), exact.grid_.size()};
     return result;
 }
 
@@ -1030,6 +1262,7 @@ CsgSolid::Builder::Builder(unsigned faceCapacity, unsigned cornerCapacity, float
     componentFaces_.reserve(faceCapacity);
     faceComponents_.reserve(faceCapacity);
     exactIds_.reserve(cornerCapacity);
+    grid_.reserve(cornerCapacity);
 }
 
 unsigned CsgSolid::Builder::IdOffset(const CsgSolid& source)
@@ -1083,7 +1316,12 @@ void CsgSolid::Builder::AppendFace(const CsgSolid& source, unsigned face, bool f
     const unsigned idStart = weld.vertexStart_[face];
     const unsigned idCount = weld.vertexStart_[face + 1] - idStart;
     for (unsigned i = 0; i < idCount; ++i)
-        exactIds_.push_back(offset + weld.ids_[idStart + (flip ? idCount - 1 - i : i)]);
+    {
+        const int id = weld.ids_[idStart + (flip ? idCount - 1 - i : i)];
+        exactIds_.push_back(offset + id);
+        grid_.push_back(weld.grid_[id]);
+    }
+    outOfRange_ = outOfRange_ || source.outOfRange_;
     faceMin_.push_back(source.faceMin_[face]);
     faceMax_.push_back(source.faceMax_[face]);
 
@@ -1127,22 +1365,96 @@ SharedPtr<CsgSolid> CsgSolid::FromOperand(ea::vector<CsgPolygon>&& polygons, flo
     faces.reserve(polygons.size());
     for (CsgPolygon& polygon : polygons)
         faces.push_back(ea::make_shared<CsgPolygon>(ea::move(polygon)));
-    SharedPtr<CsgSolid> solid(new CsgSolid(ea::move(faces), epsilon));
-    if (!solid->NeedsRepair())
+    // The fast entry: weld, snap and one build. It is enough if the snapped faces close up exactly.
+    {
+        ea::vector<CsgSharedPolygon> snapped;
+        ea::vector<CsgGridPoint> grid;
+        PresnappedFaces(faces, epsilon <= 0.0f ? CSG_DEFAULT_EPSILON : epsilon, snapped, grid);
+        SharedPtr<CsgSolid> solid(new CsgSolid(ea::move(snapped), epsilon, grid));
+        if (solid->IsCleanOperand())
+            return solid;
+    }
+    // Otherwise the corners are welded within epsilon and repaired in float first, so a welded vertex gets one
+    // grid point, and a T-junction vertex is on its edge before the snap.
+    SharedPtr<CsgSolid> solid = Repaired(SharedPtr<CsgSolid>(new CsgSolid(ea::move(faces), epsilon)));
+    // The only snap of the operand: after it, every position is grid / scale.
+    ea::vector<CsgSharedPolygon> snapped;
+    ea::vector<CsgGridPoint> grid;
+    if (!solid->SnappedFaces(snapped, grid))
         return solid;
-    return SharedPtr<CsgSolid>(new CsgSolid(solid->WatertightFaces(), solid->epsilon_));
+    return Repaired(SharedPtr<CsgSolid>(new CsgSolid(ea::move(snapped), solid->epsilon_, grid)));
+}
+
+bool CsgSolid::SnappedFaces(ea::vector<CsgSharedPolygon>& faces, ea::vector<CsgGridPoint>& grid) const
+{
+    URHO3D_PROFILE("CsgSolid::SnappedFaces");
+    const CsgWeldedLoops& exact = *exact_;
+    const auto positions = exact.welder_.GetPositions();
+    // A coordinate out of the range of the grid stays as it is. Its grid point is clamped.
+    const auto snap = SnapPosition;
+    // Each corner is compared, not only the position of its id: two corners of one id can differ.
+    const auto moves = [&](unsigned face, unsigned i)
+    {
+        const Vector3& position = faces_[face]->vertices_[i].GetPosition();
+        const int id = exact.ids_[exact.vertexStart_[face] + i];
+        return snap(positions[id], exact.grid_[id]) != position;
+    };
+    bool any = false;
+    for (unsigned face = 0; face < faces_.size() && !any; ++face)
+    {
+        for (unsigned i = 0; i < faces_[face]->vertices_.size() && !any; ++i)
+            any = moves(face, i);
+    }
+    if (!any)
+        return false;
+
+    faces.clear();
+    faces.reserve(faces_.size());
+    grid.clear();
+    grid.reserve(exact.ids_.size());
+    for (unsigned face = 0; face < faces_.size(); ++face)
+    {
+        const CsgPolygon& source = *faces_[face];
+        const unsigned start = exact.vertexStart_[face];
+        bool changed = false;
+        for (unsigned i = 0; i < source.vertices_.size() && !changed; ++i)
+            changed = moves(face, i);
+        for (unsigned i = 0; i < source.vertices_.size(); ++i)
+            grid.push_back(exact.grid_[exact.ids_[start + i]]);
+        if (!changed)
+        {
+            faces.push_back(faces_[face]);
+            continue;
+        }
+        ea::vector<ModelVertex> vertices = source.vertices_;
+        for (unsigned i = 0; i < source.vertices_.size(); ++i)
+        {
+            const int id = exact.ids_[start + i];
+            vertices[i].SetPosition(snap(positions[id], exact.grid_[id]));
+        }
+        // The constructor computes the plane again from the snapped positions.
+        faces.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), source.shared_));
+    }
+    return true;
 }
 
 SharedPtr<CsgSolid> CsgSolid::Repaired(const SharedPtr<CsgSolid>& solid)
 {
     if (!solid->NeedsRepair())
         return solid;
-    return SharedPtr<CsgSolid>(new CsgSolid(solid->WatertightFaces(), solid->epsilon_));
+    ea::vector<CsgGridPoint> grid;
+    ea::vector<CsgSharedPolygon> faces = solid->WatertightFaces(grid);
+    return SharedPtr<CsgSolid>(new CsgSolid(ea::move(faces), solid->epsilon_, grid));
 }
 
 bool CsgSolid::NeedsRepair() const
 {
     return hasJunctions_ || !GetWeld().canonical_;
+}
+
+bool CsgSolid::IsCleanOperand() const
+{
+    return closed_ && openEdges_.empty() && !NeedsRepair();
 }
 
 float CsgSolid::OpenEdgeLength() const
@@ -1158,10 +1470,12 @@ const CsgWeldedLoops& CsgSolid::GetWeld() const
     return welded_ ? *welded_ : *exact_;
 }
 
-ea::vector<CsgSharedPolygon> CsgSolid::WatertightFaces() const
+ea::vector<CsgSharedPolygon> CsgSolid::WatertightFaces(ea::vector<CsgGridPoint>& grid) const
 {
     URHO3D_PROFILE("CsgSolid::WatertightFaces");
     const CsgWeldedLoops& loops = GetWeld();
+    const CsgWeldedLoops& exact = *exact_;
+    grid.clear();
     CsgJunctionFinder& finder = loops.GetFinder();
     const CsgPointWelder& welder = loops.welder_;
     ea::vector<CsgSharedPolygon> result;
@@ -1185,14 +1499,19 @@ ea::vector<CsgSharedPolygon> CsgSolid::WatertightFaces() const
         for (unsigned i = 0; i < count; ++i)
         {
             const int from = loops.vertexIds_[cornerStart + i];
+            const unsigned cornerIndex = cornerStart + loops.corners_[cornerStart + i];
             ModelVertex corner = source.vertices_[loops.corners_[cornerStart + i]];
             const Vector3& position = welder.GetPosition(from);
             // A NaN position is never equal, so such a corner counts as changed. The result is the same corner.
+            // A corner that moves takes the grid point of its welded id. A corner that stays keeps its own.
             if (corner.GetPosition() != position)
             {
                 corner.SetPosition(position);
                 changed = true;
+                grid.push_back(loops.grid_[from]);
             }
+            else
+                grid.push_back(exact.grid_[exact.ids_[cornerIndex]]);
             buffer.push_back(corner);
 
             const int to = loops.vertexIds_[cornerStart + (i + 1) % count];
@@ -1207,11 +1526,13 @@ ea::vector<CsgSharedPolygon> CsgSolid::WatertightFaces() const
                 ModelVertex vertex = LerpModelVertex(corner, next, cut.t_);
                 vertex.SetPosition(welder.GetPosition(cut.id_));
                 buffer.push_back(vertex);
+                grid.push_back(loops.grid_[cut.id_]);
             }
             changed = true;
         }
         if (!changed)
         {
+            // The face keeps all its corners. The grid has the grid points of its exact ids already.
             result.push_back(faces_[face]);
             continue;
         }
@@ -1283,7 +1604,7 @@ ea::vector<CsgPolygon> CsgSolid::ToPolygons() const
 }
 
 void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
-    ea::span<const int> exactIds, int exactIdSpace)
+    ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid)
 {
     URHO3D_PROFILE("CsgSolid::Build");
     if (epsilon <= 0.0f)
@@ -1466,7 +1787,7 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
 
     {
         Topology topology;
-        BuildTopology(corners, vertexStart, triangleStart_, epsilon, exactIds, exactIdSpace, topology);
+        BuildTopology(corners, vertexStart, triangleStart_, epsilon, exactIds, exactIdSpace, exactGrid, topology);
         componentStart_ = ea::move(topology.componentStart);
         componentFaces_ = ea::move(topology.componentFaces);
         faceComponents_ = ea::move(topology.faceComponents);
@@ -1475,6 +1796,7 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
         openEdges_ = ea::move(topology.openEdges);
         closed_ = topology.closed;
         hasJunctions_ = topology.hasJunctions;
+        outOfRange_ = exact_->outOfRange_;
         epsilon_ = epsilon;
     }
 

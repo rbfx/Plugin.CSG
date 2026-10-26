@@ -96,6 +96,16 @@ struct CsgGridPoint
         return static_cast<CsgGridInt>(std::floor(static_cast<double>(x) * CsgGridScale + 0.5));
     }
 
+    /// Return the float position of the grid point: each coordinate is grid / scale, rounded to float.
+    /// The position is exact in float mode. In double mode it is exact below 256 units.
+    /// Above 256 units in double mode, the float can differ from the grid point by one float ulp.
+    /// Then the grid point is the truth.
+    Vector3 ToPosition() const
+    {
+        constexpr double step = 1.0 / CsgGridScale;
+        return Vector3(static_cast<float>(x_ * step), static_cast<float>(y_ * step), static_cast<float>(z_ * step));
+    }
+
     friend bool operator==(const CsgGridPoint& a, const CsgGridPoint& b)
     {
         return a.x_ == b.x_ && a.y_ == b.y_ && a.z_ == b.z_;

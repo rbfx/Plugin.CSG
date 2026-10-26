@@ -24,9 +24,6 @@ namespace CsgInternal
 namespace
 {
 
-/// Largest grid coordinate after the clamp of an out of range operand.
-constexpr float CLAMPED_COORDINATE = 8191.0f;
-
 /// Tolerance of the first comparison of two crossings on an edge.
 constexpr double EDGE_ORDER_TOLERANCE = 1e-9;
 
@@ -38,25 +35,11 @@ int SignOfFloat(float value)
     return value > 0.0f ? 1 : -1;
 }
 
-/// Snap a position to the grid. A coordinate outside of the range is clamped, a NaN becomes zero.
-CsgGridPoint SnapToGrid(const Vector3& position, bool& outOfRange, bool& invalid)
+/// Return true if each coordinate of the grid point is inside the range of the grid.
+[[maybe_unused]] bool InGridRange(const CsgGridPoint& point)
 {
-    float values[3] = {position.x_, position.y_, position.z_};
-    for (float& value : values)
-    {
-        if (!std::isfinite(value))
-        {
-            invalid = true;
-            outOfRange = true;
-            value = 0.0f;
-        }
-        else if (!(std::fabs(value) < CSG_EXACT_COORDINATE_LIMIT))
-        {
-            outOfRange = true;
-            value = value < 0.0f ? -CLAMPED_COORDINATE : CLAMPED_COORDINATE;
-        }
-    }
-    return CsgGridPoint::From(Vector3(values[0], values[1], values[2]));
+    const auto inRange = [](CsgGridInt value) { return value > -CsgGridIntegerLimit && value < CsgGridIntegerLimit; };
+    return inRange(point.x_) && inRange(point.y_) && inRange(point.z_);
 }
 
 /// Sort the ids with a three-way comparison. The sort is stable, and it is safe for an inconsistent comparison.
@@ -188,19 +171,21 @@ Mesh::Mesh(const CsgSolid& solid, bool isSecond, int offset)
         }
     }
 
-    grid_.resize(loops_.positions_.size());
-    bool anyInvalid = false;
-    for (unsigned id = 0; id < grid_.size(); ++id)
+    // The solid stores the grid points. The mesh does not snap the positions again.
+    grid_ = loops_.grid_;
+    outOfRange_ = solid.IsOutOfRange();
+    // Only a solid out of range can have a position that is not finite.
+    if (outOfRange_)
     {
-        bool invalid = false;
-        grid_[id] = SnapToGrid(loops_.positions_[id], outOfRange_, invalid);
-        if (invalid && !anyInvalid)
+        for (unsigned id = 0; id < loops_.positions_.size(); ++id)
         {
-            anyInvalid = true;
-            invalid_.assign(grid_.size(), 0);
-        }
-        if (invalid)
+            const Vector3& position = loops_.positions_[id];
+            if (std::isfinite(position.x_) && std::isfinite(position.y_) && std::isfinite(position.z_))
+                continue;
+            if (invalid_.empty())
+                invalid_.assign(loops_.positions_.size(), 0);
             invalid_[id] = 1;
+        }
     }
 }
 
@@ -387,11 +372,18 @@ int Corefinement::CrossingId(
 
     Crossing data;
     data.grid_ = grid;
-    // The float position is the exact parameter on the float edge. The positions of the operands are not on the
-    // grid, so a position from the grid point would move the output by up to half a grid step.
-    const Vector3& lowPosition = edges.loops_.positions_[key.low_];
-    const Vector3& highPosition = edges.loops_.positions_[key.high_];
-    data.position_ = lowPosition + (highPosition - lowPosition) * static_cast<float>(t);
+    // The crossing lies between the ends of the edge, so it is in the range of the grid.
+    URHO3D_ASSERT(InGridRange(grid), "CsgCorefine crossing is outside the range of the grid");
+    // The position is grid / scale, so the result vertex is on the grid and the next boolean keeps it.
+    // An operand out of range has clamped grid points. Then the position is on the float edge.
+    if (!outOfRange_)
+        data.position_ = grid.ToPosition();
+    else
+    {
+        const Vector3& lowPosition = edges.loops_.positions_[key.low_];
+        const Vector3& highPosition = edges.loops_.positions_[key.high_];
+        data.position_ = lowPosition + (highPosition - lowPosition) * static_cast<float>(t);
+    }
     data.t_ = t;
     data.key_ = key;
     data.lowVolume_ = lowVolume;
@@ -1535,6 +1527,13 @@ ModelVertex Barycentric(const ModelVertex& a, const ModelVertex& b, const ModelV
 }
 
 } // namespace
+
+const CsgGridPoint& PointGrid(const Corefinement& core, int id)
+{
+    if (id >= core.CrossingBase())
+        return core.CrossingAt(id).grid_;
+    return id >= core.b_.offset_ ? core.b_.grid_[id - core.b_.offset_] : core.a_.grid_[id];
+}
 
 Vector3 PointPosition(const Corefinement& core, int id)
 {

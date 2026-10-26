@@ -5,6 +5,7 @@
 #pragma once
 
 #include "Urho3D/CSG/CsgCommon.h"
+#include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgFlatMap.h"
 #include "Urho3D/CSG/CsgPolygon.h"
 #include "Urho3D/CSG/_Plugin.h"
@@ -106,8 +107,10 @@ struct CsgExactLoops
     ea::span<const int> vertexIds_;
     /// Length of the loop of each face. The length is zero for a face that bounds no surface.
     ea::span<const int> loopLength_;
-    /// Position of each id.
+    /// Position of each id. It is grid / scale of the grid point of the id, see CsgGridPoint::ToPosition.
     ea::span<const Vector3> positions_;
+    /// Grid point of each id. A solid stores it and never snaps it again. It is the truth for the exact math.
+    ea::span<const CsgGridPoint> grid_;
 };
 
 /// Immutable polygonal CSG operand.
@@ -127,12 +130,17 @@ class PLUGIN_RBFXCSG_API CsgSolid : public RefCounted
 {
 public:
     /// Build a solid from copies of the polygons. Points within epsilon count as one point.
+    /// The solid snaps each welded position to the grid, see FromOperand.
     /// The solid repairs the faces like FromOperand does, so neighboring faces share their edge vertices.
     explicit CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon = CSG_DEFAULT_EPSILON);
     ~CsgSolid() override;
 
     /// Build a solid for a boolean operand from the polygons. The solid takes the polygons.
     ///
+    /// The solid welds and repairs the corners first. Then it snaps each welded position to the grid once:
+    /// a coordinate becomes grid / scale. A coordinate that is not finite or is outside the grid range stays as it is,
+    /// and IsOutOfRange is then true. Welded positions that snap to one grid point become one vertex.
+    /// After this step the solid keeps a grid point for each vertex, and no later step snaps a position again.
     /// The corners within epsilon get one position. A face with an edge that ends at the vertex of another face
     /// gains that vertex. Then neighboring faces share every edge vertex at the same position.
     /// If the polygons need no repair, the result is the first solid. Otherwise it is a second solid over the repaired faces.
@@ -182,6 +190,9 @@ public:
     /// Return true if the faces bound a closed surface, so ray parity is valid.
     /// Open edges up to the crack budget do not make a solid open. An empty solid is closed.
     bool IsClosed() const { return closed_; }
+    /// Return true if a position is not finite or has a coordinate outside the range of the grid.
+    /// The grid point of such a position is clamped, so a boolean with the solid is not valid.
+    bool IsOutOfRange() const { return outOfRange_; }
     /// Return true if any edge has no partner, also a hairline crack that IsClosed tolerates.
     bool HasOpenEdges() const { return !openEdges_.empty(); }
     /// Return the total length of the open edges.
@@ -249,8 +260,13 @@ public:
     /// share their position exactly. The ids must be in [0, exactIdSpace).
     /// Without ids, the solid welds the corners by position. A call that breaks these rules is a programming error.
     /// It fails an assert in a debug build. In a release build the solid ignores the ids or the origin.
+    /// The exact grid has one grid point for each face corner, in face order, or none. Corners with one id must
+    /// have one grid point. The solid keeps the grid points and does not snap the positions.
+    /// Without a grid, the solid takes the grid point of each position. Then the positions must be on the grid
+    /// already, as in a solid from FromOperand.
     static SharedPtr<CsgSolid> FromKeptFaces(ea::vector<CsgSharedPolygon>&& faces, float epsilon,
-        ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace);
+        ea::span<const CsgFaceOrigin> origins, ea::span<const int> exactIds, int exactIdSpace,
+        ea::span<const CsgGridPoint> exactGrid = {});
 
     /// Assembles a boolean result from whole operand components and solids of the contact regions.
     ///
@@ -286,32 +302,43 @@ public:
         ea::vector<unsigned> fallbackFaces_;
         /// Exact id of each face corner. The ids of each source start after the ids of the sources before it.
         ea::vector<int> exactIds_;
+        /// Grid point of each face corner, copied from the source.
+        ea::vector<CsgGridPoint> grid_;
         int exactIdSpace_{};
         /// Id offset of each source. A solid has few sources, so the search is linear.
         ea::vector<ea::pair<const CsgSolid*, int>> idOffsets_;
         float epsilon_{CSG_DEFAULT_EPSILON};
         bool closed_{true};
+        bool outOfRange_{};
     };
 
 private:
     /// Build a solid from the parts of a builder. The exact ids give the exact loops, the topology is copied.
     explicit CsgSolid(Builder&& builder);
     /// Build a solid over faces that the caller made. It does not repair the faces.
-    CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon);
+    /// The grid has one grid point for each face corner, or none. Without a grid, the solid snaps the positions.
+    CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgGridPoint> grid = {});
     /// Build a solid over kept faces of a boolean. See FromKeptFaces.
     CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
-        ea::span<const int> exactIds, int exactIdSpace);
+        ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid);
     /// Return the welded loops of the topology. They are welded within epsilon if the exact loops are not balanced.
     const CsgWeldedLoops& GetWeld() const;
+    /// Move each corner to grid / scale of the grid point of its exact id. Return false if every corner is there.
+    /// The grid gets the grid point of each corner, in face order. A face that does not move is the same face.
+    bool SnappedFaces(ea::vector<CsgSharedPolygon>& faces, ea::vector<CsgGridPoint>& grid) const;
     /// Return true if the faces do not share their edge vertices exactly, so WatertightFaces changes them.
     bool NeedsRepair() const;
+    /// Return true if the solid is closed, has no open edge and needs no repair. Then the fast operand entry is right.
+    bool IsCleanOperand() const;
     /// Return the faces with the corners at the welded positions and the T-junction vertices added.
     /// A face that needs no change is the same face. A face that collapses is left out.
-    ea::vector<CsgSharedPolygon> WatertightFaces() const;
+    /// The grid gets the grid point of each corner of the result, in face order. A moved corner takes the grid point
+    /// of its welded id, so the grid points stay the truth.
+    ea::vector<CsgSharedPolygon> WatertightFaces(ea::vector<CsgGridPoint>& grid) const;
     /// Take the faces and build the triangles, the bounds and the components.
-    /// The optional origins and exact ids are as in FromKeptFaces.
+    /// The optional origins, exact ids and exact grid are as in FromKeptFaces.
     void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins = {},
-        ea::span<const int> exactIds = {}, int exactIdSpace = 0);
+        ea::span<const int> exactIds = {}, int exactIdSpace = 0, ea::span<const CsgGridPoint> exactGrid = {});
     /// Copy the triangles and the bounds of the source face of an origin. Return false if the origin does not fit.
     bool CopyOrigin(unsigned index, const CsgFaceOrigin& origin);
     /// Compute the bounds of the solid and of the components from the bounds of the faces. Reset the trees.
@@ -339,6 +366,8 @@ private:
     ea::vector<ea::pair<Vector3, Vector3>> openEdges_;
     float epsilon_{CSG_DEFAULT_EPSILON};
     bool closed_{true};
+    // True if a position is not finite or is outside the range of the grid.
+    bool outOfRange_{};
     // True if a face edge ends at a T-junction, so the faces do not share vertices exactly.
     bool hasJunctions_{};
     Vector3 boundsMin_;

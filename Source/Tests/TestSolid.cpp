@@ -7,6 +7,8 @@
 
 #include "TestGeometry.h"
 
+#include <Urho3D/Math/Quaternion.h>
+
 #include <catch2/catch_amalgamated.hpp>
 
 #include <cmath>
@@ -162,9 +164,10 @@ TEST_CASE("Solid welds noisy corners within epsilon", "[solid]")
     CHECK(solid.FaceCount() == 6);
     CHECK(solid.ComponentCount() == 1);
 
-    // Without welding tolerance the faces fall apart.
+    // The noise is below half a grid step in both modes, so the one snap of the operand puts each noisy corner
+    // on the grid point of its box corner. The faces stay together also without a welding tolerance.
     const CsgSolid tight(polygons, 1e-8f);
-    CHECK(tight.ComponentCount() > 1);
+    CHECK(tight.ComponentCount() == 1);
 }
 
 TEST_CASE("Solid joins faces through a T-junction", "[solid]")
@@ -388,6 +391,15 @@ ea::vector<CsgPolygon> MakeBoxWithoutFaces(const Vector3& center, const Vector3&
 }
 
 /// Make a box of half size one. The +x face is a frame around a square hole. The hole has the side holeSize.
+/// Return the open edge length of the pinhole after the snap of the operand to the grid.
+/// The corners of the hole are at plus and minus half the side. Each one snaps to its own grid point.
+float SnappedPinholeEdgeLength(float holeSize)
+{
+    const float h = holeSize * 0.5f;
+    const double side = (CsgGridPoint::Round(h) - CsgGridPoint::Round(-h)) / CsgGridScale;
+    return static_cast<float>(4.0 * side);
+}
+
 ea::vector<CsgPolygon> MakeBoxWithPinhole(float holeSize)
 {
     ea::vector<CsgPolygon> result = MakeBoxWithoutFaces(Vector3::ZERO, Vector3::ONE, 1u);
@@ -487,7 +499,8 @@ TEST_CASE("Solid crack budget", "[solid]")
     const CsgSolid small(MakeBoxWithPinhole(0.004f), 1e-4f);
     CHECK(small.IsClosed());
     CHECK(small.HasOpenEdges());
-    CHECK(small.OpenEdgeLength() == Catch::Approx(0.016f).margin(1e-5f));
+    // The operand snaps to the grid once, so the open edge length is a multiple of the grid step.
+    CHECK(small.OpenEdgeLength() == Catch::Approx(SnappedPinholeEdgeLength(0.004f)).margin(1e-5f));
     // The parity tolerates the crack.
     CHECK(small.ContainsPoint(Vector3(0.1f, 0.2f, 0.3f)));
     CHECK_FALSE(small.ContainsPoint(Vector3(2.0f, 0.2f, 0.3f)));
@@ -497,13 +510,13 @@ TEST_CASE("Solid crack budget", "[solid]")
     const CsgSolid fraction(MakeBoxWithPinhole(0.006f), 1e-4f);
     CHECK(fraction.IsClosed());
     CHECK(fraction.HasOpenEdges());
-    CHECK(fraction.OpenEdgeLength() == Catch::Approx(0.024f).margin(1e-5f));
+    CHECK(fraction.OpenEdgeLength() == Catch::Approx(SnappedPinholeEdgeLength(0.006f)).margin(1e-5f));
 
     // A hole of the side 0.02 has the edge length 0.08. That is more than the budget.
     const CsgSolid large(MakeBoxWithPinhole(0.02f), 1e-4f);
     CHECK_FALSE(large.IsClosed());
     CHECK(large.HasOpenEdges());
-    CHECK(large.OpenEdgeLength() == Catch::Approx(0.08f).margin(1e-4f));
+    CHECK(large.OpenEdgeLength() == Catch::Approx(SnappedPinholeEdgeLength(0.02f)).margin(1e-4f));
 
     // A larger epsilon gives a larger budget.
     const CsgSolid wide(MakeBoxWithPinhole(0.02f), 1e-3f);
@@ -1156,9 +1169,10 @@ TEST_CASE("Solid exact ids count ids and not positions", "[solid][kept]")
         builder.AppendComponent(*b, 0, false);
         const auto solid = builder.Finish();
         REQUIRE(solid->FaceCount() == 12);
-        // Sixteen ids, but only twelve distinct positions.
-        CHECK(solid->VertexKeySpace() == 16);
-        CHECK(solid->GetExactLoops().positions_.size() == 16);
+        // Sixteen exact ids, but only twelve distinct grid points. The builder has the grid points of its sources,
+        // and corners with one grid point weld to one id. So the solid has twelve ids.
+        CHECK(solid->VertexKeySpace() == 12);
+        CHECK(solid->GetExactLoops().positions_.size() == 12);
     }
 
     SECTION("Kept faces")
@@ -1220,4 +1234,87 @@ TEST_CASE("Solid answers queries from many threads on a fresh solid", "[solid][k
         thread.join();
     for (int i = 0; i < 4; ++i)
         CHECK(results[i] == expected);
+}
+
+namespace
+{
+
+/// Tell if each face corner is at the position of its id, and if that position is grid / scale in the range.
+bool CornersOnGrid(const CsgSolid& solid)
+{
+    const CsgExactLoops loops = solid.GetExactLoops();
+    for (unsigned face = 0; face < solid.FaceCount(); ++face)
+    {
+        const auto& vertices = solid.GetFace(face)->vertices_;
+        for (unsigned i = 0; i < vertices.size(); ++i)
+        {
+            const int id = loops.ids_[loops.vertexStart_[face] + i];
+            const Vector3& position = vertices[i].GetPosition();
+            if (position != loops.positions_[id])
+                return false;
+            const Vector3 onGrid = loops.grid_[id].ToPosition();
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                if (std::fabs(position.Data()[axis]) < 8000.0f && position.Data()[axis] != onGrid.Data()[axis])
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("Solid snaps each corner, also two corners with one grid point", "[solid][grid]")
+{
+    // The corner (1, 1, 1) of the top face moves by 4e-4. This is more than epsilon and less than half a grid step.
+    // So the two corners do not weld within epsilon, but they have one grid point.
+    // The neighbor box on the face x = 1 is smaller, so its corners make T-junctions and the solid needs a repair.
+    ea::vector<CsgPolygon> polygons = MakeBoxPolygons(Vector3(0.5f, 0.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 1);
+    unsigned moved = 0;
+    for (CsgPolygon& polygon : polygons)
+    {
+        if (polygon.plane_.normal_.y_ < 0.5f)
+            continue;
+        for (ModelVertex& vertex : polygon.vertices_)
+        {
+            if (vertex.GetPosition() == Vector3::ONE)
+            {
+                vertex.SetPosition(Vector3(1.0004f, 1.0f, 1.0f));
+                ++moved;
+            }
+        }
+    }
+    REQUIRE(moved == 1);
+    Append(polygons, MakeBoxPolygons(Vector3(1.5f, 0.5f, 0.25f), Vector3(0.5f, 0.5f, 0.25f), 2));
+
+    const CsgSolid solid(polygons);
+    CHECK(CornersOnGrid(solid));
+    const auto operand = CsgSolid::FromOperand(ea::vector<CsgPolygon>(polygons));
+    CHECK(CornersOnGrid(*operand));
+}
+
+TEST_CASE("Solid out of the grid range does not weld corners with one clamped grid point", "[solid][grid]")
+{
+    // All corners have x out of the range of the grid, so their x grid coordinates are clamped to one value.
+    // The rotation about the x axis keeps y and z of the two ends of an x edge equal: they get one grid point.
+    const Matrix3x4 transform(Vector3::ZERO, Quaternion(3.0f, Vector3::RIGHT), 1.0f);
+    const auto polygons = MakeBoxPolygons(Vector3(10001.0f, 0.0f, 0.0f), Vector3::ONE, 1, transform);
+    const auto operand = CsgSolid::FromOperand(ea::vector<CsgPolygon>(polygons));
+    CHECK(operand->GetExactLoops().positions_.size() == 8);
+    CHECK(operand->ComponentCount() == 1);
+    CHECK(operand->IsClosed());
+    const CsgSolid solid(polygons);
+    CHECK(solid.GetExactLoops().positions_.size() == 8);
+    CHECK(solid.ComponentCount() == 1);
+
+    // A NaN coordinate has the grid point zero. It must not weld with the corner at the origin.
+    ea::vector<CsgPolygon> withNaN = MakeBoxPolygons(Vector3(0.5f, 0.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 1);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const Vector3 triangle[] = {Vector3(nan, 0.0f, 0.0f), Vector3(5.0f, 0.0f, 0.0f), Vector3(5.0f, 1.0f, 0.0f)};
+    withNaN.push_back(MakeTestPolygon(triangle));
+    const CsgSolid nanSolid(withNaN);
+    CHECK(nanSolid.GetExactLoops().positions_.size() == 11);
+    const auto nanOperand = CsgSolid::FromOperand(ea::move(withNaN));
+    CHECK(nanOperand->GetExactLoops().positions_.size() == 11);
 }

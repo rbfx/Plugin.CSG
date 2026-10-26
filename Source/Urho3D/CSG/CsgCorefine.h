@@ -29,14 +29,15 @@ namespace CsgInternal
 constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 
 /// Whether crossings that round to one grid point share one id. The merge is off now.
-/// The merge needs every position on the grid. The next step, persistent grid points, turns it on.
+/// The merge needs every position on the grid. The solids now store their grid points, and a later step turns it on.
 constexpr bool MergeCrossingsOnGrid = false;
 
 /// Crossing of an edge of one operand through a triangle of the other.
 struct Crossing
 {
     /// The crossing of the edge between the grid points of its ends, rounded to the grid.
-    /// position_ is the crossing on the float edge, so it can be off the grid.
+    /// position_ is grid / scale, see CsgGridPoint::ToPosition. If an operand is out of range, the grid points
+    /// are clamped and position_ is the crossing on the float edge.
     CsgGridPoint grid_;
     Vector3 position_;
     /// Parameter along the edge from its lower to its higher welded id.
@@ -58,6 +59,7 @@ struct Crossing
 int CompareOnEdge(const Crossing& x, const Crossing& y);
 
 /// Welded view of an operand: ids for each triangle corner and grid positions of the ids.
+/// The grid points are the ones that the solid stores. The mesh does not snap a position.
 class Mesh
 {
 public:
@@ -77,8 +79,8 @@ public:
     ea::vector<int> triangleFace_;
     /// Welded id of each triangle corner, three for each triangle.
     ea::vector<int> triangleIds_;
-    /// Grid position of each welded id.
-    ea::vector<CsgGridPoint> grid_;
+    /// Grid position of each welded id. The span is the grid of the solid.
+    ea::span<const CsgGridPoint> grid_;
     /// One byte for each welded id. Not zero if the position is not finite. The vector is empty if all are finite.
     ea::vector<uint8_t> invalid_;
     /// True if a position is not finite or has a coordinate outside the range of the exact math.
@@ -472,6 +474,8 @@ private:
 
 /// Return the position of a global id: a vertex of the first operand, a vertex of the second operand or a crossing.
 Vector3 PointPosition(const Corefinement& core, int id);
+/// Return the grid point of a global id, as PointPosition does for the position.
+const CsgGridPoint& PointGrid(const Corefinement& core, int id);
 
 /// Build the polygon of a region with the vertex attributes interpolated inside the source face.
 /// The ids are the global ids of a region of a triangle of the face. The polygon keeps the plane and the group of the face.

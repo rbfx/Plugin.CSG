@@ -6,15 +6,16 @@
 // A normal test run skips it. Run it with:
 //   Tests.CSG "[.benchmark]" --benchmark-samples 20
 //
-// Baseline: host omarchy, date 2026-10-26, RelWithDebInfo build (-O2 -g -DNDEBUG), 20 samples.
+// Baseline: host omarchy, date 2026-10-26, commit b8c9f72, RelWithDebInfo build (-O2 -g -DNDEBUG), 20 samples.
 // The build directory cmake-build/linux-gcc-x64-dll is the float mode.
 // The build directory cmake-build/linux-gcc-x64-dll-double has -DCSG_EXACT_USE_DOUBLE=ON.
 // Mean time for each call sequence:
-//   case                      float        double
-//   box-box union             169.6 us     188.4 us
-//   box-sphere difference     4.962 ms     8.296 ms
-//   rotated coplanar union    524.4 us     662.0 us
-//   union chain of 8 brushes  1.376 ms     1.438 ms
+//   case                                     float        double
+//   operand build: box, sphere, rotated box  8.834 ms     8.683 ms
+//   box-box union                            170.3 us     186.2 us
+//   box-sphere difference                    4.862 ms     4.724 ms
+//   rotated coplanar union                   540.4 us     445.9 us
+//   union chain of 8 brushes                 1.453 ms     1.466 ms
 
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoolean.h"
@@ -79,6 +80,21 @@ TEST_CASE("benchmark: booleans", "[.benchmark]")
         chain.push_back(MakeBox(Vector3(1.5f * static_cast<float>(i), 0.0f, 0.0f), i + 1,
             Matrix3x4(Vector3::ZERO, rotation, 1.0f)));
     }
+
+    // Case 5: the operand build. FromOperand welds, repairs and snaps each operand. The other cases build their
+    // operands before the timed part. The copies of the polygons are part of the time.
+    const auto boxPolygons = MakeBoxPolygons(Vector3::ZERO, Vector3(1.0f, 1.0f, 1.0f), 1);
+    const auto spherePolygons = MakeSpherePolygons(Vector3(1.0f, 0.3f, 0.2f), 1.0f, 48, 96, 1);
+    const auto rotatedPolygons = MakeBoxPolygons(Vector3(0.5f, 1.0f, 0.3f), Vector3(1.0f, 1.0f, 1.0f), 3,
+        Matrix3x4(Vector3::ZERO, world * own, 1.0f));
+
+    BENCHMARK("operand build: box, sphere, rotated box")
+    {
+        unsigned faces = 0;
+        for (const auto* polygons : {&boxPolygons, &spherePolygons, &rotatedPolygons})
+            faces += CsgSolid::FromOperand(ea::vector<CsgPolygon>(*polygons))->FaceCount();
+        return faces;
+    };
 
     BENCHMARK("box-box union")
     {

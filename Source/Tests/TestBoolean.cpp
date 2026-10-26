@@ -12,6 +12,7 @@
 
 #include <catch2/catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -26,6 +27,19 @@ namespace
 {
 
 constexpr double VOLUME_TOLERANCE = 1e-3;
+
+/// Surface area of a box with the half size 1.
+constexpr double BOX_AREA = 24.0;
+
+/// Return the volume tolerance for operands that snap to the grid, with the given sum of their surface areas.
+/// The snap moves each corner by at most half a grid step on each axis, so by at most sqrt(3) / 2 grid steps.
+/// The volume of each operand, and so the volume of a result, then changes by at most that distance times the area.
+/// The bound is: grid step * sqrt(3) / 2 * surface area. It is not smaller than VOLUME_TOLERANCE.
+/// Float mode: 72 units of area give 0.061. Double mode: the bound is below VOLUME_TOLERANCE.
+double GridVolumeTolerance(double surfaceArea)
+{
+    return std::max(VOLUME_TOLERANCE, 0.5 * std::sqrt(3.0) / CsgGridScale * surfaceArea);
+}
 
 /// A snapped crossing position moves up to 2^-11 units. The closed mesh check needs a larger tolerance.
 constexpr float GRID_TOLERANCE = 2e-3f;
@@ -368,8 +382,10 @@ void CheckRotatedAssociativity(float angle)
 
     const auto left = Run(Run(a, b, CsgOperation::Union), c, CsgOperation::Union);
     const auto right = Run(a, Run(b, c, CsgOperation::Union), CsgOperation::Union);
-    CHECK(Volume(right) == Catch::Approx(16.051433).margin(VOLUME_TOLERANCE));
-    CHECK(Volume(left) == Catch::Approx(Volume(right)).margin(VOLUME_TOLERANCE));
+    // The rotated boxes snap to the grid. The tolerance is the bound of the snap for the three boxes.
+    const double tolerance = GridVolumeTolerance(3.0 * BOX_AREA);
+    CHECK(Volume(right) == Catch::Approx(16.051433).margin(tolerance));
+    CHECK(Volume(left) == Catch::Approx(Volume(right)).margin(tolerance));
     CheckClosed(left);
     CheckClosed(right);
 }
@@ -418,11 +434,12 @@ void SweepSample(const Vector3& axis, float angle, SweepStats& stats)
     const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
 
     const auto ab = Run(a, b, CsgOperation::Union);
-    const bool unionRight = std::abs(Volume(ab) - 12.0) <= VOLUME_TOLERANCE && IsClosed(ab);
+    // The rotated boxes snap to the grid. The tolerances are the bounds of the snap for two and for three boxes.
+    const bool unionRight = std::abs(Volume(ab) - 12.0) <= GridVolumeTolerance(2.0 * BOX_AREA) && IsClosed(ab);
     const auto left = Run(ab, c, CsgOperation::Union);
     const auto right = Run(a, Run(b, c, CsgOperation::Union), CsgOperation::Union);
-    const bool associative = std::abs(Volume(left) - Volume(right)) <= VOLUME_TOLERANCE && IsClosed(left)
-        && IsClosed(right);
+    const bool associative = std::abs(Volume(left) - Volume(right)) <= GridVolumeTolerance(3.0 * BOX_AREA)
+        && IsClosed(left) && IsClosed(right);
 
     ++stats.samples_;
     if (unionRight && associative)
@@ -484,7 +501,123 @@ TEST_CASE("Union of rotated boxes with a corner on an edge of the other box is r
         const Matrix3x4 transform(Vector3::ZERO, Quaternion(angle, Vector3::ONE.Normalized()), 1.0f);
         const auto ab = Run(MakeBox(Vector3::ZERO, 1, transform), MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, transform),
             CsgOperation::Union);
-        CHECK(Volume(ab) == Catch::Approx(12.0).margin(VOLUME_TOLERANCE));
+        // The rotated boxes snap to the grid. The tolerance is the bound of the snap for two boxes.
+        CHECK(Volume(ab) == Catch::Approx(12.0).margin(GridVolumeTolerance(2.0 * BOX_AREA)));
         CHECK(IsClosed(ab));
     }
+}
+
+namespace
+{
+
+/// Tell if each id of the solid has the grid point of its position, and the position is grid / scale.
+/// Each face corner must also be at the position of the grid point of its id.
+bool GridMatchesPositions(const SolidPtr& solid)
+{
+    const CsgExactLoops loops = solid->GetExactLoops();
+    if (loops.grid_.size() != loops.positions_.size())
+        return false;
+    for (unsigned id = 0; id < loops.positions_.size(); ++id)
+    {
+        const Vector3& position = loops.positions_[id];
+        const CsgGridPoint& point = loops.grid_[id];
+        if (!(CsgGridPoint::From(position) == point) || point.ToPosition() != position)
+            return false;
+    }
+    for (unsigned face = 0; face < solid->FaceCount(); ++face)
+    {
+        const auto& vertices = solid->GetFace(face)->vertices_;
+        for (unsigned i = 0; i < vertices.size(); ++i)
+        {
+            const int id = loops.ids_[loops.vertexStart_[face] + i];
+            if (vertices[i].GetPosition() != loops.grid_[id].ToPosition())
+                return false;
+        }
+    }
+    return true;
+}
+
+/// Tell if the solid has a vertex at exactly the position.
+bool HasPosition(const SolidPtr& solid, const Vector3& position)
+{
+    for (const Vector3& p : solid->GetExactLoops().positions_)
+    {
+        if (p == position)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("Boolean result stores the grid point of each position", "[boolean][grid]")
+{
+    const Quaternion rotation(23.0f, Vector3(1.0f, 2.0f, 3.0f).Normalized());
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(0.7f, 0.4f, 0.2f), 2, Matrix3x4(Vector3::ZERO, rotation, 1.0f));
+    CHECK(GridMatchesPositions(a));
+    CHECK(GridMatchesPositions(b));
+    for (const CsgOperation operation : {CsgOperation::Union, CsgOperation::Intersection, CsgOperation::DifferenceAB})
+    {
+        const auto result = Run(a, b, operation);
+        REQUIRE(result->FaceCount() > 0);
+        CHECK(GridMatchesPositions(result));
+    }
+}
+
+TEST_CASE("Every corner of operands and results of rotated boxes is on the grid", "[boolean][grid]")
+{
+    for (const float angle : {9.0f, 37.0f, 81.5f, 90.6f})
+    {
+        CAPTURE(angle);
+        for (const Vector3& axis : {Vector3::RIGHT, Vector3::UP, Vector3::ONE.Normalized()})
+        {
+            const Matrix3x4 transform(Vector3::ZERO, Quaternion(angle, axis), 1.0f);
+            const auto a = MakeBox(Vector3::ZERO, 1, transform);
+            const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, transform);
+            const Quaternion own = Quaternion(angle, axis) * Quaternion(17.0f, Vector3::FORWARD);
+            const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, own, 1.0f));
+            const auto ab = Run(a, b, CsgOperation::Union);
+            const auto abc = Run(ab, c, CsgOperation::Union);
+            const auto cut = Run(abc, a, CsgOperation::DifferenceAB);
+            for (const SolidPtr& solid : {a, b, c, ab, abc, cut})
+                CHECK(GridMatchesPositions(solid));
+        }
+    }
+}
+
+TEST_CASE("Boolean result fed to a second boolean is not snapped again", "[boolean][grid]")
+{
+    const Quaternion rotation(23.0f, Vector3(1.0f, 2.0f, 3.0f).Normalized());
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(0.7f, 0.4f, 0.2f), 2, Matrix3x4(Vector3::ZERO, rotation, 1.0f));
+    const auto first = Run(a, b, CsgOperation::Union);
+    // The box C is far from the first result, so the second union keeps all faces of the first result.
+    const auto c = MakeBox(Vector3(10.0f, 0.0f, 0.0f), 3);
+    const auto second = Run(first, c, CsgOperation::Union);
+    for (const Vector3& position : first->GetExactLoops().positions_)
+        CHECK(HasPosition(second, position));
+
+    // The polygons of a result give the same positions when they come back as an operand.
+    const auto again = MakeSolid(first->ToPolygons());
+    for (const Vector3& position : first->GetExactLoops().positions_)
+        CHECK(HasPosition(again, position));
+}
+
+TEST_CASE("Crossing vertex of a boolean result lies exactly on the grid", "[boolean][grid]")
+{
+    const Quaternion rotation(23.0f, Vector3(1.0f, 2.0f, 3.0f).Normalized());
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(0.7f, 0.4f, 0.2f), 2, Matrix3x4(Vector3::ZERO, rotation, 1.0f));
+    const auto result = Run(a, b, CsgOperation::Intersection);
+    unsigned crossings = 0;
+    for (const Vector3& position : result->GetExactLoops().positions_)
+    {
+        if (HasPosition(a, position) || HasPosition(b, position))
+            continue;
+        ++crossings;
+        const CsgGridPoint point = CsgGridPoint::From(position);
+        CHECK(point.ToPosition() == position);
+    }
+    CHECK(crossings > 0);
 }
