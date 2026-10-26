@@ -5,8 +5,10 @@
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace Urho3D
 {
@@ -333,6 +335,148 @@ CsgGridPoint CsgExact::RoundCrossing(const CsgGridPoint& low, const CsgGridPoint
     result.y_ = RoundWithEstimate(low.y_, high.y_, t, n, d);
     result.z_ = RoundWithEstimate(low.z_, high.z_, t, n, d);
     return result;
+}
+
+namespace
+{
+
+/// Sign of a compressed expansion of a difference or a sum.
+int ExpansionSign(const CsgExactMinor& value)
+{
+    return CsgExpansionSign(value.count_, value.terms_);
+}
+
+CsgReal ToReal(CsgGridInt value)
+{
+    // A difference has an absolute value below 2^(CsgGridBits + 1). CsgReal holds it exactly.
+    return static_cast<CsgReal>(value);
+}
+
+} // namespace
+
+int CsgExact::Cross2Exact(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    return ExpansionSign(MinorExact(ToReal(d0.u_), ToReal(d1.v_), ToReal(d0.v_), ToReal(d1.u_)));
+}
+
+int CsgExact::Dot2Exact(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    // a * c + b * d = a * c - (-b) * d. The negation is exact.
+    return ExpansionSign(MinorExact(ToReal(d0.u_), ToReal(d1.u_), -ToReal(d0.v_), ToReal(d1.v_)));
+}
+
+int CsgExact::SquaredDistanceCompareExact(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    // (u0^2 - u1^2) + (v0^2 - v1^2): two minors and one exact sum.
+    const CsgExactMinor first = MinorExact(ToReal(d0.u_), ToReal(d0.u_), ToReal(d1.u_), ToReal(d1.u_));
+    const CsgExactMinor second = MinorExact(ToReal(d0.v_), ToReal(d0.v_), ToReal(d1.v_), ToReal(d1.v_));
+    CsgReal sum[8];
+    const int count = CsgExpansionSum(first.count_, first.terms_, second.count_, second.terms_, sum);
+    return CsgExpansionSign(count, sum);
+}
+
+int CsgExact::DirectionCompare(const CsgGridPoint2& p, const CsgGridPoint2& reference, const CsgGridPoint2& q0,
+    const CsgGridPoint2& q1)
+{
+    const CsgGridPoint2 r = Difference(reference, p);
+    const CsgGridPoint2 d0 = Difference(q0, p);
+    const CsgGridPoint2 d1 = Difference(q1, p);
+    URHO3D_ASSERT(r.u_ != 0 || r.v_ != 0);
+
+    // Rank: 0 for a zero direction, 1 for the clockwise angles [0, pi), 2 for [pi, 2 pi).
+    const auto rank = [&](const CsgGridPoint2& d)
+    {
+        if (d.u_ == 0 && d.v_ == 0)
+            return 0;
+        const int cross = Cross2(r, d);
+        if (cross != 0)
+            return cross < 0 ? 1 : 2;
+        return Dot2(r, d) > 0 ? 1 : 2;
+    };
+    const int rank0 = rank(d0);
+    const int rank1 = rank(d1);
+    if (rank0 != rank1)
+        return rank0 < rank1 ? -1 : 1;
+    if (rank0 == 0)
+        return 0;
+    return Cross2(d0, d1);
+}
+
+bool CsgExact::SegmentsCross(
+    const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c, const CsgGridPoint2& d)
+{
+    const int o1 = Orient2(a, b, c);
+    const int o2 = Orient2(a, b, d);
+    if (o1 * o2 > 0)
+        return false;
+    const int o3 = Orient2(c, d, a);
+    const int o4 = Orient2(c, d, b);
+    if (o3 * o4 > 0)
+        return false;
+    if (o1 != 0 || o2 != 0 || o3 != 0 || o4 != 0)
+        return true;
+
+    // Collinear segments, or points: the segments meet if the bounding intervals overlap on both axes.
+    return std::max(std::min(a.u_, b.u_), std::min(c.u_, d.u_)) <= std::min(std::max(a.u_, b.u_), std::max(c.u_, d.u_))
+        && std::max(std::min(a.v_, b.v_), std::min(c.v_, d.v_)) <= std::min(std::max(a.v_, b.v_), std::max(c.v_, d.v_));
+}
+
+int CsgExact::LoopAreaSign(const CsgGridPoint2* points, int count)
+{
+    if (count < 3)
+        return 0;
+    const int terms = count - 2;
+    if (terms <= CsgLoopFilterMaxEdges)
+    {
+        double sum = 0.0;
+        double magnitude = 0.0;
+        for (int i = 1; i < count - 1; ++i)
+        {
+            const CsgGridPoint2 d0 = Difference(points[i], points[0]);
+            const CsgGridPoint2 d1 = Difference(points[i + 1], points[0]);
+            const double term = static_cast<double>(d0.u_) * static_cast<double>(d1.v_)
+                - static_cast<double>(d0.v_) * static_cast<double>(d1.u_);
+            sum += term;
+            magnitude += std::fabs(term);
+        }
+        // Exact terms and a sum of magnitudes below 2^53: every partial sum is an exact integer.
+        if (CsgPlanarExactInDouble && magnitude < 9007199254740992.0)
+            return sum > 0.0 ? 1 : (sum < 0.0 ? -1 : 0);
+
+        const double n = static_cast<double>(terms);
+        const double bound = n * CsgLoopTermError + n * (n - 1.0) * CsgLoopSumUnit;
+        if (sum > bound)
+            return 1;
+        if (sum < -bound)
+            return -1;
+    }
+    return LoopAreaSignExact(points, count);
+}
+
+int CsgExact::LoopAreaSignExact(const CsgGridPoint2* points, int count)
+{
+    if (count < 3)
+        return 0;
+    // The sum has a magnitude below 2^CsgExactPlanarBits times the number of terms.
+    // A compressed expansion of such an integer has fewer than 64 terms.
+    constexpr int Capacity = 64;
+    CsgReal bufferA[Capacity + 4];
+    CsgReal bufferB[Capacity + 4];
+    CsgReal* current = bufferA;
+    CsgReal* next = bufferB;
+    int currentCount = 0;
+    for (int i = 1; i < count - 1; ++i)
+    {
+        const CsgGridPoint2 d0 = Difference(points[i], points[0]);
+        const CsgGridPoint2 d1 = Difference(points[i + 1], points[0]);
+        const CsgExactMinor term = MinorExact(ToReal(d0.u_), ToReal(d1.v_), ToReal(d0.v_), ToReal(d1.u_));
+        int nextCount = CsgExpansionSum(currentCount, current, term.count_, term.terms_, next);
+        nextCount = CsgCompress(nextCount, next);
+        URHO3D_ASSERT(nextCount <= Capacity);
+        std::swap(current, next);
+        currentCount = nextCount;
+    }
+    return CsgExpansionSign(currentCount, current);
 }
 
 } // namespace Urho3D

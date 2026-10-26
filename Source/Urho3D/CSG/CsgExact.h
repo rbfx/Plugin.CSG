@@ -103,6 +103,61 @@ struct CsgGridPoint
     friend bool operator!=(const CsgGridPoint& a, const CsgGridPoint& b) { return !(a == b); }
 };
 
+/// Point on the plane of the integer grid. The same type holds a difference of two grid points.
+/// A coordinate has an absolute value below 2^CsgGridBits. A difference has an absolute value below 2^(CsgGridBits + 1).
+struct CsgGridPoint2
+{
+    CsgGridInt u_{};
+    CsgGridInt v_{};
+
+    friend bool operator==(const CsgGridPoint2& a, const CsgGridPoint2& b) { return a.u_ == b.u_ && a.v_ == b.v_; }
+    friend bool operator!=(const CsgGridPoint2& a, const CsgGridPoint2& b) { return !(a == b); }
+};
+
+/// Differences of two grid coordinates have an absolute value below 2^(CsgGridBits + 1). They fit in CsgGridInt.
+static_assert(CsgGridBits + 1 <= 31, "A grid difference must fit in 32 bits.");
+
+/// Unit roundoff of double: half the epsilon, 2^-53.
+constexpr double CsgDoubleRoundoff = 0.5 * std::numeric_limits<double>::epsilon();
+/// Bound of a product of two grid differences: 2^(2 * CsgGridBits + 2).
+static_assert(2 * CsgGridBits + 2 < 63, "A product of grid differences must fit in 64 bits.");
+constexpr double CsgPlanarProductBound = static_cast<double>(uint64_t{1} << (2 * CsgGridBits + 2));
+
+/// Whether the double result of a planar determinant of differences is exact.
+/// A planar determinant is a cross product or a dot product of two difference vectors.
+/// Its magnitude is below 2^CsgExactPlanarBits. Every product and every partial sum is below this bound.
+/// Float mode: 2^49 is below 2^53, so the double result is exact.
+constexpr bool CsgPlanarExactInDouble = CsgExactPlanarBits <= std::numeric_limits<double>::digits;
+/// Error bound of the double result of a planar determinant a * b - c * d, with M = 2^(2 * CsgGridBits + 2).
+/// Each product has a relative error of at most u, so an absolute error below u * M.
+/// The difference of the two products has a magnitude of at most 2 * M * (1 + u) and one more relative error u.
+/// The total error is below (4 + 2u) * u * M. The factor 5 covers it, also with a fused multiply-add.
+/// If the magnitude of the double result is above the bound, the sign of the double result is the exact sign.
+/// The bound is 0 when the double result is exact.
+constexpr double CsgPlanarFilterBound = CsgPlanarExactInDouble ? 0.0 : 5.0 * CsgDoubleRoundoff * CsgPlanarProductBound;
+static_assert(CsgPlanarExactInDouble || CsgPlanarFilterBound > 0.0, "An inexact double result needs a filter bound.");
+static_assert(CsgPlanarFilterBound < 0.01 * CsgPlanarProductBound, "The filter bound must be small.");
+
+/// Whether the double result of a squared distance difference is exact. Its magnitude is below 2^CsgExactMinorBits.
+constexpr bool CsgDistanceExactInDouble = CsgExactMinorBits <= std::numeric_limits<double>::digits;
+/// Error bound of the double result of (a * a + b * b) - (c * c + d * d).
+/// The four squares add an error below 4 * u * M. The two sums have magnitudes of at most 2 * M * (1 + u).
+/// They add an error below 4 * (1 + u) * u * M. The last difference adds an error below 2 * (1 + 2u) * u * M.
+/// The total error is below 10.01 * u * M. The factor 12 covers it.
+constexpr double CsgDistanceFilterBound =
+    CsgDistanceExactInDouble ? 0.0 : 12.0 * CsgDoubleRoundoff * CsgPlanarProductBound;
+static_assert(CsgDistanceExactInDouble || CsgDistanceFilterBound > 0.0, "An inexact double result needs a filter bound.");
+static_assert(CsgDistanceFilterBound < 0.01 * CsgPlanarProductBound, "The filter bound must be small.");
+
+/// The loop area filter works for loops with up to this number of edges. A bigger loop uses the exact sum.
+constexpr int CsgLoopFilterMaxEdges = 1 << (CsgExactPlanarSumBits - CsgExactPlanarBits);
+/// Error of one cross term in the double sum of a loop area. It is 0 when the double cross term is exact.
+constexpr double CsgLoopTermError = CsgPlanarFilterBound;
+/// Error unit of the summation of the cross terms of a loop area, for n terms and a bound T of one term.
+/// The error of a recursive sum of n terms is below (n - 1) * u * 1.01 * (sum of the magnitudes).
+/// The sum of the magnitudes is below n * T with T = 2 * M. The error is below n * (n - 1) * CsgLoopSumUnit.
+constexpr double CsgLoopSumUnit = 1.01 * CsgDoubleRoundoff * 2.0 * CsgPlanarProductBound;
+
 /// Exact vector of three minors. Each component has a magnitude below 2^CsgExactMinorBits.
 struct CsgNormal
 {
@@ -122,6 +177,152 @@ public:
     /// The result is zero only for a degenerate case that the displacement cannot resolve.
     static int Orient(
         const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second);
+
+    /// Project a grid point to a plane. The axis dropAxis (0, 1 or 2) is dropped.
+    /// The other two axes keep the cyclic order: drop x gives (y, z), drop y gives (z, x), drop z gives (x, y).
+    /// If flip is true, the two coordinates swap. This reverses the orientation of the projection.
+    static CsgGridPoint2 Project(const CsgGridPoint& point, int dropAxis, bool flip)
+    {
+        URHO3D_ASSERT(dropAxis >= 0 && dropAxis < 3);
+        CsgGridPoint2 result;
+        switch (dropAxis)
+        {
+        case 0: result.u_ = point.y_; result.v_ = point.z_; break;
+        case 1: result.u_ = point.z_; result.v_ = point.x_; break;
+        default: result.u_ = point.x_; result.v_ = point.y_; break;
+        }
+        if (flip)
+        {
+            const CsgGridInt u = result.u_;
+            result.u_ = result.v_;
+            result.v_ = u;
+        }
+        return result;
+    }
+
+    /// Difference to - from. Each coordinate of the points must have an absolute value below 2^CsgGridBits.
+    /// Then the difference is exact and has an absolute value below 2^(CsgGridBits + 1).
+    static CsgGridPoint2 Difference(const CsgGridPoint2& to, const CsgGridPoint2& from)
+    {
+        CsgGridPoint2 result;
+        result.u_ = static_cast<CsgGridInt>(static_cast<int64_t>(to.u_) - from.u_);
+        result.v_ = static_cast<CsgGridInt>(static_cast<int64_t>(to.v_) - from.v_);
+        return result;
+    }
+
+    /// Sign of d0.u * d1.v - d0.v * d1.u. The inputs are difference vectors of grid points.
+    /// A coordinate has an absolute value below 2^(CsgGridBits + 1). The result is exact.
+    /// It is positive when d1 is counterclockwise from d0, in the (u, v) plane with u to the right and v up.
+    /// The function computes in double and uses the filter. The fallback is Cross2Exact.
+    static int Cross2(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+    {
+        const double det = static_cast<double>(d0.u_) * static_cast<double>(d1.v_)
+            - static_cast<double>(d0.v_) * static_cast<double>(d1.u_);
+        if (det > CsgPlanarFilterBound)
+            return 1;
+        if (det < -CsgPlanarFilterBound)
+            return -1;
+        if constexpr (CsgPlanarExactInDouble)
+            return 0;
+        return Cross2Exact(d0, d1);
+    }
+
+    /// Same as Cross2. Always uses the exact expansion arithmetic.
+    static int Cross2Exact(const CsgGridPoint2& d0, const CsgGridPoint2& d1);
+
+    /// Sign of d0.u * d1.u + d0.v * d1.v. The inputs are difference vectors, as in Cross2.
+    static int Dot2(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+    {
+        const double dot = static_cast<double>(d0.u_) * static_cast<double>(d1.u_)
+            + static_cast<double>(d0.v_) * static_cast<double>(d1.v_);
+        if (dot > CsgPlanarFilterBound)
+            return 1;
+        if (dot < -CsgPlanarFilterBound)
+            return -1;
+        if constexpr (CsgPlanarExactInDouble)
+            return 0;
+        return Dot2Exact(d0, d1);
+    }
+
+    /// Same as Dot2. Always uses the exact expansion arithmetic.
+    static int Dot2Exact(const CsgGridPoint2& d0, const CsgGridPoint2& d1);
+
+    /// Sign of (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u).
+    /// It is positive when a, b, c turn counterclockwise. Each coordinate has an absolute value below 2^CsgGridBits.
+    static int Orient2(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c)
+    {
+        return Cross2(Difference(b, a), Difference(c, a));
+    }
+
+    /// Compare the directions q0 - p and q1 - p by the angle, clockwise, starting at the direction reference - p.
+    /// Return -1 if q0 comes first, 1 if q1 comes first and 0 if the directions are equal.
+    /// The reference must differ from p.
+    ///
+    /// Order. Let r = reference - p, d0 = q0 - p and d1 = q1 - p. Each direction d has a rank and an angle.
+    /// The clockwise angle t(d) of d from r is in the range [0, 2 pi). The rank is:
+    ///   0 if d is zero (q equal to p),
+    ///   1 if t(d) is in [0, pi): Cross2(r, d) < 0, or Cross2(r, d) == 0 and Dot2(r, d) > 0,
+    ///   2 if t(d) is in [pi, 2 pi): Cross2(r, d) > 0, or Cross2(r, d) == 0 and Dot2(r, d) < 0.
+    /// The order is lexicographic by (rank, t(d)). A zero direction has the rank 0 and compares equal to
+    /// any other zero direction. Directions with the same rank 1 or 2 compare by Cross2(d0, d1):
+    /// the result is its sign.
+    ///
+    /// Proof that the order is a strict weak order. Define the key k(d) = (rank(d), t(d)), with t(zero) = 0.
+    /// Compare the keys lexicographically. A lexicographic order on pairs of a totally ordered set is a total
+    /// preorder, so "less" is a strict weak order, and "equal" means equal keys. It remains to show that the
+    /// function returns the comparison of the keys.
+    /// 1. Different ranks: the function compares the ranks, as the key does.
+    /// 2. Both rank 0: both keys are equal, the function returns 0.
+    /// 3. Same rank 1 or 2: both angles are in one half open interval of the length pi.
+    ///    So t(d0) - t(d1) is in (-pi, pi). The counterclockwise angle from d0 to d1 is t(d0) - t(d1).
+    ///    Cross2(d0, d1) has the sign of sin(t(d0) - t(d1)). In (-pi, pi) the sine has the sign of its argument.
+    ///    So Cross2(d0, d1) < 0 if and only if t(d0) < t(d1). Also Cross2(d0, d1) == 0 if and only if
+    ///    t(d0) == t(d1), because the angles cannot differ by exactly pi inside the interval.
+    /// Directions with equal keys are the same ray, at any length. They compare equal (0).
+    /// The caller breaks the tie, for example with a global id.
+    /// The rank and the signs are exact, so the order is exact.
+    static int DirectionCompare(const CsgGridPoint2& p, const CsgGridPoint2& reference, const CsgGridPoint2& q0,
+        const CsgGridPoint2& q1);
+
+    /// Sign of |q0 - p|^2 - |q1 - p|^2. The result is exact.
+    static int SquaredDistanceCompare(const CsgGridPoint2& p, const CsgGridPoint2& q0, const CsgGridPoint2& q1)
+    {
+        const CsgGridPoint2 d0 = Difference(q0, p);
+        const CsgGridPoint2 d1 = Difference(q1, p);
+        const double n0 = static_cast<double>(d0.u_) * static_cast<double>(d0.u_)
+            + static_cast<double>(d0.v_) * static_cast<double>(d0.v_);
+        const double n1 = static_cast<double>(d1.u_) * static_cast<double>(d1.u_)
+            + static_cast<double>(d1.v_) * static_cast<double>(d1.v_);
+        const double diff = n0 - n1;
+        if (diff > CsgDistanceFilterBound)
+            return 1;
+        if (diff < -CsgDistanceFilterBound)
+            return -1;
+        if constexpr (CsgDistanceExactInDouble)
+            return 0;
+        return SquaredDistanceCompareExact(d0, d1);
+    }
+
+    /// Same as SquaredDistanceCompare for the difference vectors d0 = q0 - p and d1 = q1 - p.
+    /// Always uses the exact expansion arithmetic.
+    static int SquaredDistanceCompareExact(const CsgGridPoint2& d0, const CsgGridPoint2& d1);
+
+    /// Whether the closed segments ab and cd have a common point.
+    /// Touching counts as crossing: an end point of one segment on the other segment, or a common end point.
+    /// Collinear segments that overlap, also in one point, count as crossing. Collinear disjoint segments do not.
+    /// A segment with equal ends is a point. The function treats it in the same way.
+    static bool SegmentsCross(
+        const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c, const CsgGridPoint2& d);
+
+    /// Sign of the signed area of the closed loop points[0 .. count - 1]. The sign is positive for the
+    /// counterclockwise order. The sum is the shoelace sum of Cross2 terms relative to points[0].
+    /// A loop with fewer than 3 points has the area 0. A term has an absolute value below 2^CsgExactPlanarBits.
+    /// A sum of up to CsgLoopFilterMaxEdges terms has an absolute value below 2^CsgExactPlanarSumBits.
+    /// A longer loop uses the exact sum without the filter.
+    static int LoopAreaSign(const CsgGridPoint2* points, int count);
+
+    /// Same as LoopAreaSign. Always uses the exact expansion arithmetic.
+    static int LoopAreaSignExact(const CsgGridPoint2* points, int count);
 
     /// Exact a * b - c * d as an expansion. The inputs must be exact differences of grid coordinates.
     static CsgExactMinor MinorExact(CsgReal a, CsgReal b, CsgReal c, CsgReal d);

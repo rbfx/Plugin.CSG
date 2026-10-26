@@ -11,11 +11,14 @@
 #include <catch2/catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <random>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace Urho3D
 {
@@ -1579,6 +1582,869 @@ TEST_CASE("RoundCrossing with a plane through the edge center", "[exact]")
     REQUIRE(round(P(1, -1, 1), P(0, 0, -1)) == P(1, 0, 0));
     REQUIRE(round(P(-3, 5, -1), P(-4, 6, 1)) == P(-3, 6, 0));
     REQUIRE(round(P(-4, 6, 1), P(-3, 5, -1)) == P(-3, 6, 0));
+}
+
+// Planar predicates on the integer grid.
+
+namespace
+{
+
+using RefInt = CsgTest::Int128;
+
+constexpr int64_t GridLimit = int64_t{1} << CsgGridBits;
+/// The largest absolute value of a grid difference.
+constexpr int64_t MaxDifference = 2 * GridLimit - 2;
+
+CsgGridPoint2 Pt(int64_t u, int64_t v)
+{
+    CsgGridPoint2 point;
+    point.u_ = static_cast<CsgGridInt>(u);
+    point.v_ = static_cast<CsgGridInt>(v);
+    return point;
+}
+
+int RefSign(const RefInt& value)
+{
+    return CsgTest::Sign(value);
+}
+
+/// Sign of a * b - c * d in the oracle.
+int RefMinor(int64_t a, int64_t b, int64_t c, int64_t d)
+{
+    return RefSign(CsgTest::Mul64<RefInt>(a, b) - CsgTest::Mul64<RefInt>(c, d));
+}
+
+int RefCross(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    return RefMinor(d0.u_, d1.v_, d0.v_, d1.u_);
+}
+
+int RefDot(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    return RefMinor(d0.u_, d1.u_, -static_cast<int64_t>(d0.v_), d1.v_);
+}
+
+int RefOrient(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c)
+{
+    const int64_t ux = static_cast<int64_t>(b.u_) - a.u_, uy = static_cast<int64_t>(b.v_) - a.v_;
+    const int64_t vx = static_cast<int64_t>(c.u_) - a.u_, vy = static_cast<int64_t>(c.v_) - a.v_;
+    return RefMinor(ux, vy, uy, vx);
+}
+
+int RefDistance(const CsgGridPoint2& p, const CsgGridPoint2& q0, const CsgGridPoint2& q1)
+{
+    const auto norm = [&](const CsgGridPoint2& q)
+    {
+        const int64_t du = static_cast<int64_t>(q.u_) - p.u_, dv = static_cast<int64_t>(q.v_) - p.v_;
+        return CsgTest::Mul64<RefInt>(du, du) + CsgTest::Mul64<RefInt>(dv, dv);
+    };
+    return RefSign(norm(q0) - norm(q1));
+}
+
+CsgGridPoint2 Diff(const CsgGridPoint2& to, const CsgGridPoint2& from)
+{
+    return Pt(static_cast<int64_t>(to.u_) - from.u_, static_cast<int64_t>(to.v_) - from.v_);
+}
+
+/// Rank of a direction in the clockwise order from r: 0 for zero, 1 for [0, pi), 2 for [pi, 2 pi).
+int RefRank(const CsgGridPoint2& r, const CsgGridPoint2& d)
+{
+    if (d.u_ == 0 && d.v_ == 0)
+        return 0;
+    const int cross = RefCross(r, d);
+    if (cross != 0)
+        return cross < 0 ? 1 : 2;
+    return RefDot(r, d) > 0 ? 1 : 2;
+}
+
+int RefDirectionCompare(const CsgGridPoint2& p, const CsgGridPoint2& reference, const CsgGridPoint2& q0,
+    const CsgGridPoint2& q1)
+{
+    const CsgGridPoint2 r = Diff(reference, p), d0 = Diff(q0, p), d1 = Diff(q1, p);
+    const int rank0 = RefRank(r, d0), rank1 = RefRank(r, d1);
+    if (rank0 != rank1)
+        return rank0 < rank1 ? -1 : 1;
+    if (rank0 == 0)
+        return 0;
+    return RefCross(d0, d1);
+}
+
+bool RefSegmentsCross(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c, const CsgGridPoint2& d)
+{
+    const int o1 = RefOrient(a, b, c), o2 = RefOrient(a, b, d), o3 = RefOrient(c, d, a), o4 = RefOrient(c, d, b);
+    if (o1 * o2 > 0 || o3 * o4 > 0)
+        return false;
+    if (o1 != 0 || o2 != 0 || o3 != 0 || o4 != 0)
+        return true;
+    return std::max(std::min(a.u_, b.u_), std::min(c.u_, d.u_)) <= std::min(std::max(a.u_, b.u_), std::max(c.u_, d.u_))
+        && std::max(std::min(a.v_, b.v_), std::min(c.v_, d.v_)) <= std::min(std::max(a.v_, b.v_), std::max(c.v_, d.v_));
+}
+
+int RefLoopAreaSign(const CsgGridPoint2* points, int count)
+{
+    RefInt sum = RefInt(0);
+    for (int i = 1; i + 1 < count; ++i)
+    {
+        const CsgGridPoint2 d0 = Diff(points[i], points[0]), d1 = Diff(points[i + 1], points[0]);
+        sum = sum + (CsgTest::Mul64<RefInt>(d0.u_, d1.v_) - CsgTest::Mul64<RefInt>(d0.v_, d1.u_));
+    }
+    return RefSign(sum);
+}
+
+/// Random grid coordinate. The distributions cover the full range, the extremes, and small values.
+int64_t RandomCoordinate(std::mt19937_64& random)
+{
+    switch (random() % 6)
+    {
+    case 0: return static_cast<int64_t>(random() % (2 * GridLimit - 1)) - (GridLimit - 1);
+    case 1: return (random() & 1) ? GridLimit - 1 : -(GridLimit - 1);
+    case 2: return static_cast<int64_t>(random() % 17) - 8;
+    case 3: return static_cast<int64_t>(random() % (2 * (GridLimit >> 8) + 1)) - (GridLimit >> 8);
+    case 4: return ((random() & 1) ? 1 : -1) * (GridLimit - 1 - static_cast<int64_t>(random() % 64));
+    default: return static_cast<int64_t>(random() % (2 * GridLimit - 1)) - (GridLimit - 1);
+    }
+}
+
+CsgGridPoint2 RandomPoint(std::mt19937_64& random)
+{
+    const int64_t u = RandomCoordinate(random);
+    return Pt(u, RandomCoordinate(random));
+}
+
+/// Random difference vector with components in the full range of differences.
+CsgGridPoint2 RandomDifference(std::mt19937_64& random)
+{
+    const auto component = [&]() -> int64_t
+    {
+        switch (random() % 4)
+        {
+        case 0: return static_cast<int64_t>(random() % (2 * MaxDifference + 1)) - MaxDifference;
+        case 1: return (random() & 1) ? MaxDifference : -MaxDifference;
+        case 2: return static_cast<int64_t>(random() % 9) - 4;
+        default: return static_cast<int64_t>(random() % (2 * MaxDifference + 1)) - MaxDifference;
+        }
+    };
+    const int64_t u = component();
+    return Pt(u, component());
+}
+
+bool InverseModulo(int64_t value, int64_t modulus, int64_t& inverse)
+{
+    int64_t r0 = modulus, r1 = value % modulus, t0 = 0, t1 = 1;
+    while (r1 != 0)
+    {
+        const int64_t quotient = r0 / r1;
+        const int64_t r2 = r0 - quotient * r1;
+        const int64_t t2 = t0 - quotient * t1;
+        r0 = r1;
+        r1 = r2;
+        t0 = t1;
+        t1 = t2;
+    }
+    if (r0 != 1)
+        return false;
+    inverse = t0 < 0 ? t0 + modulus : t0;
+    return true;
+}
+
+/// Make two vectors with nonnegative components up to maxValue, so that d0.u * d1.v - d0.v * d1.u = k.
+/// The vectors are large, so the products are near the maximum. The value k is in the range 0 to 2^20.
+void MakeCrossPair(std::mt19937_64& random, int64_t maxValue, int64_t k, CsgGridPoint2& d0, CsgGridPoint2& d1)
+{
+    for (;;)
+    {
+        const int64_t p = maxValue / 2 + static_cast<int64_t>(random() % (maxValue / 2));
+        const int64_t q = maxValue / 2 + static_cast<int64_t>(random() % (maxValue / 2));
+        int64_t inverse = 0;
+        if (!InverseModulo(q, p, inverse))
+            continue;
+        // Solve q * x = -k modulo p. Then y = (k + q * x) / p and p * y - q * x = k.
+        const int64_t x = (((p - k % p) % p) * inverse) % p;
+        const int64_t numerator = k + q * x;
+        if (numerator % p != 0)
+            continue;
+        d0 = Pt(p, q);
+        d1 = Pt(x, numerator / p);
+        return;
+    }
+}
+
+/// Place nonnegative difference vectors in the grid. The point p and the points q[i] = p + d[i] are in range.
+/// Random sign flips and a swap of the axes cover all quadrants.
+void Embed(std::mt19937_64& random, const CsgGridPoint2* d, int count, CsgGridPoint2& p, CsgGridPoint2* q)
+{
+    int64_t maxU = 0, maxV = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        maxU = std::max<int64_t>(maxU, d[i].u_);
+        maxV = std::max<int64_t>(maxV, d[i].v_);
+    }
+    const auto slack = [&](int64_t maxValue) -> int64_t
+    {
+        const int64_t room = MaxDifference - maxValue;
+        return (random() & 1) ? 0 : static_cast<int64_t>(random() % (room + 1));
+    };
+    int64_t pu = -(GridLimit - 1) + slack(maxU);
+    int64_t pv = -(GridLimit - 1) + slack(maxV);
+    int64_t qu[8], qv[8];
+    for (int i = 0; i < count; ++i)
+    {
+        qu[i] = pu + d[i].u_;
+        qv[i] = pv + d[i].v_;
+    }
+    const bool flipU = random() & 1, flipV = random() & 1, swap = random() & 1;
+    const auto place = [&](int64_t u, int64_t v)
+    {
+        if (flipU)
+            u = -u;
+        if (flipV)
+            v = -v;
+        return swap ? Pt(v, u) : Pt(u, v);
+    };
+    p = place(pu, pv);
+    for (int i = 0; i < count; ++i)
+        q[i] = place(qu[i], qv[i]);
+}
+
+/// Make three points a, b, c with Orient2 = k (before the random flips) near the extremes of the grid.
+void MakeNearOrient(std::mt19937_64& random, int64_t k, CsgGridPoint2& a, CsgGridPoint2& b, CsgGridPoint2& c)
+{
+    CsgGridPoint2 d[2];
+    MakeCrossPair(random, MaxDifference, k, d[0], d[1]);
+    CsgGridPoint2 q[2];
+    Embed(random, d, 2, a, q);
+    b = q[0];
+    c = q[1];
+}
+
+bool CheckCross(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    const int expected = RefCross(d0, d1);
+    return CsgExact::Cross2(d0, d1) == expected && CsgExact::Cross2Exact(d0, d1) == expected
+        && CsgExact::Cross2(d1, d0) == -expected;
+}
+
+bool CheckDot(const CsgGridPoint2& d0, const CsgGridPoint2& d1)
+{
+    const int expected = RefDot(d0, d1);
+    return CsgExact::Dot2(d0, d1) == expected && CsgExact::Dot2Exact(d0, d1) == expected
+        && CsgExact::Dot2(d1, d0) == expected;
+}
+
+bool CheckOrient(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c)
+{
+    const int expected = RefOrient(a, b, c);
+    return CsgExact::Orient2(a, b, c) == expected && CsgExact::Orient2(b, c, a) == expected
+        && CsgExact::Orient2(a, c, b) == -expected;
+}
+
+bool CheckDistance(const CsgGridPoint2& p, const CsgGridPoint2& q0, const CsgGridPoint2& q1)
+{
+    const int expected = RefDistance(p, q0, q1);
+    return CsgExact::SquaredDistanceCompare(p, q0, q1) == expected
+        && CsgExact::SquaredDistanceCompare(p, q1, q0) == -expected
+        && CsgExact::SquaredDistanceCompareExact(Diff(q0, p), Diff(q1, p)) == expected;
+}
+
+/// Collinear points: a, b and c on one line through the common direction e, at integer multiples.
+void MakeCollinear(std::mt19937_64& random, CsgGridPoint2& a, CsgGridPoint2& b, CsgGridPoint2& c)
+{
+    const int64_t m = 1 + static_cast<int64_t>(random() % 1000);
+    const int64_t reach = (GridLimit / 2) / m;
+    const int64_t eu = static_cast<int64_t>(random() % (2 * reach + 1)) - reach;
+    const int64_t ev = static_cast<int64_t>(random() % (2 * reach + 1)) - reach;
+    const int64_t s = static_cast<int64_t>(random() % (2 * m + 1)) - m;
+    const int64_t t = static_cast<int64_t>(random() % (2 * m + 1)) - m;
+    const int64_t half = GridLimit / 2;
+    a = Pt(static_cast<int64_t>(random() % (2 * half + 1)) - half, static_cast<int64_t>(random() % (2 * half + 1)) - half);
+    b = Pt(a.u_ + s * eu, a.v_ + s * ev);
+    c = Pt(a.u_ + t * eu, a.v_ + t * ev);
+}
+
+constexpr int StressCount = 20000;
+
+} // namespace
+
+TEST_CASE("Project drops an axis and keeps the cyclic order", "[exact][planar]")
+{
+    const CsgGridPoint point = P(1, 2, 3);
+    REQUIRE(CsgExact::Project(point, 0, false) == Pt(2, 3));
+    REQUIRE(CsgExact::Project(point, 1, false) == Pt(3, 1));
+    REQUIRE(CsgExact::Project(point, 2, false) == Pt(1, 2));
+    REQUIRE(CsgExact::Project(point, 0, true) == Pt(3, 2));
+    REQUIRE(CsgExact::Project(point, 1, true) == Pt(1, 3));
+    REQUIRE(CsgExact::Project(point, 2, true) == Pt(2, 1));
+
+    // The sign of Orient2 of the projection is the sign of the normal component of the dropped axis.
+    std::mt19937_64 random(777);
+    for (int i = 0; i < 2000; ++i)
+    {
+        CsgGridPoint t[3];
+        for (CsgGridPoint& corner : t)
+            corner = P(RandomCoordinate(random), RandomCoordinate(random), RandomCoordinate(random));
+        const CsgTest::ReferenceNormal normal = CsgTest::ReferenceNormalOf(t[0], t[1], t[2]);
+        const CsgTest::Int128 components[3] = {normal.x_, normal.y_, normal.z_};
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const int expected = RefSign(components[axis]);
+            for (const bool flip : {false, true})
+            {
+                const int actual = CsgExact::Orient2(
+                    CsgExact::Project(t[0], axis, flip), CsgExact::Project(t[1], axis, flip), CsgExact::Project(t[2], axis, flip));
+                REQUIRE(actual == (flip ? -expected : expected));
+            }
+        }
+    }
+}
+
+TEST_CASE("Planar filter constants", "[exact][planar]")
+{
+    INFO("planar bound " << CsgPlanarFilterBound << " distance bound " << CsgDistanceFilterBound);
+    // The bound is zero exactly when the double result is exact.
+    REQUIRE((CsgPlanarFilterBound == 0.0) == CsgPlanarExactInDouble);
+    REQUIRE((CsgDistanceFilterBound == 0.0) == CsgDistanceExactInDouble);
+#if defined(CSG_EXACT_USE_DOUBLE)
+    REQUIRE(CsgPlanarFilterBound == 640.0);
+    REQUIRE(CsgDistanceFilterBound == 1536.0);
+#else
+    REQUIRE(CsgPlanarFilterBound == 0.0);
+    REQUIRE(CsgDistanceFilterBound == 0.0);
+#endif
+}
+
+TEST_CASE("Cross2 and Dot2 match the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1001);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const CsgGridPoint2 d0 = RandomDifference(random), d1 = RandomDifference(random);
+        REQUIRE(CheckCross(d0, d1));
+        REQUIRE(CheckDot(d0, d1));
+    }
+    // Parallel, equal, zero and extreme vectors.
+    const int64_t m = MaxDifference;
+    const CsgGridPoint2 extremes[] = {Pt(0, 0), Pt(m, m), Pt(-m, m), Pt(m, -m), Pt(-m, -m), Pt(m, 0), Pt(0, m), Pt(-m, 0),
+        Pt(0, -m), Pt(1, 0), Pt(0, 1), Pt(1, 1), Pt(-1, 1), Pt(m, 1), Pt(1, m), Pt(m, m - 1), Pt(m - 1, m)};
+    for (const CsgGridPoint2& x : extremes)
+    {
+        for (const CsgGridPoint2& y : extremes)
+        {
+            REQUIRE(CheckCross(x, y));
+            REQUIRE(CheckDot(x, y));
+        }
+    }
+    REQUIRE(CsgExact::Cross2(Pt(m, m), Pt(m, m)) == 0);
+    REQUIRE(CsgExact::Cross2(Pt(m, -m), Pt(-m, m)) == 0);
+    REQUIRE(CsgExact::Dot2(Pt(m, m), Pt(m, -m)) == 0);
+    REQUIRE(CsgExact::Dot2(Pt(m, m), Pt(m, m)) == 1);
+}
+
+TEST_CASE("Cross2 and Dot2 near the filter bound", "[exact][planar]")
+{
+    std::mt19937_64 random(1002);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        // Large vectors with a small determinant: the products are near 2^(2 * GridBits + 2).
+        const int64_t k = static_cast<int64_t>(random() % 2049) - 1024;
+        CsgGridPoint2 d0, d1;
+        MakeCrossPair(random, MaxDifference, k < 0 ? -k : k, d0, d1);
+        if (k < 0)
+            std::swap(d0, d1);
+        if (random() & 1)
+            d0 = Pt(-d0.u_, -d0.v_);
+        REQUIRE(std::abs(RefCross(d0, d1)) == (k == 0 ? 0 : 1));
+        REQUIRE(CheckCross(d0, d1));
+        // A quarter turn of d1 turns the cross product into a dot product.
+        REQUIRE(CheckDot(d0, Pt(d1.v_, -d1.u_)));
+        REQUIRE(CheckDot(d0, Pt(-d1.v_, d1.u_)));
+    }
+    // The exact value of the determinant is k.
+    for (int64_t k = 0; k <= 1024; ++k)
+    {
+        CsgGridPoint2 d0, d1;
+        MakeCrossPair(random, MaxDifference, k, d0, d1);
+        const int64_t exact = static_cast<int64_t>(d0.u_) * d1.v_ - static_cast<int64_t>(d0.v_) * d1.u_;
+        REQUIRE(exact == k);
+        REQUIRE(CsgExact::Cross2(d0, d1) == (k == 0 ? 0 : 1));
+        REQUIRE(CsgExact::Cross2(d1, d0) == (k == 0 ? 0 : -1));
+        REQUIRE(CsgExact::Dot2(d0, Pt(d1.v_, -d1.u_)) == (k == 0 ? 0 : 1));
+    }
+}
+
+TEST_CASE("Orient2 matches the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1003);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const CsgGridPoint2 a = RandomPoint(random), b = RandomPoint(random), c = RandomPoint(random);
+        REQUIRE(CheckOrient(a, b, c));
+        REQUIRE(CheckOrient(a, a, c));
+        REQUIRE(CheckOrient(a, b, a));
+        REQUIRE(CheckOrient(a, b, b));
+    }
+    for (int i = 0; i < StressCount; ++i)
+    {
+        CsgGridPoint2 a, b, c;
+        MakeCollinear(random, a, b, c);
+        REQUIRE(RefOrient(a, b, c) == 0);
+        REQUIRE(CsgExact::Orient2(a, b, c) == 0);
+        REQUIRE(CsgExact::Orient2(c, b, a) == 0);
+        // Move one point by one step: the determinant is no longer zero, in general.
+        c.u_ += (c.u_ < GridLimit - 1) ? 1 : -1;
+        REQUIRE(CheckOrient(a, b, c));
+    }
+    // The corners of the grid.
+    const int64_t e = GridLimit - 1;
+    const CsgGridPoint2 corners[] = {Pt(e, e), Pt(-e, e), Pt(e, -e), Pt(-e, -e), Pt(0, 0), Pt(e, 0), Pt(0, -e), Pt(e, e - 1)};
+    for (const CsgGridPoint2& a : corners)
+        for (const CsgGridPoint2& b : corners)
+            for (const CsgGridPoint2& c : corners)
+                REQUIRE(CheckOrient(a, b, c));
+    REQUIRE(CsgExact::Orient2(Pt(0, 0), Pt(1, 0), Pt(0, 1)) == 1);
+    REQUIRE(CsgExact::Orient2(Pt(0, 0), Pt(0, 1), Pt(1, 0)) == -1);
+    REQUIRE(CsgExact::Orient2(Pt(-e, -e), Pt(e, e), Pt(0, 0)) == 0);
+    REQUIRE(CsgExact::Orient2(Pt(-e, -e), Pt(e, e), Pt(1, 0)) == -1);
+}
+
+TEST_CASE("Orient2 with a small determinant and large coordinates", "[exact][planar]")
+{
+    std::mt19937_64 random(1004);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const int64_t k = static_cast<int64_t>(random() % 2049) - 1024;
+        CsgGridPoint2 a, b, c;
+        MakeNearOrient(random, k < 0 ? -k : k, a, b, c);
+        if (k < 0)
+            std::swap(b, c);
+        REQUIRE(CheckOrient(a, b, c));
+        const int64_t u1 = static_cast<int64_t>(b.u_) - a.u_, v1 = static_cast<int64_t>(b.v_) - a.v_;
+        const int64_t u2 = static_cast<int64_t>(c.u_) - a.u_, v2 = static_cast<int64_t>(c.v_) - a.v_;
+        const int64_t exact = u1 * v2 - v1 * u2;
+        // The embedding can swap the axes. It then changes the sign.
+        REQUIRE(std::abs(exact) == std::abs(k));
+        REQUIRE(CsgExact::Orient2(a, b, c) == (exact > 0) - (exact < 0));
+    }
+}
+
+TEST_CASE("SquaredDistanceCompare matches the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1005);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const CsgGridPoint2 p = RandomPoint(random), q0 = RandomPoint(random), q1 = RandomPoint(random);
+        REQUIRE(CheckDistance(p, q0, q1));
+        REQUIRE(CheckDistance(p, q0, q0));
+        REQUIRE(CheckDistance(p, p, q1));
+        // Same distance: swapped and negated difference components.
+        const CsgGridPoint2 d = Diff(q0, p);
+        const CsgGridPoint2 turned = Pt(-static_cast<int64_t>(d.v_), d.u_);
+        const int64_t u = static_cast<int64_t>(p.u_) + turned.u_, v = static_cast<int64_t>(p.v_) + turned.v_;
+        if (std::abs(u) < GridLimit && std::abs(v) < GridLimit)
+        {
+            REQUIRE(CheckDistance(p, q0, Pt(u, v)));
+            REQUIRE(CsgExact::SquaredDistanceCompare(p, q0, Pt(u, v)) == 0);
+        }
+    }
+    // Large vectors with a squared distance difference of 0 to 1024 in absolute value.
+    // (c + s)^2 + (e - 1)^2 versus c^2 + e^2 with e fixed by the target k.
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const int64_t k = static_cast<int64_t>(random() % 2049) - 1024;
+        CsgGridPoint2 d0, d1;
+        if ((k & 1) == 0)
+        {
+            // s = 1, t = -1: the difference is 2 * (c - e) + 2 = k.
+            const int64_t e = MaxDifference / 2 + static_cast<int64_t>(random() % (MaxDifference / 2 - 2000));
+            const int64_t c = e - 1 + k / 2;
+            d0 = Pt(c + 1, e - 1);
+            d1 = Pt(c, e);
+        }
+        else
+        {
+            // s = 2, t = -1: the difference is 4 * c - 2 * e + 5 = k.
+            const int64_t c = MaxDifference / 4 + static_cast<int64_t>(random() % (MaxDifference / 4 - 2000));
+            const int64_t e = 2 * c + (5 - k) / 2;
+            d0 = Pt(c + 2, e - 1);
+            d1 = Pt(c, e);
+        }
+        REQUIRE(d0.u_ >= 0);
+        REQUIRE(d0.v_ >= 0);
+        REQUIRE(d1.u_ >= 0);
+        REQUIRE(d1.v_ >= 0);
+        REQUIRE(std::max<int64_t>(std::max<int64_t>(d0.u_, d0.v_), std::max<int64_t>(d1.u_, d1.v_)) <= MaxDifference);
+        const int64_t n0 = static_cast<int64_t>(d0.u_) * d0.u_ + static_cast<int64_t>(d0.v_) * d0.v_;
+        const int64_t n1 = static_cast<int64_t>(d1.u_) * d1.u_ + static_cast<int64_t>(d1.v_) * d1.v_;
+        REQUIRE(n0 - n1 == k);
+
+        CsgGridPoint2 p;
+        CsgGridPoint2 q[2];
+        const CsgGridPoint2 pair[2] = {d0, d1};
+        Embed(random, pair, 2, p, q);
+        REQUIRE(CheckDistance(p, q[0], q[1]));
+        REQUIRE(CsgExact::SquaredDistanceCompare(p, q[0], q[1]) == (k > 0) - (k < 0));
+    }
+}
+
+TEST_CASE("DirectionCompare is a strict weak order", "[exact][planar]")
+{
+    // 16 distinct rays, in the counterclockwise order.
+    const CsgGridPoint2 rays[16] = {Pt(1, 0), Pt(2, 1), Pt(1, 1), Pt(1, 2), Pt(0, 1), Pt(-1, 2), Pt(-1, 1), Pt(-2, 1),
+        Pt(-1, 0), Pt(-2, -1), Pt(-1, -1), Pt(-1, -2), Pt(0, -1), Pt(1, -2), Pt(1, -1), Pt(2, -1)};
+    const int64_t scales[] = {1, 3, 1000};
+    std::vector<CsgGridPoint2> directions;
+    for (const CsgGridPoint2& ray : rays)
+        for (const int64_t scale : scales)
+            directions.push_back(Pt(ray.u_ * scale, ray.v_ * scale));
+    directions.push_back(Pt(0, 0));
+    const int count = static_cast<int>(directions.size());
+    const CsgGridPoint2 p = Pt(100, -50);
+    const auto at = [&](int i) { return Pt(p.u_ + directions[i].u_, p.v_ + directions[i].v_); };
+
+    for (int refIndex = 0; refIndex < 16; ++refIndex)
+    {
+        const CsgGridPoint2 reference = at(refIndex * 3);
+        // The expected order: rank, then the clockwise angle from the reference.
+        const double referenceAngle = std::atan2(double(rays[refIndex].v_), double(rays[refIndex].u_));
+        const auto key = [&](int i) -> std::pair<int, double>
+        {
+            if (i == count - 1)
+                return {0, 0.0};
+            const CsgGridPoint2& ray = rays[i / 3];
+            double angle = referenceAngle - std::atan2(double(ray.v_), double(ray.u_));
+            if (angle < -1e-9)
+                angle += 2.0 * 3.14159265358979323846;
+            return {1, angle < 1e-9 ? 0.0 : angle};
+        };
+
+        std::vector<int> less(count * count), equal(count * count);
+        for (int i = 0; i < count; ++i)
+        {
+            for (int j = 0; j < count; ++j)
+            {
+                const int result = CsgExact::DirectionCompare(p, reference, at(i), at(j));
+                REQUIRE(result == RefDirectionCompare(p, reference, at(i), at(j)));
+                // Antisymmetry.
+                REQUIRE(result == -CsgExact::DirectionCompare(p, reference, at(j), at(i)));
+                less[i * count + j] = result < 0;
+                equal[i * count + j] = result == 0;
+                // Equal exactly for the same ray or two zero directions.
+                const bool sameRay = (i / 3 == j / 3) || (i == count - 1 && j == count - 1);
+                REQUIRE((result == 0) == (sameRay && ((i == count - 1) == (j == count - 1))));
+                // The order follows the angle.
+                const auto ki = key(i), kj = key(j);
+                const bool angleLess = ki.first != kj.first ? ki.first < kj.first : ki.second < kj.second - 1e-6;
+                const bool angleEqual = ki.first == kj.first && std::fabs(ki.second - kj.second) <= 1e-6;
+                REQUIRE((result < 0) == angleLess);
+                REQUIRE((result == 0) == angleEqual);
+            }
+        }
+        // Transitivity of the order and of the equality, over all triples.
+        for (int i = 0; i < count; ++i)
+        {
+            REQUIRE(!less[i * count + i]);
+            REQUIRE(equal[i * count + i]);
+            for (int j = 0; j < count; ++j)
+            {
+                for (int k = 0; k < count; ++k)
+                {
+                    if (less[i * count + j] && less[j * count + k])
+                        REQUIRE(less[i * count + k]);
+                    if (equal[i * count + j] && equal[j * count + k])
+                        REQUIRE(equal[i * count + k]);
+                    // Transitivity of the incomparability.
+                    if (equal[i * count + j] && less[j * count + k])
+                        REQUIRE(less[i * count + k]);
+                    if (less[i * count + j] && equal[j * count + k])
+                        REQUIRE(less[i * count + k]);
+                }
+            }
+        }
+    }
+
+    // The reference direction itself comes first, the opposite direction is the first of the second half.
+    REQUIRE(CsgExact::DirectionCompare(Pt(0, 0), Pt(1, 0), Pt(5, 0), Pt(0, -5)) < 0);
+    REQUIRE(CsgExact::DirectionCompare(Pt(0, 0), Pt(1, 0), Pt(0, -5), Pt(0, 5)) < 0);
+    REQUIRE(CsgExact::DirectionCompare(Pt(0, 0), Pt(1, 0), Pt(-5, 0), Pt(0, 5)) < 0);
+    REQUIRE(CsgExact::DirectionCompare(Pt(0, 0), Pt(1, 0), Pt(0, 5), Pt(5, 0)) > 0);
+    REQUIRE(CsgExact::DirectionCompare(Pt(0, 0), Pt(1, 0), Pt(0, 0), Pt(5, 0)) < 0);
+}
+
+TEST_CASE("DirectionCompare matches the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1006);
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const CsgGridPoint2 p = RandomPoint(random), q0 = RandomPoint(random), q1 = RandomPoint(random);
+        CsgGridPoint2 reference = RandomPoint(random);
+        if (reference == p)
+            reference.u_ += (reference.u_ < GridLimit - 1) ? 1 : -1;
+        const int expected = RefDirectionCompare(p, reference, q0, q1);
+        REQUIRE(CsgExact::DirectionCompare(p, reference, q0, q1) == expected);
+        REQUIRE(CsgExact::DirectionCompare(p, reference, q1, q0) == -expected);
+        REQUIRE(CsgExact::DirectionCompare(p, reference, q0, q0) == 0);
+    }
+    // Collinear points: equal and opposite directions, and the reference on the same line.
+    for (int i = 0; i < StressCount; ++i)
+    {
+        CsgGridPoint2 a, b, c;
+        MakeCollinear(random, a, b, c);
+        const CsgGridPoint2 reference = (c == a) ? b : c;
+        if (reference == a)
+            continue;
+        const int expected = RefDirectionCompare(a, reference, b, c);
+        REQUIRE(CsgExact::DirectionCompare(a, reference, b, c) == expected);
+        REQUIRE(CsgExact::DirectionCompare(a, reference, c, b) == -expected);
+    }
+    // Near collinear with a large coordinate: the cross product is k in 0 to 1024.
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const int64_t k = static_cast<int64_t>(random() % 2049) - 1024;
+        CsgGridPoint2 a, b, c;
+        MakeNearOrient(random, k < 0 ? -k : k, a, b, c);
+        if (k < 0)
+            std::swap(b, c);
+        const CsgGridPoint2 reference = b;
+        REQUIRE(CsgExact::DirectionCompare(a, reference, b, c) == RefDirectionCompare(a, reference, b, c));
+        REQUIRE(CsgExact::DirectionCompare(a, reference, c, b) == RefDirectionCompare(a, reference, c, b));
+        if (c != a)
+            REQUIRE(CsgExact::DirectionCompare(a, c, b, c) == RefDirectionCompare(a, c, b, c));
+    }
+}
+
+TEST_CASE("SegmentsCross cases", "[exact][planar]")
+{
+    // Proper crossing.
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 10), Pt(0, 10), Pt(10, 0)));
+    // The end of one segment touches the inside of the other.
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(5, 0), Pt(5, 7)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(5, 7), Pt(5, 0), Pt(0, 0), Pt(10, 0)));
+    // A common end point.
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(10, 0), Pt(10, 7)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(20, 5), Pt(10, 0)));
+    // Disjoint.
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(5, 1), Pt(5, 7)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(11, -3), Pt(11, 3)));
+    // The line through one segment cuts the other, but the segments do not meet.
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(20, -5), Pt(20, 5)));
+    // Collinear overlap.
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 10), Pt(5, 5), Pt(20, 20)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 10), Pt(3, 3), Pt(4, 4)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(10, 10), Pt(0, 0), Pt(20, 20), Pt(5, 5)));
+    // Collinear, touching in one point.
+    REQUIRE(CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 10), Pt(10, 10), Pt(20, 20)));
+    // Collinear, disjoint.
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 10), Pt(11, 11), Pt(20, 20)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 0), Pt(10, 0), Pt(-5, 0), Pt(-1, 0)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(0, 5), Pt(0, 9), Pt(0, 1), Pt(0, 4)));
+    // Points as segments.
+    REQUIRE(CsgExact::SegmentsCross(Pt(3, 3), Pt(3, 3), Pt(0, 0), Pt(10, 10)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(3, 4), Pt(3, 4), Pt(0, 0), Pt(10, 10)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(3, 3), Pt(3, 3), Pt(3, 3), Pt(3, 3)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(3, 3), Pt(3, 3), Pt(3, 4), Pt(3, 4)));
+    // Extreme coordinates: a diagonal and the other diagonal of the grid, and a segment just next to the center.
+    const int64_t e = GridLimit - 1;
+    REQUIRE(CsgExact::SegmentsCross(Pt(-e, -e), Pt(e, e), Pt(-e, e), Pt(e, -e)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(-e, -e), Pt(e, e), Pt(0, 0), Pt(0, 1)));
+    REQUIRE(!CsgExact::SegmentsCross(Pt(-e, -e), Pt(e, e), Pt(1, 0), Pt(e, 1)));
+    REQUIRE(CsgExact::SegmentsCross(Pt(-e, -e), Pt(e - 1, e), Pt(-e, e), Pt(e, -e)));
+}
+
+TEST_CASE("SegmentsCross matches an independent oracle", "[exact][planar]")
+{
+    // The oracle intersects the parametric lines. It uses 64 bit integers: the values are below 2^62.
+    const auto parametric = [](const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c,
+                                const CsgGridPoint2& d)
+    {
+        const int64_t rU = int64_t(b.u_) - a.u_, rV = int64_t(b.v_) - a.v_;
+        const int64_t sU = int64_t(d.u_) - c.u_, sV = int64_t(d.v_) - c.v_;
+        const int64_t qU = int64_t(c.u_) - a.u_, qV = int64_t(c.v_) - a.v_;
+        int64_t denominator = rU * sV - rV * sU;
+        int64_t tNumerator = qU * sV - qV * sU;
+        int64_t uNumerator = qU * rV - qV * rU;
+        if (denominator == 0)
+        {
+            if (uNumerator != 0)
+                return false;
+            // Collinear: the intervals of the parameter t = (x - a) . r / (r . r) overlap.
+            const int64_t t0 = qU * rU + qV * rV;
+            const int64_t t1 = t0 + sU * rU + sV * rV;
+            const int64_t length = rU * rU + rV * rV;
+            return std::max(std::min(t0, t1), int64_t{0}) <= std::min(std::max(t0, t1), length);
+        }
+        if (denominator < 0)
+        {
+            denominator = -denominator;
+            tNumerator = -tNumerator;
+            uNumerator = -uNumerator;
+        }
+        return tNumerator >= 0 && tNumerator <= denominator && uNumerator >= 0 && uNumerator <= denominator;
+    };
+
+    std::mt19937_64 random(1007);
+    int crossing = 0;
+    for (int i = 0; i < StressCount; ++i)
+    {
+        CsgGridPoint2 a, b, c, d;
+        if (i % 2 == 0)
+        {
+            // Small grid: many touching and collinear cases.
+            const auto small = [&]() { return Pt(int64_t(random() % 7) - 3, int64_t(random() % 7) - 3); };
+            a = small();
+            b = small();
+            c = small();
+            d = small();
+        }
+        else
+        {
+            a = RandomPoint(random);
+            b = RandomPoint(random);
+            c = RandomPoint(random);
+            d = RandomPoint(random);
+        }
+        if (a == b || c == d)
+            continue;
+        const bool expected = parametric(a, b, c, d);
+        REQUIRE(CsgExact::SegmentsCross(a, b, c, d) == expected);
+        REQUIRE(CsgExact::SegmentsCross(c, d, a, b) == expected);
+        REQUIRE(CsgExact::SegmentsCross(b, a, d, c) == expected);
+        crossing += expected;
+    }
+    REQUIRE(crossing > 1000);
+}
+
+TEST_CASE("LoopAreaSign matches the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1008);
+    std::vector<CsgGridPoint2> loop;
+    for (int i = 0; i < 4000; ++i)
+    {
+        const int count = (i % 5 == 0) ? 250 + static_cast<int>(random() % 60) : 3 + static_cast<int>(random() % 12);
+        loop.clear();
+        for (int j = 0; j < count; ++j)
+            loop.push_back(RandomPoint(random));
+        const int expected = RefLoopAreaSign(loop.data(), count);
+        REQUIRE(CsgExact::LoopAreaSign(loop.data(), count) == expected);
+        REQUIRE(CsgExact::LoopAreaSignExact(loop.data(), count) == expected);
+        // The reversed loop has the opposite area.
+        std::reverse(loop.begin(), loop.end());
+        REQUIRE(CsgExact::LoopAreaSign(loop.data(), count) == -expected);
+        REQUIRE(RefLoopAreaSign(loop.data(), count) == -expected);
+    }
+    // Triangles agree with Orient2.
+    for (int i = 0; i < StressCount; ++i)
+    {
+        const CsgGridPoint2 triangle[3] = {RandomPoint(random), RandomPoint(random), RandomPoint(random)};
+        REQUIRE(CsgExact::LoopAreaSign(triangle, 3) == RefOrient(triangle[0], triangle[1], triangle[2]));
+        REQUIRE(CsgExact::LoopAreaSign(triangle, 3) == CsgExact::Orient2(triangle[0], triangle[1], triangle[2]));
+    }
+    // A square, counterclockwise and clockwise. Short loops have the area 0.
+    const CsgGridPoint2 square[4] = {Pt(0, 0), Pt(4, 0), Pt(4, 4), Pt(0, 4)};
+    REQUIRE(CsgExact::LoopAreaSign(square, 4) == 1);
+    const CsgGridPoint2 reversed[4] = {Pt(0, 4), Pt(4, 4), Pt(4, 0), Pt(0, 0)};
+    REQUIRE(CsgExact::LoopAreaSign(reversed, 4) == -1);
+    REQUIRE(CsgExact::LoopAreaSign(square, 2) == 0);
+    REQUIRE(CsgExact::LoopAreaSign(square, 0) == 0);
+    REQUIRE(CsgExact::LoopAreaSign(nullptr, 0) == 0);
+}
+
+TEST_CASE("LoopAreaSign with 256 edges and alternating signs", "[exact][planar]")
+{
+    std::mt19937_64 random(1009);
+    // Points A, B, A, B, ... around the origin. Each pair of terms is cross(A, B) and cross(B, A).
+    // The terms alternate in sign and cancel. A large cross(A, B) makes the partial sums inexact in the filter.
+    for (int i = 0; i < 400; ++i)
+    {
+        const int64_t k = static_cast<int64_t>(random() % 1025);
+        CsgGridPoint2 d0, d1;
+        MakeCrossPair(random, GridLimit - 1, k, d0, d1);
+        if (random() & 1)
+            std::swap(d0, d1);
+        const int64_t cross = static_cast<int64_t>(d0.u_) * d1.v_ - static_cast<int64_t>(d0.v_) * d1.u_;
+
+        for (const int count : {256, 255, 254, 257, 300})
+        {
+            std::vector<CsgGridPoint2> loop(count);
+            loop[0] = Pt(0, 0);
+            for (int j = 1; j < count; ++j)
+                loop[j] = (j & 1) ? d0 : d1;
+            // The terms are cross(A, B), cross(B, A), ... : term t has the sign (-1)^t times cross(A, B).
+            const int terms = count - 2;
+            const int64_t sum = (terms & 1) ? cross : 0;
+            const int expected = (sum > 0) - (sum < 0);
+            REQUIRE(RefLoopAreaSign(loop.data(), count) == expected);
+            REQUIRE(CsgExact::LoopAreaSign(loop.data(), count) == expected);
+            REQUIRE(CsgExact::LoopAreaSignExact(loop.data(), count) == expected);
+        }
+    }
+
+    // Large terms of random sign, and a loop that goes out and back on the same points.
+    std::vector<CsgGridPoint2> loop(256);
+    int zeroSums = 0;
+    for (int i = 0; i < 2000; ++i)
+    {
+        for (CsgGridPoint2& point : loop)
+            point = RandomPoint(random);
+        // Make the second half of the loop the mirror of the first half: the area is 0.
+        for (int j = 1; j < 128; ++j)
+            loop[256 - j] = loop[j];
+        const int expected = RefLoopAreaSign(loop.data(), 256);
+        zeroSums += expected == 0;
+        REQUIRE(CsgExact::LoopAreaSign(loop.data(), 256) == expected);
+        REQUIRE(CsgExact::LoopAreaSignExact(loop.data(), 256) == expected);
+    }
+    // The mirrored loop goes out and comes back on the same points: the area is always 0.
+    REQUIRE(zeroSums == 2000);
+}
+
+TEST_CASE("LoopAreaSign of a collapsed loop is zero", "[exact][planar]")
+{
+    std::mt19937_64 random(1010);
+    // Out and back on the same points.
+    for (int i = 0; i < 2000; ++i)
+    {
+        const int half = 2 + static_cast<int>(random() % 100);
+        std::vector<CsgGridPoint2> loop;
+        for (int j = 0; j < half; ++j)
+            loop.push_back(RandomPoint(random));
+        for (int j = half - 2; j >= 1; --j)
+            loop.push_back(loop[j]);
+        const int count = static_cast<int>(loop.size());
+        REQUIRE(RefLoopAreaSign(loop.data(), count) == 0);
+        REQUIRE(CsgExact::LoopAreaSign(loop.data(), count) == 0);
+        REQUIRE(CsgExact::LoopAreaSignExact(loop.data(), count) == 0);
+    }
+    // All points on one line and all points equal.
+    for (int i = 0; i < 2000; ++i)
+    {
+        CsgGridPoint2 a, b, c;
+        MakeCollinear(random, a, b, c);
+        const CsgGridPoint2 line[6] = {a, b, c, b, a, c};
+        REQUIRE(CsgExact::LoopAreaSign(line, 6) == 0);
+        REQUIRE(CsgExact::LoopAreaSignExact(line, 6) == 0);
+        const CsgGridPoint2 same[5] = {a, a, a, a, a};
+        REQUIRE(CsgExact::LoopAreaSign(same, 5) == 0);
+    }
+    // A thin sliver of area 1/2 unit square stays nonzero.
+    const CsgGridPoint2 sliver[3] = {Pt(-(GridLimit - 1), -(GridLimit - 1)), Pt(GridLimit - 1, GridLimit - 1), Pt(GridLimit - 1, GridLimit - 2)};
+    REQUIRE(CsgExact::LoopAreaSign(sliver, 3) == -1);
+}
+
+TEST_CASE("Orient2 cost", "[.orient2cost][exact]")
+{
+    std::mt19937_64 random(1011);
+    std::vector<CsgGridPoint2> points(4096);
+    for (CsgGridPoint2& point : points)
+        point = RandomPoint(random);
+    const int repeats = 20000;
+    int total = 0;
+    const auto begin = std::chrono::steady_clock::now();
+    for (int r = 0; r < repeats; ++r)
+        for (size_t i = 0; i + 2 < points.size(); ++i)
+            total += CsgExact::Orient2(points[i], points[i + 1], points[i + 2]);
+    const auto end = std::chrono::steady_clock::now();
+    const double nanoseconds = std::chrono::duration<double, std::nano>(end - begin).count() / (double(repeats) * 4094.0);
+    WARN("Orient2: " << nanoseconds << " ns per call (checksum " << total << ")");
+    REQUIRE(total != 12345678);
 }
 
 } // namespace Urho3D
