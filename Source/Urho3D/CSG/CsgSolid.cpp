@@ -292,9 +292,12 @@ class FaceSets
 {
 public:
     explicit FaceSets(unsigned count)
-        : parents_(count)
-        , ranks_(count, 0)
     {
+        // A vector with a size of zero must not allocate. Keep the buffer pointers null.
+        if (count == 0)
+            return;
+        parents_.resize(count);
+        ranks_.resize(count, 0);
         for (unsigned i = 0; i < count; ++i)
             parents_[i] = static_cast<int>(i);
     }
