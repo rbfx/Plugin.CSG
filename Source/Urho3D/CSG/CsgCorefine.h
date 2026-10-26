@@ -328,8 +328,6 @@ struct CsgKeptFace
     bool second_{};
     /// True if the polygon is the flipped copy of the source face.
     bool flip_{};
-    /// True for a region of a split triangle. Only these can be zero-width strips.
-    bool split_{};
 };
 
 /// One entry for the sort in CancelOpposites.

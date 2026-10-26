@@ -44,38 +44,6 @@ double PolygonArea(const CsgPolygon& polygon)
     return static_cast<double>(normal.Length()) * 0.5;
 }
 
-/// Return the area and the perimeter of a polygon, computed in double relative to the first vertex.
-/// The offset keeps the error small also for a polygon far from the origin.
-void PolygonSize(const CsgPolygon& polygon, double& area, double& perimeter)
-{
-    const unsigned count = polygon.vertices_.size();
-    area = 0.0;
-    perimeter = 0.0;
-    if (count == 0)
-        return;
-    const Vector3 origin = polygon.vertices_[0].GetPosition();
-    double normal[3] = {};
-    for (unsigned i = 0; i < count; ++i)
-    {
-        const Vector3 p = polygon.vertices_[i].GetPosition();
-        const Vector3 q = polygon.vertices_[(i + 1) % count].GetPosition();
-        const double px = static_cast<double>(p.x_) - origin.x_;
-        const double py = static_cast<double>(p.y_) - origin.y_;
-        const double pz = static_cast<double>(p.z_) - origin.z_;
-        const double qx = static_cast<double>(q.x_) - origin.x_;
-        const double qy = static_cast<double>(q.y_) - origin.y_;
-        const double qz = static_cast<double>(q.z_) - origin.z_;
-        normal[0] += py * qz - pz * qy;
-        normal[1] += pz * qx - px * qz;
-        normal[2] += px * qy - py * qx;
-        const double dx = static_cast<double>(q.x_) - p.x_;
-        const double dy = static_cast<double>(q.y_) - p.y_;
-        const double dz = static_cast<double>(q.z_) - p.z_;
-        perimeter += std::sqrt(dx * dx + dy * dy + dz * dz);
-    }
-    area = 0.5 * std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-}
-
 /// Return a point inside a polygon: the centroid of its largest triangle.
 Vector3 PolygonInteriorPoint(const CsgPolygon& polygon, ea::vector<unsigned>& indices)
 {
@@ -414,7 +382,6 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
         kept.sourceFace_ = element.sourceFace_;
         kept.second_ = second;
         kept.flip_ = flip;
-        kept.split_ = element.split_;
         if (element.sourceFace_ >= 0)
             continue;
         kept.idStart_ = static_cast<int>(s.keptIds_.size());
@@ -520,36 +487,6 @@ void CancelOpposites(CsgBooleanScratch& s)
             s.kept_[out++] = ea::move(s.kept_[i]);
     }
     s.kept_.resize(out);
-}
-
-/// Copy the faces that are not thin split regions to a new list. Return the number of faces that the list leaves out.
-///
-/// This step is not in the reference. The symbolic perturbation keeps the strips that lie outside the other solid
-/// by a distance that is smaller than any real number. When two faces touch in one plane, such a strip is a
-/// zero-width region. Its polygon has vertices but no area, and the triangulator gives it triangles of both
-/// windings. The surface then has flaps, and the next boolean intersects them.
-/// A region with a mean width below a quarter of epsilon is below the resolution of the welder.
-/// The comparison is false for NaN, so a face with an unknown size stays.
-unsigned CopyWithoutThinRegions(const ea::vector<CsgKeptFace>& kept, float epsilon, ea::vector<CsgKeptFace>& result)
-{
-    const double limit = static_cast<double>(epsilon) * 0.25;
-    result.clear();
-    result.reserve(kept.size());
-    for (const CsgKeptFace& face : kept)
-    {
-        // Only a region of a split triangle can be a strip. A whole face of an operand, and a triangle that stays
-        // whole because its split failed, are not candidates.
-        if (face.split_)
-        {
-            double area = 0.0;
-            double perimeter = 0.0;
-            PolygonSize(*face.polygon_, area, perimeter);
-            if (2.0 * area <= perimeter * limit)
-                continue;
-        }
-        result.push_back(face);
-    }
-    return kept.size() - result.size();
 }
 
 /// A corner of a cleaned loop. An original corner has the index of its polygon vertex in from_, and to_ is -1.
@@ -1070,34 +1007,15 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     AppendOperand(core, core.a_, core.segmentsA_, core.splitA_, *b, operation, false, result, s);
     AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, *a, operation, true, result, s);
 
-    SharedPtr<CsgSolid> regionSolid;
     if (!s.kept_.empty())
     {
         CancelOpposites(s);
 
-        // Try the surface without the thin regions first. A removed region leaves the edges of its neighbors
-        // without a partner. The builder does not look for such edges, but the region solid does.
-        // If the faces need a repair, weld them like FromOperand does.
-        // If the surface is open without the thin regions and closed with them, the result keeps them.
-        // The closed flag accepts small cracks, so the test also looks at every open edge.
-        ea::vector<CsgKeptFace> solidRegions;
-        const unsigned dropped = CopyWithoutThinRegions(s.kept_, epsilon, solidRegions);
-        if (dropped == 0)
-        {
-            regionSolid = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
-        }
-        else if (!solidRegions.empty())
-        {
-            regionSolid = CsgSolid::Repaired(BuildRegionSolid(core, s, solidRegions, a, b, epsilon));
-            if (!regionSolid->IsClosed() || regionSolid->HasOpenEdges())
-            {
-                SharedPtr<CsgSolid> all = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
-                if (!regionSolid->IsClosed() || !all->HasOpenEdges())
-                    regionSolid = all;
-            }
-        }
-        if (regionSolid)
-            result.AppendSolid(*regionSolid);
+        // The exact clean-up of the region solid gives the result: a weld by grid point, a cancel of twin faces
+        // and a closed test on the grid. This holds for operands in the grid range. The result path has no float repair. If the exact surface is not closed,
+        // the result reports IsClosed() false.
+        SharedPtr<CsgSolid> regionSolid = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
+        result.AppendSolid(*regionSolid);
     }
     return result.Finish();
 }

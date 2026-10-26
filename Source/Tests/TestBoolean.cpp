@@ -476,12 +476,12 @@ void RunSweep(float step, unsigned maxFailures)
 
 // The sweep covers rotations of the coplanar contact: 4 axes and 257 angles from 0.3 to 179.5 degrees.
 // The grid step is 2^-10 units. The exact tests snap the corners of rotated boxes one by one.
-// The snapped corners do not stay coplanar. The measured count of failed samples is 119 of 1028.
-// In all of them the union of A and B is right. The next boolean fails because of zero-width spikes in its faces.
-// The failed samples are about the axis (1, 1, 1) (70), the z axis (25), the y axis (17) and the x axis (7).
+// The snapped corners do not stay coplanar. The measured count of failed samples is 22 of 1028.
+// In all of them the union of A and B is right. The next boolean fails because the result has an open edge.
+// The failed samples are about the axis (1, 1, 1) (19), the z axis (2) and the x axis (1).
 // The test fails if more than 48 samples fail. It is a known limit, so the failure is expected.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 51 samples fail: the axis (1, 1, 1) (45) and the
-// z axis (6). The union of A and B is right in all of them. The test also fails in double mode.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 36 samples fail: the axis (1, 1, 1) (33), the x axis (2)
+// and the z axis (1). The union of A and B is right in all of them. The test also fails in double mode.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
 {
