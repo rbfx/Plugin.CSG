@@ -5,18 +5,22 @@
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
 
+#include <cmath>
+#include <limits>
+
 namespace Urho3D
 {
 
 namespace
 {
 
-/// Relative error bound of the floating point filter.
-constexpr double FilterBound = 1e-12;
+/// Relative error bound of the floating point filter, with e as the float epsilon.
+/// The published error bound is (7 + 56e) * e times the permanent. The value 8e covers it.
+constexpr float FilterBound = 8.0f * std::numeric_limits<float>::epsilon();
 
-int SignOfDouble(double value)
+int SignOfFloat(float value)
 {
-    return value > 0.0 ? 1 : -1;
+    return value > 0.0f ? 1 : -1;
 }
 
 } // namespace
@@ -29,23 +33,20 @@ int CsgExact::OrientT(
     const int64_t vx = c.x_ - a.x_, vy = c.y_ - a.y_, vz = c.z_ - a.z_;
     const int64_t wx = d.x_ - a.x_, wy = d.y_ - a.y_, wz = d.z_ - a.z_;
 
-    // Coordinates below 2^23 make every difference exact in double. Only the products round.
-    const double m1 = static_cast<double>(vy) * static_cast<double>(wz) - static_cast<double>(vz) * static_cast<double>(wy);
-    const double m2 = static_cast<double>(vz) * static_cast<double>(wx) - static_cast<double>(vx) * static_cast<double>(wz);
-    const double m3 = static_cast<double>(vx) * static_cast<double>(wy) - static_cast<double>(vy) * static_cast<double>(wx);
-    const double det = static_cast<double>(ux) * m1 + static_cast<double>(uy) * m2 + static_cast<double>(uz) * m3;
-    const double permanent =
-        std::abs(static_cast<double>(ux))
-            * (std::abs(static_cast<double>(vy) * static_cast<double>(wz))
-                + std::abs(static_cast<double>(vz) * static_cast<double>(wy)))
-        + std::abs(static_cast<double>(uy))
-            * (std::abs(static_cast<double>(vz) * static_cast<double>(wx))
-                + std::abs(static_cast<double>(vx) * static_cast<double>(wz)))
-        + std::abs(static_cast<double>(uz))
-            * (std::abs(static_cast<double>(vx) * static_cast<double>(wy))
-                + std::abs(static_cast<double>(vy) * static_cast<double>(wx)));
+    // Coordinates up to 2^23 make every difference at most 2^24. Such a difference is exact in float.
+    // Only the products and the sums round. The filter bound covers these errors.
+    const float fux = static_cast<float>(ux), fuy = static_cast<float>(uy), fuz = static_cast<float>(uz);
+    const float fvx = static_cast<float>(vx), fvy = static_cast<float>(vy), fvz = static_cast<float>(vz);
+    const float fwx = static_cast<float>(wx), fwy = static_cast<float>(wy), fwz = static_cast<float>(wz);
+    const float m1 = fvy * fwz - fvz * fwy;
+    const float m2 = fvz * fwx - fvx * fwz;
+    const float m3 = fvx * fwy - fvy * fwx;
+    const float det = fux * m1 + fuy * m2 + fuz * m3;
+    const float permanent = std::abs(fux) * (std::abs(fvy * fwz) + std::abs(fvz * fwy))
+        + std::abs(fuy) * (std::abs(fvz * fwx) + std::abs(fvx * fwz))
+        + std::abs(fuz) * (std::abs(fvx * fwy) + std::abs(fvy * fwx));
     if (std::abs(det) > permanent * FilterBound)
-        return det > 0.0 ? 1 : -1;
+        return SignOfFloat(det);
 
     const Int exact = CsgMul(CsgMul64<Int>(vy, wz) - CsgMul64<Int>(vz, wy), ux)
         + CsgMul(CsgMul64<Int>(vz, wx) - CsgMul64<Int>(vx, wz), uy)
@@ -119,41 +120,41 @@ bool CsgExact::PassesInsideT(const CsgGridPoint& e0, const CsgGridPoint& e1, con
     const int linesMask = edgeInSecond ? 0b0011 : 0b1100;
 
     // Lane k holds Orient(e0, e1, t_k, t_k+1). Undecided lanes take the exact path when needed.
-    const auto diff = [](int64_t t, int64_t e) { return static_cast<double>(t - e); };
-    const CsgDouble4 vx = CsgDouble4::Create(diff(t0.x_, e0.x_), diff(t1.x_, e0.x_), diff(t2.x_, e0.x_), 0.0);
-    const CsgDouble4 vy = CsgDouble4::Create(diff(t0.y_, e0.y_), diff(t1.y_, e0.y_), diff(t2.y_, e0.y_), 0.0);
-    const CsgDouble4 vz = CsgDouble4::Create(diff(t0.z_, e0.z_), diff(t1.z_, e0.z_), diff(t2.z_, e0.z_), 0.0);
-    const CsgDouble4 wx = CsgDouble4::Create(diff(t1.x_, e0.x_), diff(t2.x_, e0.x_), diff(t0.x_, e0.x_), 0.0);
-    const CsgDouble4 wy = CsgDouble4::Create(diff(t1.y_, e0.y_), diff(t2.y_, e0.y_), diff(t0.y_, e0.y_), 0.0);
-    const CsgDouble4 wz = CsgDouble4::Create(diff(t1.z_, e0.z_), diff(t2.z_, e0.z_), diff(t0.z_, e0.z_), 0.0);
-    CsgDouble4 detVector;
-    const int decided = CsgInternal::Filter(CsgDouble4::Splat(diff(e1.x_, e0.x_)), CsgDouble4::Splat(diff(e1.y_, e0.y_)),
-        CsgDouble4::Splat(diff(e1.z_, e0.z_)), vx, vy, vz, wx, wy, wz, detVector);
-    double det[4];
+    const auto diff = [](int64_t t, int64_t e) { return static_cast<float>(t - e); };
+    const CsgFloat4 vx = CsgFloat4::Create(diff(t0.x_, e0.x_), diff(t1.x_, e0.x_), diff(t2.x_, e0.x_), 0.0f);
+    const CsgFloat4 vy = CsgFloat4::Create(diff(t0.y_, e0.y_), diff(t1.y_, e0.y_), diff(t2.y_, e0.y_), 0.0f);
+    const CsgFloat4 vz = CsgFloat4::Create(diff(t0.z_, e0.z_), diff(t1.z_, e0.z_), diff(t2.z_, e0.z_), 0.0f);
+    const CsgFloat4 wx = CsgFloat4::Create(diff(t1.x_, e0.x_), diff(t2.x_, e0.x_), diff(t0.x_, e0.x_), 0.0f);
+    const CsgFloat4 wy = CsgFloat4::Create(diff(t1.y_, e0.y_), diff(t2.y_, e0.y_), diff(t0.y_, e0.y_), 0.0f);
+    const CsgFloat4 wz = CsgFloat4::Create(diff(t1.z_, e0.z_), diff(t2.z_, e0.z_), diff(t0.z_, e0.z_), 0.0f);
+    CsgFloat4 detVector;
+    const int decided = CsgInternal::Filter(CsgFloat4::Splat(diff(e1.x_, e0.x_)), CsgFloat4::Splat(diff(e1.y_, e0.y_)),
+        CsgFloat4::Splat(diff(e1.z_, e0.z_)), vx, vy, vz, wx, wy, wz, detVector);
+    float det[4];
     detVector.Store(det);
 
-    const int s0 = (decided & 1) != 0 ? SignOfDouble(det[0]) : OrientT<Int>(e0, e1, t0, t1, linesMask);
+    const int s0 = (decided & 1) != 0 ? SignOfFloat(det[0]) : OrientT<Int>(e0, e1, t0, t1, linesMask);
     if (s0 == 0)
         return false;
-    const int s1 = (decided & 2) != 0 ? SignOfDouble(det[1]) : OrientT<Int>(e0, e1, t1, t2, linesMask);
+    const int s1 = (decided & 2) != 0 ? SignOfFloat(det[1]) : OrientT<Int>(e0, e1, t1, t2, linesMask);
     if (s1 != s0)
         return false;
-    const int s2 = (decided & 4) != 0 ? SignOfDouble(det[2]) : OrientT<Int>(e0, e1, t2, t0, linesMask);
+    const int s2 = (decided & 4) != 0 ? SignOfFloat(det[2]) : OrientT<Int>(e0, e1, t2, t0, linesMask);
     return s2 == s0;
 }
 
-int CsgInternal::Filter(const CsgDouble4& ux, const CsgDouble4& uy, const CsgDouble4& uz, const CsgDouble4& vx,
-    const CsgDouble4& vy, const CsgDouble4& vz, const CsgDouble4& wx, const CsgDouble4& wy, const CsgDouble4& wz,
-    CsgDouble4& det)
+int CsgInternal::Filter(const CsgFloat4& ux, const CsgFloat4& uy, const CsgFloat4& uz, const CsgFloat4& vx,
+    const CsgFloat4& vy, const CsgFloat4& vz, const CsgFloat4& wx, const CsgFloat4& wy, const CsgFloat4& wz,
+    CsgFloat4& det)
 {
-    const CsgDouble4 m1 = vy * wz - vz * wy;
-    const CsgDouble4 m2 = vz * wx - vx * wz;
-    const CsgDouble4 m3 = vx * wy - vy * wx;
+    const CsgFloat4 m1 = vy * wz - vz * wy;
+    const CsgFloat4 m2 = vz * wx - vx * wz;
+    const CsgFloat4 m3 = vx * wy - vy * wx;
     det = ux * m1 + uy * m2 + uz * m3;
-    const CsgDouble4 permanent = CsgDouble4::Abs(ux) * (CsgDouble4::Abs(vy * wz) + CsgDouble4::Abs(vz * wy))
-        + CsgDouble4::Abs(uy) * (CsgDouble4::Abs(vz * wx) + CsgDouble4::Abs(vx * wz))
-        + CsgDouble4::Abs(uz) * (CsgDouble4::Abs(vx * wy) + CsgDouble4::Abs(vy * wx));
-    return CsgDouble4::GreaterThanMask(CsgDouble4::Abs(det), permanent * CsgDouble4::Splat(FilterBound)) & 0b111;
+    const CsgFloat4 permanent = CsgFloat4::Abs(ux) * (CsgFloat4::Abs(vy * wz) + CsgFloat4::Abs(vz * wy))
+        + CsgFloat4::Abs(uy) * (CsgFloat4::Abs(vz * wx) + CsgFloat4::Abs(vx * wz))
+        + CsgFloat4::Abs(uz) * (CsgFloat4::Abs(vx * wy) + CsgFloat4::Abs(vy * wx));
+    return CsgFloat4::GreaterThanMask(CsgFloat4::Abs(det), permanent * CsgFloat4::Splat(FilterBound)) & 0b111;
 }
 
 int CsgExact::Orient(

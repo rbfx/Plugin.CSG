@@ -46,9 +46,9 @@ double ToDouble(const CsgInt128& value)
 }
 #endif
 
-int SignOfDouble(double value)
+int SignOfFloat(float value)
 {
-    return value > 0.0 ? 1 : -1;
+    return value > 0.0f ? 1 : -1;
 }
 
 /// Snap a position to the grid. A coordinate outside of the range is clamped, a NaN becomes zero.
@@ -136,19 +136,19 @@ void Sides(const Mesh& corners, int triangle, const Mesh& other, int otherTriang
     const CsgGridPoint& d2 = corners.grid_[ids[2]];
 
     // The three corners share the plane, one lane each. Undecided lanes take the exact path.
-    const auto diff = [](int64_t a, int64_t b) { return static_cast<double>(a - b); };
-    CsgDouble4 detVector;
-    const int decided = Filter(CsgDouble4::Splat(diff(t1.x_, t0.x_)), CsgDouble4::Splat(diff(t1.y_, t0.y_)),
-        CsgDouble4::Splat(diff(t1.z_, t0.z_)), CsgDouble4::Splat(diff(t2.x_, t0.x_)),
-        CsgDouble4::Splat(diff(t2.y_, t0.y_)), CsgDouble4::Splat(diff(t2.z_, t0.z_)),
-        CsgDouble4::Create(diff(d0.x_, t0.x_), diff(d1.x_, t0.x_), diff(d2.x_, t0.x_), 0.0),
-        CsgDouble4::Create(diff(d0.y_, t0.y_), diff(d1.y_, t0.y_), diff(d2.y_, t0.y_), 0.0),
-        CsgDouble4::Create(diff(d0.z_, t0.z_), diff(d1.z_, t0.z_), diff(d2.z_, t0.z_), 0.0), detVector);
-    double det[4];
+    const auto diff = [](int64_t a, int64_t b) { return static_cast<float>(a - b); };
+    CsgFloat4 detVector;
+    const int decided = Filter(CsgFloat4::Splat(diff(t1.x_, t0.x_)), CsgFloat4::Splat(diff(t1.y_, t0.y_)),
+        CsgFloat4::Splat(diff(t1.z_, t0.z_)), CsgFloat4::Splat(diff(t2.x_, t0.x_)),
+        CsgFloat4::Splat(diff(t2.y_, t0.y_)), CsgFloat4::Splat(diff(t2.z_, t0.z_)),
+        CsgFloat4::Create(diff(d0.x_, t0.x_), diff(d1.x_, t0.x_), diff(d2.x_, t0.x_), 0.0f),
+        CsgFloat4::Create(diff(d0.y_, t0.y_), diff(d1.y_, t0.y_), diff(d2.y_, t0.y_), 0.0f),
+        CsgFloat4::Create(diff(d0.z_, t0.z_), diff(d1.z_, t0.z_), diff(d2.z_, t0.z_), 0.0f), detVector);
+    float det[4];
     detVector.Store(det);
-    sides[0] = (decided & 1) != 0 ? SignOfDouble(det[0]) : CsgExact::Orient(t0, t1, t2, d0, mask);
-    sides[1] = (decided & 2) != 0 ? SignOfDouble(det[1]) : CsgExact::Orient(t0, t1, t2, d1, mask);
-    sides[2] = (decided & 4) != 0 ? SignOfDouble(det[2]) : CsgExact::Orient(t0, t1, t2, d2, mask);
+    sides[0] = (decided & 1) != 0 ? SignOfFloat(det[0]) : CsgExact::Orient(t0, t1, t2, d0, mask);
+    sides[1] = (decided & 2) != 0 ? SignOfFloat(det[1]) : CsgExact::Orient(t0, t1, t2, d1, mask);
+    sides[2] = (decided & 4) != 0 ? SignOfFloat(det[2]) : CsgExact::Orient(t0, t1, t2, d2, mask);
 }
 
 } // namespace

@@ -10,6 +10,7 @@
 
 #include <catch2/catch_amalgamated.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -679,22 +680,22 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
 
 TEST_CASE("Exact filter", "[exact]")
 {
-    // Use big coordinates so that the products in double round.
+    // Use big coordinates so that the products in float round.
     const int64_t big = int64_t(1) << 20;
 
     const auto runFilter = [](const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
-                               double& det)
+                               float& det)
     {
-        const CsgDouble4 ux = CsgDouble4::Splat(double(b.x_ - a.x_));
-        const CsgDouble4 uy = CsgDouble4::Splat(double(b.y_ - a.y_));
-        const CsgDouble4 uz = CsgDouble4::Splat(double(b.z_ - a.z_));
-        const CsgDouble4 vx = CsgDouble4::Splat(double(c.x_ - a.x_));
-        const CsgDouble4 vy = CsgDouble4::Splat(double(c.y_ - a.y_));
-        const CsgDouble4 vz = CsgDouble4::Splat(double(c.z_ - a.z_));
-        const CsgDouble4 wx = CsgDouble4::Splat(double(d.x_ - a.x_));
-        const CsgDouble4 wy = CsgDouble4::Splat(double(d.y_ - a.y_));
-        const CsgDouble4 wz = CsgDouble4::Splat(double(d.z_ - a.z_));
-        CsgDouble4 result;
+        const CsgFloat4 ux = CsgFloat4::Splat(static_cast<float>(b.x_ - a.x_));
+        const CsgFloat4 uy = CsgFloat4::Splat(static_cast<float>(b.y_ - a.y_));
+        const CsgFloat4 uz = CsgFloat4::Splat(static_cast<float>(b.z_ - a.z_));
+        const CsgFloat4 vx = CsgFloat4::Splat(static_cast<float>(c.x_ - a.x_));
+        const CsgFloat4 vy = CsgFloat4::Splat(static_cast<float>(c.y_ - a.y_));
+        const CsgFloat4 vz = CsgFloat4::Splat(static_cast<float>(c.z_ - a.z_));
+        const CsgFloat4 wx = CsgFloat4::Splat(static_cast<float>(d.x_ - a.x_));
+        const CsgFloat4 wy = CsgFloat4::Splat(static_cast<float>(d.y_ - a.y_));
+        const CsgFloat4 wz = CsgFloat4::Splat(static_cast<float>(d.z_ - a.z_));
+        CsgFloat4 result;
         const int decided = CsgInternal::Filter(ux, uy, uz, vx, vy, vz, wx, wy, wz, result);
         det = result.Get(0);
         return decided;
@@ -708,7 +709,7 @@ TEST_CASE("Exact filter", "[exact]")
         // d = a + 2 (b - a) - 3 (c - a)
         const CsgGridPoint d = P(a.x_ + 2 * (b.x_ - a.x_) - 3 * (c.x_ - a.x_),
             a.y_ + 2 * (b.y_ - a.y_) - 3 * (c.y_ - a.y_), a.z_ + 2 * (b.z_ - a.z_) - 3 * (c.z_ - a.z_));
-        double det = 0.0;
+        float det = 0.0f;
         REQUIRE((runFilter(a, b, c, d, det) & 1) == 0);
         REQUIRE(CsgExact::Orient(a, b, c, d, 0) == 0);
         REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, d, 0) == 0);
@@ -724,99 +725,108 @@ TEST_CASE("Exact filter", "[exact]")
 
     SECTION("Clear cases are decided")
     {
-        double det = 0.0;
+        float det = 0.0f;
         REQUIRE((runFilter(P(0, 0, 0), P(Unit, 0, 0), P(0, Unit, 0), P(0, 0, Unit), det) & 1) != 0);
-        REQUIRE(det > 0.0);
+        REQUIRE(det > 0.0f);
         REQUIRE((runFilter(P(0, 0, 0), P(0, Unit, 0), P(Unit, 0, 0), P(0, 0, Unit), det) & 1) != 0);
-        REQUIRE(det < 0.0);
+        REQUIRE(det < 0.0f);
     }
 
-    SECTION("Filter and exact path agree with the exact path alone")
+    SECTION("Decided lanes have the sign of the reference")
     {
         std::mt19937_64 random(2024);
-        std::uniform_int_distribution<int64_t> coordinate(-big, big);
-        std::uniform_int_distribution<int64_t> jitter(-2, 2);
+        const int64_t limit = (int64_t(1) << 23) - 1;
+        std::uniform_int_distribution<int64_t> coordinate(-limit, limit);
         std::uniform_int_distribution<int> factor(-1, 1);
-        int undecided = 0;
-        for (int i = 0; i < 1000; ++i)
+        std::uniform_int_distribution<int> axisPick(0, 2);
+        std::uniform_int_distribution<int> signPick(0, 1);
+        const auto clamp = [limit](int64_t value) { return std::max(-limit, std::min(limit, value)); };
+        int decidedCount = 0;
+        int undecidedCount = 0;
+        for (int i = 0; i < 4000; ++i)
         {
             const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
             const CsgGridPoint b = P(coordinate(random), coordinate(random), coordinate(random));
             const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
             CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
-            if (i % 2 == 0)
+            if (i % 4 != 0)
             {
-                // Coplanar or nearly coplanar: a combination of the edges plus a small jitter on every second case.
-                // With grid coordinates below 2^23, the filter decides every case that is not exactly coplanar.
-                const double s = factor(random);
-                const double t = factor(random);
-                const bool jittered = (i % 4) == 0;
+                // Coplanar point: d = a + s (b - a) + t (c - a), clamped into the range.
+                const int s = factor(random);
+                const int t = factor(random);
                 const auto mix = [&](int64_t pa, int64_t pb, int64_t pc)
-                { return pa + int64_t(s * double(pb - pa) + t * double(pc - pa)) + (jittered ? jitter(random) : 0); };
+                { return clamp(pa + s * (pb - pa) + t * (pc - pa)); };
                 d = P(mix(a.x_, b.x_, c.x_), mix(a.y_, b.y_, c.y_), mix(a.z_, b.z_, c.z_));
+                if (i % 4 == 1)
+                {
+                    // Near coplanar point: move by one unit on one axis.
+                    const int64_t step = signPick(random) == 0 ? -1 : 1;
+                    const int axis = axisPick(random);
+                    d = P(clamp(d.x_ + (axis == 0 ? step : 0)), clamp(d.y_ + (axis == 1 ? step : 0)),
+                        clamp(d.z_ + (axis == 2 ? step : 0)));
+                }
             }
-            double det = 0.0;
+            float det = 0.0f;
             const int decided = runFilter(a, b, c, d, det);
-            const int viaFilter = (decided & 1) != 0 ? (det > 0.0 ? 1 : -1) : CsgExact::Orient(a, b, c, d, 0);
-            // The volume has no filter. Its sign is the sign of Orient with second = 0.
-            const int exactOnly = CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d));
+            const int reference = CsgTest::ReferenceOrient(a, b, c, d, 0);
             if ((decided & 1) != 0)
-                REQUIRE((det > 0.0 ? 1 : -1) == exactOnly);
-            REQUIRE(viaFilter == exactOnly);
-            REQUIRE(CsgExact::OrientT<CsgInt128Portable>(a, b, c, d, 0) == exactOnly);
-            REQUIRE(CsgExact::Orient(a, b, c, d, 0) == exactOnly);
-            if ((decided & 1) == 0)
             {
-                // The filter does not decide here, so only the exact path gives the sign.
-                ++undecided;
+                ++decidedCount;
+                REQUIRE((det > 0.0f ? 1 : -1) == reference);
             }
+            else
+            {
+                ++undecidedCount;
+            }
+            REQUIRE(CsgExact::Orient(a, b, c, d, 0) == reference);
         }
-        // Some of the coplanar cases take the exact path.
-        REQUIRE(undecided > 20);
+        // The filter decides some lanes and leaves some lanes to the exact path.
+        REQUIRE(decidedCount > 100);
+        REQUIRE(undecidedCount > 100);
     }
 
     SECTION("Lanes are independent")
     {
-        const CsgDouble4 one = CsgDouble4::Splat(1.0);
-        const CsgDouble4 zero = CsgDouble4::Splat(0.0);
+        const CsgFloat4 one = CsgFloat4::Splat(1.0f);
+        const CsgFloat4 zero = CsgFloat4::Splat(0.0f);
         // Lane 0 has det = 1, lane 1 has det = -1, lane 2 has det = 0, lane 3 is ignored.
-        const CsgDouble4 ux = CsgDouble4::Create(1.0, -1.0, 0.0, 5.0);
-        CsgDouble4 det;
+        const CsgFloat4 ux = CsgFloat4::Create(1.0f, -1.0f, 0.0f, 5.0f);
+        CsgFloat4 det;
         const int decided = CsgInternal::Filter(ux, zero, zero, zero, one, zero, zero, zero, one, det);
         REQUIRE(decided == 0b011);
-        REQUIRE(det.Get(0) == 1.0);
-        REQUIRE(det.Get(1) == -1.0);
-        REQUIRE(det.Get(2) == 0.0);
+        REQUIRE(det.Get(0) == 1.0f);
+        REQUIRE(det.Get(1) == -1.0f);
+        REQUIRE(det.Get(2) == 0.0f);
     }
 }
 
-TEST_CASE("Simd double vector", "[exact]")
+TEST_CASE("Simd float vector", "[exact]")
 {
-    const CsgDouble4 a = CsgDouble4::Create(1.0, -2.0, 3.0, -4.0);
-    const CsgDouble4 b = CsgDouble4::Create(0.5, 2.0, -3.0, std::numeric_limits<double>::quiet_NaN());
-    double out[4];
+    const CsgFloat4 a = CsgFloat4::Create(1.0f, -2.0f, 3.0f, -4.0f);
+    const CsgFloat4 b = CsgFloat4::Create(0.5f, 2.0f, -3.0f, std::numeric_limits<float>::quiet_NaN());
+    float out[4];
     (a + b).Store(out);
-    REQUIRE(out[0] == 1.5);
-    REQUIRE(out[1] == 0.0);
-    REQUIRE(out[2] == 0.0);
+    REQUIRE(out[0] == 1.5f);
+    REQUIRE(out[1] == 0.0f);
+    REQUIRE(out[2] == 0.0f);
     REQUIRE(std::isnan(out[3]));
     (a - b).Store(out);
-    REQUIRE(out[0] == 0.5);
-    REQUIRE(out[1] == -4.0);
-    REQUIRE(out[2] == 6.0);
+    REQUIRE(out[0] == 0.5f);
+    REQUIRE(out[1] == -4.0f);
+    REQUIRE(out[2] == 6.0f);
     (a * b).Store(out);
-    REQUIRE(out[0] == 0.5);
-    REQUIRE(out[1] == -4.0);
-    REQUIRE(out[2] == -9.0);
-    CsgDouble4::Abs(a).Store(out);
-    REQUIRE(out[0] == 1.0);
-    REQUIRE(out[1] == 2.0);
-    REQUIRE(out[2] == 3.0);
-    REQUIRE(out[3] == 4.0);
+    REQUIRE(out[0] == 0.5f);
+    REQUIRE(out[1] == -4.0f);
+    REQUIRE(out[2] == -9.0f);
+    CsgFloat4::Abs(a).Store(out);
+    REQUIRE(out[0] == 1.0f);
+    REQUIRE(out[1] == 2.0f);
+    REQUIRE(out[2] == 3.0f);
+    REQUIRE(out[3] == 4.0f);
     // Lane 3 compares with NaN and gives a clear bit.
-    REQUIRE(CsgDouble4::GreaterThanMask(a, b) == 0b0101);
-    REQUIRE(CsgDouble4::GreaterThanMask(b, a) == 0b0010);
-    REQUIRE(a.Get(2) == 3.0);
+    REQUIRE(CsgFloat4::GreaterThanMask(a, b) == 0b0101);
+    REQUIRE(CsgFloat4::GreaterThanMask(b, a) == 0b0010);
+    REQUIRE(a.Get(2) == 3.0f);
 }
 
 TEST_CASE("Grid point snapping", "[exact]")
