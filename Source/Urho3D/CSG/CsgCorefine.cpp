@@ -223,7 +223,7 @@ Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
     outOfRange_ = a_.outOfRange_ || b_.outOfRange_;
     if (outOfRange_)
     {
-        URHO3D_LOGWARNING("CsgCorefine: an operand has a coordinate outside of +-{}. The exact math is not valid.",
+        URHO3D_LOGWARNING("CsgCorefine: an operand has a coordinate outside of +-{}. The coordinate is clamped and the result is not valid.",
             static_cast<int>(CSG_EXACT_COORDINATE_LIMIT));
     }
     segmentsA_.Reset(static_cast<unsigned>(a_.triangleFace_.size()));
