@@ -25,7 +25,7 @@ namespace
 {
 
 /// Largest grid coordinate after the clamp of an out of range operand.
-constexpr float CLAMPED_COORDINATE = 65535.0f;
+constexpr float CLAMPED_COORDINATE = 8191.0f;
 
 /// Tolerance of the first comparison of two crossings on an edge.
 constexpr double EDGE_ORDER_TOLERANCE = 1e-9;

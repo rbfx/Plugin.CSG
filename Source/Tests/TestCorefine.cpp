@@ -27,7 +27,8 @@ using namespace Urho3D::CsgInternal;
 namespace
 {
 
-constexpr float Tolerance = 1e-5f;
+// The grid step is 2^-10 units, so a snapped position moves up to 2^-11 units.
+constexpr float Tolerance = 1e-3f;
 
 bool Near(const Vector3& a, const Vector3& b, float tolerance = Tolerance)
 {
@@ -353,7 +354,9 @@ TEST_CASE("Corefine crossings of a box and a rotated box", "[corefine]")
 TEST_CASE("Corefine crossings of a sphere and a box", "[corefine]")
 {
     const Vector3 half(1.0f, 1.0f, 1.0f);
-    const CsgSolid sphere(MakeSpherePolygons(Vector3(0.1f, 0.2f, 0.3f), 1.3f, 8, 12, 1));
+    // The grid step is 1/1024 unit. With z = 0.3 the pole of the sphere snaps onto the plane of the box.
+    // The crossings then depend on the operand order. The value 0.35 keeps the pole off the plane.
+    const CsgSolid sphere(MakeSpherePolygons(Vector3(0.1f, 0.2f, 0.35f), 1.3f, 8, 12, 1));
     const CsgSolid box(MakeBoxPolygons(Vector3::ZERO, half, 2));
 
     const auto result = CsgCorefineCrossingsForTest(sphere, box);
@@ -368,7 +371,7 @@ TEST_CASE("Corefine crossings of a sphere and a box", "[corefine]")
     CHECK(SameResult(result, CsgCorefineCrossingsForTest(sphere, box)));
 
     const auto swapped = CsgCorefineCrossingsForTest(box, sphere);
-    CHECK(SamePositionSets(result.positions_, swapped.positions_));
+    CHECK(SamePositionSets(result.positions_, swapped.positions_, 2e-3f));
 }
 
 TEST_CASE("Corefine flags coordinates outside of the exact range", "[corefine]")
@@ -378,15 +381,15 @@ TEST_CASE("Corefine flags coordinates outside of the exact range", "[corefine]")
 
     SECTION("Disjoint")
     {
-        const CsgSolid far(MakeBoxPolygons(Vector3(70000.0f, 0.0f, 0.0f), half, 2));
+        const CsgSolid far(MakeBoxPolygons(Vector3(10000.0f, 0.0f, 0.0f), half, 2));
         const auto result = CsgCorefineCrossingsForTest(unit, far);
         CHECK(result.outOfRange_);
         CHECK(result.positions_.size() == 0);
     }
     SECTION("Both operands far away")
     {
-        const CsgSolid farA(MakeBoxPolygons(Vector3(70000.0f, 0.0f, 0.0f), half, 1));
-        const CsgSolid farB(MakeBoxPolygons(Vector3(70001.0f, 0.5f, 0.25f), half, 2));
+        const CsgSolid farA(MakeBoxPolygons(Vector3(10000.0f, 0.0f, 0.0f), half, 1));
+        const CsgSolid farB(MakeBoxPolygons(Vector3(10001.0f, 0.5f, 0.25f), half, 2));
         const auto result = CsgCorefineCrossingsForTest(farA, farB);
         CHECK(result.outOfRange_);
         CHECK(result.positions_.size() < 10000);

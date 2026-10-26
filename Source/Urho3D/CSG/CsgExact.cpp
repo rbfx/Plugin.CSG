@@ -29,7 +29,7 @@ int CsgExact::OrientT(
     const int64_t vx = c.x_ - a.x_, vy = c.y_ - a.y_, vz = c.z_ - a.z_;
     const int64_t wx = d.x_ - a.x_, wy = d.y_ - a.y_, wz = d.z_ - a.z_;
 
-    // Coordinates below 2^40 make every difference exact in double. Only the products round.
+    // Coordinates below 2^23 make every difference exact in double. Only the products round.
     const double m1 = static_cast<double>(vy) * static_cast<double>(wz) - static_cast<double>(vz) * static_cast<double>(wy);
     const double m2 = static_cast<double>(vz) * static_cast<double>(wx) - static_cast<double>(vx) * static_cast<double>(wz);
     const double m3 = static_cast<double>(vx) * static_cast<double>(wy) - static_cast<double>(vy) * static_cast<double>(wx);

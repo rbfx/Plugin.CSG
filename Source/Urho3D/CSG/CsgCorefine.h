@@ -26,7 +26,7 @@ namespace CsgInternal
 {
 
 /// Coordinates with an absolute value of this limit or more are outside the range of the exact math.
-constexpr float CSG_EXACT_COORDINATE_LIMIT = 65536.0f;
+constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 
 /// Crossing of an edge of one operand through a triangle of the other.
 struct Crossing

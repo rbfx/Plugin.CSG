@@ -47,7 +47,7 @@ class WorkQueue;
 ///   its rotation or position. Brushes keep their relative transform in this frame.
 /// - An axis with a scale that is not finite or not greater than 1e-6 uses the scale 1.
 /// - The result returns to node space. The output model has the same frame as the node of the root.
-/// - The build uses exact math on solids. An operand coordinate at or beyond 65536 units
+/// - The build uses exact math on solids. An operand coordinate at or beyond 8192 units
 ///   makes the root log a warning.
 ///
 /// Brush registration:

@@ -34,8 +34,8 @@ The engine uses corefinement:
 - It finds the intersection curve of the two solids with exact integer predicates.
 - A face BVH (binned SAH) finds the face pairs that overlap.
 - A symbolic perturbation (a displacement of the second operand) resolves the degenerate cases, such as a vertex on a face.
-- The exact tests work on an integer grid with a scale of 2^-24 units.
-- The coordinate limit is 2^16 (65536) units. The engine logs a warning for an operand coordinate outside this limit. The result is not valid in this case.
+- The exact tests work on an integer grid with a scale of 2^-10 (1/1024) units.
+- The coordinate limit is 2^13 (8192) units. The engine logs a warning for an operand coordinate outside this limit. The result is not valid in this case.
 - The result keeps whole faces from the operands and builds new faces only along the curve.
 
 `epsilon` is used for the weld of vertices, for the bounds and for the point queries. An epsilon that is not positive gives the default epsilon.

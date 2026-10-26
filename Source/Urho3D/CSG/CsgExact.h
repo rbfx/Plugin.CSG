@@ -292,27 +292,33 @@ inline int CsgSignOfProductDifference(const Int& a, const Int& b, const Int& c, 
     return firstSign * CompareLimbs(first, second);
 }
 
-/// Scale of the integer grid for the exact tests: 2^-24 units.
-/// Coordinates must stay below 2^16 units.
-constexpr double CsgGridScale = 1 << 24;
+/// Scale of the integer grid for the exact tests: 2^-10 units.
+/// Coordinates must stay below 2^13 units. Grid coordinates stay at most 2^23, so differences are at most 2^24.
+/// Such differences are exact in float.
+constexpr double CsgGridScale = 1024;
+
+/// Coordinates with an absolute value of this limit or more are outside the range of the grid.
+constexpr float CsgGridCoordinateLimit = static_cast<float>(8388608.0 / CsgGridScale);
 
 /// Point on the integer grid.
 struct CsgGridPoint
 {
-    int64_t x_{};
-    int64_t y_{};
-    int64_t z_{};
+    int32_t x_{};
+    int32_t y_{};
+    int32_t z_{};
 
     /// Snap a point to the grid. A value exactly between two grid points goes to the even grid point.
     /// The rounding assumes the default floating point mode, round to nearest even.
-    /// Each coordinate must be finite and must have an absolute value less than 2^16.
+    /// Each coordinate must be finite and must have an absolute value less than 2^13.
     static CsgGridPoint From(const Vector3& point)
     {
         URHO3D_ASSERT(std::isfinite(point.x_) && std::isfinite(point.y_) && std::isfinite(point.z_));
+        URHO3D_ASSERT(std::fabs(point.x_) < CsgGridCoordinateLimit && std::fabs(point.y_) < CsgGridCoordinateLimit
+            && std::fabs(point.z_) < CsgGridCoordinateLimit);
         CsgGridPoint result;
-        result.x_ = static_cast<int64_t>(std::nearbyint(static_cast<double>(point.x_) * CsgGridScale));
-        result.y_ = static_cast<int64_t>(std::nearbyint(static_cast<double>(point.y_) * CsgGridScale));
-        result.z_ = static_cast<int64_t>(std::nearbyint(static_cast<double>(point.z_) * CsgGridScale));
+        result.x_ = static_cast<int32_t>(std::nearbyint(static_cast<double>(point.x_) * CsgGridScale));
+        result.y_ = static_cast<int32_t>(std::nearbyint(static_cast<double>(point.y_) * CsgGridScale));
+        result.z_ = static_cast<int32_t>(std::nearbyint(static_cast<double>(point.z_) * CsgGridScale));
         return result;
     }
 

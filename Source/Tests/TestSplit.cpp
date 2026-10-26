@@ -299,8 +299,8 @@ int CheckInterpolation(const CsgSplitTestOperand& operand)
         for (const ModelVertex& vertex : region.polygon_.vertices_)
         {
             const Vector4 expected = LinearUv(vertex.GetPosition());
-            CHECK(std::fabs(vertex.uv_[0].x_ - expected.x_) <= 1e-4f);
-            CHECK(std::fabs(vertex.uv_[0].y_ - expected.y_) <= 1e-4f);
+            CHECK(std::fabs(vertex.uv_[0].x_ - expected.x_) <= 5e-4f);
+            CHECK(std::fabs(vertex.uv_[0].y_ - expected.y_) <= 5e-4f);
             ++checked;
         }
     }

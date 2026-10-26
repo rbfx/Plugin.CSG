@@ -61,7 +61,7 @@ CsgGridPoint P(int64_t x, int64_t y, int64_t z)
     return point;
 }
 
-constexpr int64_t Unit = 1 << 24;
+constexpr int64_t Unit = 1 << 10;
 
 } // namespace
 
@@ -296,8 +296,8 @@ TEST_CASE("Orient results are equal for both 128 bit types", "[exact]")
 {
 #if CSG_HAS_NATIVE_INT128
     std::mt19937_64 random(4242);
-    // Cover small values with many degenerate cases and values near the limit of 2^40.
-    for (const int64_t range : {int64_t(3), int64_t(1) << 20, (int64_t(1) << 39) - 1})
+    // Cover small values with many degenerate cases and values near the limit of 2^23.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 20, (int64_t(1) << 23) - 1})
     {
         std::uniform_int_distribution<int64_t> coordinate(-range, range);
         for (int i = 0; i < 2000; ++i)
@@ -329,8 +329,8 @@ TEST_CASE("Orient results are equal for both 128 bit types", "[exact]")
 TEST_CASE("Reference oracle matches the library Orient", "[exact]")
 {
     std::mt19937_64 random(8086);
-    // Small values give many degenerate cases. Large values stay inside the grid range of 2^40.
-    for (const int64_t range : {int64_t(3), int64_t(1) << 10, int64_t(1) << 23})
+    // Small values give many degenerate cases. Large values stay inside the grid range of 2^23.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, (int64_t(1) << 23) - 1})
     {
         std::uniform_int_distribution<int64_t> coordinate(-range, range);
         for (int i = 0; i < 3000; ++i)
@@ -680,7 +680,7 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
 TEST_CASE("Exact filter", "[exact]")
 {
     // Use big coordinates so that the products in double round.
-    const int64_t big = int64_t(1) << 38;
+    const int64_t big = int64_t(1) << 20;
 
     const auto runFilter = [](const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
                                double& det)
@@ -736,9 +736,8 @@ TEST_CASE("Exact filter", "[exact]")
         std::mt19937_64 random(2024);
         std::uniform_int_distribution<int64_t> coordinate(-big, big);
         std::uniform_int_distribution<int64_t> jitter(-2, 2);
-        std::uniform_int_distribution<int> factor(-3, 3);
+        std::uniform_int_distribution<int> factor(-1, 1);
         int undecided = 0;
-        int exactDecided = 0;
         for (int i = 0; i < 1000; ++i)
         {
             const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
@@ -747,11 +746,13 @@ TEST_CASE("Exact filter", "[exact]")
             CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
             if (i % 2 == 0)
             {
-                // Nearly coplanar: a combination of the edges, rounded to the grid, plus a small jitter.
-                const double s = factor(random) * 0.25;
-                const double t = factor(random) * 0.5;
+                // Coplanar or nearly coplanar: a combination of the edges plus a small jitter on every second case.
+                // With grid coordinates below 2^23, the filter decides every case that is not exactly coplanar.
+                const double s = factor(random);
+                const double t = factor(random);
+                const bool jittered = (i % 4) == 0;
                 const auto mix = [&](int64_t pa, int64_t pb, int64_t pc)
-                { return pa + int64_t(s * double(pb - pa) + t * double(pc - pa)) + jitter(random); };
+                { return pa + int64_t(s * double(pb - pa) + t * double(pc - pa)) + (jittered ? jitter(random) : 0); };
                 d = P(mix(a.x_, b.x_, c.x_), mix(a.y_, b.y_, c.y_), mix(a.z_, b.z_, c.z_));
             }
             double det = 0.0;
@@ -766,15 +767,12 @@ TEST_CASE("Exact filter", "[exact]")
             REQUIRE(CsgExact::Orient(a, b, c, d, 0) == exactOnly);
             if ((decided & 1) == 0)
             {
+                // The filter does not decide here, so only the exact path gives the sign.
                 ++undecided;
-                // The filter does not decide here, so only the exact path gives this nonzero sign.
-                if (exactOnly != 0)
-                    ++exactDecided;
             }
         }
-        // Some of the nearly coplanar cases take the exact path.
+        // Some of the coplanar cases take the exact path.
         REQUIRE(undecided > 20);
-        REQUIRE(exactDecided > 10);
     }
 
     SECTION("Lanes are independent")
@@ -827,10 +825,10 @@ TEST_CASE("Grid point snapping", "[exact]")
 
     REQUIRE(from(0.5f, -0.5f, 0.0f) == P(Unit / 2, -Unit / 2, 0));
     REQUIRE(from(1.0f, -1.0f, 2.0f) == P(Unit, -Unit, 2 * Unit));
-    // 1e-8 * 2^24 = 0.168 rounds to zero.
-    REQUIRE(from(1e-8f, -1e-8f, 0.0f) == P(0, 0, 0));
-    // 65535.99f is the float 65535.98828125 = 16777213 / 256, so the grid value is exact.
-    REQUIRE(from(65535.99f, -65535.99f, 0.0f) == P(int64_t(16777213) << 16, -(int64_t(16777213) << 16), 0));
+    // 1e-4 * 2^10 = 0.1024 rounds to zero.
+    REQUIRE(from(1e-4f, -1e-4f, 0.0f) == P(0, 0, 0));
+    // 8191.99f is the float 8191.990234375 = 8388598 / 1024, so the grid value is exact.
+    REQUIRE(from(8191.99f, -8191.99f, 0.0f) == P(8388598, -8388598, 0));
 
     // A value between two grid points goes to the even one: 0.5, 1.5, 2.5 and -0.5, -1.5 grid units.
     const float step = 1.0f / float(Unit);
