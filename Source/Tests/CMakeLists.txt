@@ -23,6 +23,7 @@ set (SOURCE_FILES
     TestOptimization.cpp
     TestRoot.cpp
     TestParallel.cpp
+    TestBenchmark.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
