@@ -1209,12 +1209,34 @@ TEST_CASE("Grid point snapping", "[exact]")
     // 8191.99f is the float 8191.990234375 = 8388598 / 1024, so the grid value is exact.
     REQUIRE(from(8191.99f, -8191.99f, 0.0f) == P(8388598 * (Unit / 1024), -8388598 * (Unit / 1024), 0));
 
-    // A value between two grid points goes to the even one: 0.5, 1.5, 2.5 and -0.5, -1.5 grid units.
+    // A value between two grid points goes toward plus infinity: 0.5, 1.5, 2.5 and -0.5, -1.5, -2.5 grid units.
     const float step = 1.0f / float(Unit);
-    REQUIRE(from(0.5f * step, 1.5f * step, 2.5f * step) == P(0, 2, 2));
-    REQUIRE(from(-0.5f * step, -1.5f * step, -2.5f * step) == P(0, -2, -2));
+    REQUIRE(from(0.5f * step, 1.5f * step, 2.5f * step) == P(1, 2, 3));
+    REQUIRE(from(-0.5f * step, -1.5f * step, -2.5f * step) == P(0, -1, -2));
     // Values off the tie go to the nearest grid point.
     REQUIRE(from(0.75f * step, -0.75f * step, 3.25f * step) == P(1, -1, 3));
+    REQUIRE(from(0.25f * step, -0.25f * step, -3.25f * step) == P(0, 0, -3));
+    REQUIRE(from(-0.75f * step, 0.4999f * step, -0.5001f * step) == P(-1, 0, -1));
+    // Negative values and values near the tie.
+    REQUIRE(from(-1.0f, -0.5f, -8191.0f) == P(-Unit, -Unit / 2, -8191 * Unit));
+    REQUIRE(from(-1.0f - 0.5f * step, 1.0f + 0.5f * step, -1.0f + 0.5f * step) == P(-Unit, Unit + 1, -Unit + 1));
+    REQUIRE(from(std::nextafter(0.5f * step, 1.0f), std::nextafter(-0.5f * step, -1.0f), 0.0f) == P(1, -1, 0));
+    REQUIRE(from(std::nextafter(0.5f * step, 0.0f), std::nextafter(-0.5f * step, 0.0f), 0.0f) == P(0, 0, 0));
+    // Tiny values and a negative zero snap to zero.
+    REQUIRE(from(-0.0f, 1e-30f, -1e-30f) == P(0, 0, 0));
+}
+
+TEST_CASE("Grid point snapping matches the floor rule on random values", "[exact]")
+{
+    std::mt19937_64 random(7);
+    std::uniform_real_distribution<float> distribution(-8191.0f, 8191.0f);
+    for (int i = 0; i < 20000; ++i)
+    {
+        const float value = (i & 1) ? distribution(random) : std::ldexp(distribution(random), -static_cast<int>(random() % 20));
+        const long double scaled = static_cast<long double>(value) * static_cast<long double>(CsgGridScale);
+        const long double expected = std::floor(scaled + 0.5L);
+        REQUIRE(static_cast<long double>(CsgGridPoint::From(Vector3(value, 0.0f, 0.0f)).x_) == expected);
+    }
 }
 
 TEST_CASE("Exact crossing tests", "[exact]")
@@ -1261,6 +1283,302 @@ TEST_CASE("Exact crossing tests", "[exact]")
             REQUIRE(aboveA == aboveB);
         }
     }
+}
+
+namespace
+{
+
+/// Convert a 128 bit number to a volume expansion.
+CsgExactVolume MakeVolume(const Int128& value)
+{
+    const ea::vector<CsgReal> terms = ToExpansion(value);
+    CsgExactVolume result;
+    REQUIRE(terms.size() <= 24);
+    for (size_t i = 0; i < terms.size(); ++i)
+        result.terms_[i] = terms[i];
+    result.count_ = CsgCompress(static_cast<int>(terms.size()), result.terms_);
+    return result;
+}
+
+Int128 Negated(const Int128& value)
+{
+    return MakeInt128(0) - value;
+}
+
+Int128 Absolute(const Int128& value)
+{
+    return CsgTest::Sign(value) < 0 ? Negated(value) : value;
+}
+
+/// Reference for floor(low + (high - low) * n / d + 1/2).
+/// It looks for the smallest g with x < g + 1/2 by bisection. The test is exact in 128 bit integers.
+int64_t ReferenceRound(int64_t low, int64_t high, Int128 n, Int128 d)
+{
+    if (CsgTest::Sign(d) < 0)
+    {
+        n = Negated(n);
+        d = Negated(d);
+    }
+    const int64_t span = high - low;
+    int64_t lo = std::min(low, high);
+    int64_t hi = std::max(low, high);
+    while (lo < hi)
+    {
+        const int64_t mid = lo + (hi - lo) / 2;
+        // x < mid + 1/2 is the same as 2 * span * n < (2 * (mid - low) + 1) * d.
+        const Int128 difference = CsgTest::Mul(n, 2 * span) - CsgTest::Mul(d, 2 * (mid - low) + 1);
+        if (CsgTest::Sign(difference) < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return lo;
+}
+
+int64_t FloorDivide(int64_t a, int64_t b)
+{
+    int64_t q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0)))
+        --q;
+    return q;
+}
+
+/// One case of a point on an edge. The fraction n / d is in the range 0 to 1 before the random negation.
+struct EdgeCase
+{
+    int64_t low_;
+    int64_t high_;
+    Int128 n_;
+    Int128 d_;
+};
+
+int64_t RandomGrid(std::mt19937_64& random, int64_t range)
+{
+    return static_cast<int64_t>(random() % static_cast<uint64_t>(2 * range + 1)) - range;
+}
+
+/// Pick the ends of an edge. Some edges are short, some are long, some run from high to low.
+void RandomEnds(std::mt19937_64& random, EdgeCase& edge)
+{
+    const int64_t limit = CsgGridIntegerLimit - 1;
+    const int64_t ranges[4] = {limit, 1000, 40, limit};
+    const int64_t range = ranges[random() % 4];
+    edge.low_ = RandomGrid(random, range);
+    edge.high_ = RandomGrid(random, range);
+    if (random() % 8 == 0)
+        edge.high_ = edge.low_ + (random() & 1 ? 1 : -1);
+    if (random() % 16 == 0)
+        edge.high_ = edge.low_;
+    if (random() % 16 == 0)
+    {
+        edge.low_ = (random() & 1) ? limit : -limit;
+        edge.high_ = (random() & 1) ? limit : -limit;
+    }
+}
+
+/// A fraction n / d with d in [2^(b-1), 2^b) and n in the range 0 to d.
+void RandomFraction(std::mt19937_64& random, EdgeCase& edge)
+{
+    const int bits = 1 + static_cast<int>(random() % (CsgExactVolumeBits - 1));
+    edge.d_ = Power2(bits - 1) + Absolute(RandomInt128(random, bits - 1));
+    switch (random() % 6)
+    {
+    case 0: edge.n_ = MakeInt128(0); break;
+    case 1: edge.n_ = edge.d_; break;
+    case 2: edge.n_ = edge.d_ - Absolute(RandomInt128(random, std::min(bits - 1, 8))); break;
+    default: edge.n_ = Absolute(RandomInt128(random, bits - 1)); break;
+    }
+}
+
+/// A fraction that puts x exactly on a tie, or one unit of n or d away from it.
+void TieFraction(std::mt19937_64& random, EdgeCase& edge)
+{
+    if (edge.low_ == edge.high_)
+        edge.high_ = edge.low_ + (edge.low_ > 0 ? -1 : 1);
+    const int64_t span = std::abs(edge.high_ - edge.low_);
+    // d = 2 * span * q is below 2^CsgExactVolumeBits.
+    const int qBits = CsgExactVolumeBits - CsgGridBits - 3;
+    const int64_t q = 1 + static_cast<int64_t>(random() % (uint64_t{1} << (random() % qBits + 1)));
+    const int64_t c = static_cast<int64_t>(random() % static_cast<uint64_t>(span));
+    edge.d_ = CsgTest::Mul(MakeInt128(2 * span), q);
+    edge.n_ = CsgTest::Mul(MakeInt128(2 * c + 1), q);
+    switch (random() % 4)
+    {
+    case 0: edge.n_ = edge.n_ + MakeInt128(1); break;
+    case 1: edge.n_ = edge.n_ - MakeInt128(1); break;
+    case 2: edge.d_ = edge.d_ + MakeInt128(1); break;
+    default: break;
+    }
+}
+
+} // namespace
+
+TEST_CASE("RoundOnEdge on simple edges", "[exact]")
+{
+    const auto round = [](CsgGridInt low, CsgGridInt high, int64_t n, int64_t d)
+    { return CsgExact::RoundOnEdge(low, high, MakeVolume(MakeInt128(n)), MakeVolume(MakeInt128(d))); };
+
+    // x = 0 + 10 * 1/2 = 5. The sign of the denominator does not matter.
+    REQUIRE(round(0, 10, 1, 2) == 5);
+    REQUIRE(round(0, 10, -1, -2) == 5);
+    // Ties go toward plus infinity, also when the edge runs downward.
+    REQUIRE(round(0, 1, 1, 2) == 1);
+    REQUIRE(round(1, 0, 1, 2) == 1);
+    REQUIRE(round(-1, 0, 1, 2) == 0);
+    REQUIRE(round(0, -1, 1, 2) == 0);
+    REQUIRE(round(0, -1, -1, -2) == 0);
+    REQUIRE(round(-3, -2, 1, 2) == -2);
+    REQUIRE(round(-2, -3, 1, 2) == -2);
+    // Both ends of the fraction.
+    REQUIRE(round(-7, 9, 0, 5) == -7);
+    REQUIRE(round(-7, 9, 5, 5) == 9);
+    REQUIRE(round(-7, 9, -5, -5) == 9);
+    REQUIRE(round(4, 4, 3, 7) == 4);
+    // x = 3 * 7 / 14 = 1.5 is a tie. The fractions 6/14 and 8/14 give x of about 1.29 and 1.71.
+    REQUIRE(round(0, 3, 7, 14) == 2);
+    REQUIRE(round(0, 3, 6, 14) == 1);
+    REQUIRE(round(0, 3, 8, 14) == 2);
+
+    const CsgGridPoint low = P(0, 10, -10);
+    const CsgGridPoint high = P(4, -10, -11);
+    const CsgGridPoint point = CsgExact::RoundCrossing(low, high, MakeVolume(MakeInt128(1)), MakeVolume(MakeInt128(2)));
+    REQUIRE(point == P(2, 0, -10));
+    const CsgGridPoint negated =
+        CsgExact::RoundCrossing(low, high, MakeVolume(MakeInt128(-1)), MakeVolume(MakeInt128(-2)));
+    REQUIRE(negated == point);
+}
+
+TEST_CASE("Negate flips the sign of a volume", "[exact]")
+{
+    std::mt19937_64 random(11);
+    for (int i = 0; i < 200; ++i)
+    {
+        const Int128 value = RandomInt128(random, CsgExactVolumeBits);
+        const CsgExactVolume volume = MakeVolume(value);
+        const CsgExactVolume negated = CsgExact::Negate(volume);
+        REQUIRE(negated.Sign() == -volume.Sign());
+        REQUIRE(ExpansionValue(negated.terms_, negated.count_) == Negated(value));
+    }
+}
+
+TEST_CASE("RoundOnEdge matches the integer references", "[exact][stress]")
+{
+    std::mt19937_64 random(2024);
+    int tieCount = 0;
+    constexpr int CaseCount = 30000;
+    for (int i = 0; i < CaseCount; ++i)
+    {
+        EdgeCase edge;
+        RandomEnds(random, edge);
+        const bool tie = i % 3 == 1;
+        if (tie)
+            TieFraction(random, edge);
+        else
+            RandomFraction(random, edge);
+        // A random negation of both numerator and denominator.
+        if (random() & 1)
+        {
+            edge.n_ = Negated(edge.n_);
+            edge.d_ = Negated(edge.d_);
+        }
+        // The near tie may leave the range 0 to 1 only by the tiny unit. Keep the fraction in range.
+        const Int128 absoluteN = Absolute(edge.n_);
+        const Int128 absoluteD = Absolute(edge.d_);
+        if (absoluteN > absoluteD || CsgTest::Sign(absoluteD) == 0)
+            continue;
+        if (CsgTest::Sign(edge.n_) * CsgTest::Sign(edge.d_) < 0)
+            continue;
+
+        const int64_t expected = ReferenceRound(edge.low_, edge.high_, edge.n_, edge.d_);
+        const CsgGridInt actual = CsgExact::RoundOnEdge(static_cast<CsgGridInt>(edge.low_),
+            static_cast<CsgGridInt>(edge.high_), MakeVolume(edge.n_), MakeVolume(edge.d_));
+        REQUIRE(actual == expected);
+        tieCount += tie ? 1 : 0;
+    }
+    REQUIRE(tieCount > 5000);
+}
+
+TEST_CASE("RoundOnEdge matches the floor division of small numbers", "[exact]")
+{
+    std::mt19937_64 random(99);
+    for (int i = 0; i < 20000; ++i)
+    {
+        const int64_t low = RandomGrid(random, i % 2 ? 50 : CsgGridIntegerLimit - 1);
+        const int64_t high = RandomGrid(random, i % 2 ? 50 : CsgGridIntegerLimit - 1);
+        const int64_t d = 1 + static_cast<int64_t>(random() % (i % 3 == 0 ? 6 : 1000000));
+        const int64_t n = static_cast<int64_t>(random() % static_cast<uint64_t>(d + 1));
+        const int64_t span = high - low;
+        const int64_t expected = FloorDivide(2 * low * d + 2 * span * n + d, 2 * d);
+        const bool negate = (random() & 1) != 0;
+        const int64_t sn = negate ? -n : n;
+        const int64_t sd = negate ? -d : d;
+        REQUIRE(CsgExact::RoundOnEdge(static_cast<CsgGridInt>(low), static_cast<CsgGridInt>(high),
+                    MakeVolume(MakeInt128(sn)), MakeVolume(MakeInt128(sd)))
+            == expected);
+    }
+}
+
+TEST_CASE("RoundCrossing matches the int128 oracle", "[exact][stress]")
+{
+    std::mt19937_64 random(5150);
+    int tested = 0;
+    int degenerate = 0;
+    constexpr int CaseCount = 30000;
+    for (int i = 0; i < CaseCount; ++i)
+    {
+        const int64_t range = i % 3 == 0 ? 30 : (i % 3 == 1 ? 5000 : CsgGridIntegerLimit - 1);
+        const auto point = [&]() { return P(RandomGrid(random, range), RandomGrid(random, range), RandomGrid(random, range)); };
+        const CsgGridPoint t0 = point();
+        const CsgGridPoint t1 = point();
+        const CsgGridPoint t2 = point();
+        const CsgGridPoint low = point();
+        const CsgGridPoint high = point();
+
+        // The oracle values. The numerator is n . (low - t0). The denominator is n . (low - high).
+        const Int128 lowVolume = CsgTest::ReferenceVolume(t0, t1, t2, low);
+        const Int128 highVolume = CsgTest::ReferenceVolume(t0, t1, t2, high);
+        const Int128 difference = lowVolume - highVolume;
+        if (CsgTest::Sign(difference) == 0)
+        {
+            ++degenerate;
+            continue;
+        }
+        // The edge must reach the plane: the volumes of both ends have opposite signs or zero.
+        if (CsgTest::Sign(lowVolume) * CsgTest::Sign(highVolume) > 0)
+            continue;
+
+        const CsgNormal normal = CsgExact::Normal(t0, t1, t2);
+        const CsgExactVolume libraryLow = CsgExact::Dot(normal, t0, low);
+        const CsgExactVolume libraryDifference = CsgExact::Dot(normal, high, low);
+        REQUIRE(ExpansionValue(libraryLow.terms_, libraryLow.count_) == lowVolume);
+        REQUIRE(ExpansionValue(libraryDifference.terms_, libraryDifference.count_) == difference);
+
+        const CsgGridPoint actual = CsgExact::RoundCrossing(low, high, libraryLow, libraryDifference);
+        REQUIRE(actual.x_ == ReferenceRound(low.x_, high.x_, lowVolume, difference));
+        REQUIRE(actual.y_ == ReferenceRound(low.y_, high.y_, lowVolume, difference));
+        REQUIRE(actual.z_ == ReferenceRound(low.z_, high.z_, lowVolume, difference));
+        ++tested;
+    }
+    REQUIRE(tested > 10000);
+    REQUIRE(degenerate < CaseCount / 2);
+}
+
+TEST_CASE("RoundCrossing with a plane through the edge center", "[exact]")
+{
+    // The plane z = 0 cuts every edge at its center. The center is an exact tie in x, y and z.
+    const CsgGridPoint t0 = P(0, 0, 0);
+    const CsgGridPoint t1 = P(Unit, 0, 0);
+    const CsgGridPoint t2 = P(0, Unit, 0);
+    const CsgNormal normal = CsgExact::Normal(t0, t1, t2);
+    const auto round = [&](const CsgGridPoint& low, const CsgGridPoint& high)
+    {
+        return CsgExact::RoundCrossing(
+            low, high, CsgExact::Dot(normal, t0, low), CsgExact::Dot(normal, high, low));
+    };
+    REQUIRE(round(P(0, 0, -1), P(1, -1, 1)) == P(1, 0, 0));
+    REQUIRE(round(P(1, -1, 1), P(0, 0, -1)) == P(1, 0, 0));
+    REQUIRE(round(P(-3, 5, -1), P(-4, 6, 1)) == P(-3, 6, 0));
+    REQUIRE(round(P(-4, 6, 1), P(-3, 5, -1)) == P(-3, 6, 0));
 }
 
 } // namespace Urho3D

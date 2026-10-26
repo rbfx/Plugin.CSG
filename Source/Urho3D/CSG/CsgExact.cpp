@@ -41,6 +41,65 @@ void AddWeighted(CsgReal* accumulator, int& count, const CsgExactMinor& minor, i
     count = CsgCompress(sumCount, accumulator);
 }
 
+/// Largest distance of the double estimate from an integer for which the exact test runs.
+/// The estimate has an error of about 2^-20 at most. A distance above this margin decides the rounding.
+constexpr double RoundingMargin = 1.0 / 1024.0;
+
+/// Terms of the odd factor 2 * offset + delta with delta equal to -1 or 1. Return the number of terms.
+/// The factor can need more bits than one CsgReal holds, so it has two terms.
+int OddFactor(int64_t offset, int delta, CsgReal (&terms)[2])
+{
+    terms[0] = static_cast<CsgReal>(delta);
+    if (offset == 0)
+        return 1;
+    terms[1] = static_cast<CsgReal>(2 * offset);
+    return 2;
+}
+
+/// Sign of 2 * span * N - (2 * offset + delta) * D, where span is the difference high - low.
+int RoundingSign(CsgReal doubleSpan, int64_t offset, int delta, const CsgExactVolume& n, const CsgExactVolume& d)
+{
+    CsgReal factor[2];
+    const int factorCount = OddFactor(offset, delta, factor);
+    return CsgExpansionProductDifferenceSign(1, &doubleSpan, n.count_, n.terms_, factorCount, factor, d.count_, d.terms_);
+}
+
+/// Round with the positive denominator d and the estimate t of the fraction.
+CsgGridInt RoundWithEstimate(CsgGridInt low, CsgGridInt high, double t, const CsgExactVolume& n, const CsgExactVolume& d)
+{
+    const int64_t span = static_cast<int64_t>(high) - low;
+    if (span == 0)
+        return low;
+    const double estimate = static_cast<double>(low) + static_cast<double>(span) * t + 0.5;
+    double integer = std::floor(estimate);
+    const bool decided = std::abs(estimate - integer - 0.5) < 0.5 - RoundingMargin;
+    int64_t g = static_cast<int64_t>(integer);
+    const int64_t lowest = low < high ? low : high;
+    const int64_t highest = low < high ? high : low;
+    g = g < lowest ? lowest : (g > highest ? highest : g);
+    if (decided)
+        return static_cast<CsgGridInt>(g);
+
+    // Correct the guess with exact signs. Both tests together are x >= g - 1/2 and x < g + 1/2.
+    const CsgReal doubleSpan = static_cast<CsgReal>(2 * span);
+    for (int step = 0; step < 4; ++step)
+    {
+        if (RoundingSign(doubleSpan, g - low, -1, n, d) < 0)
+        {
+            --g;
+            continue;
+        }
+        if (RoundingSign(doubleSpan, g - low, 1, n, d) >= 0)
+        {
+            ++g;
+            continue;
+        }
+        return static_cast<CsgGridInt>(g);
+    }
+    URHO3D_ASSERT(false, "The rounding correction must end within four steps");
+    return static_cast<CsgGridInt>(g);
+}
+
 } // namespace
 
 int CsgInternal::Filter(const CsgFloat4& ux, const CsgFloat4& uy, const CsgFloat4& uz, const CsgFloat4& vx,
@@ -235,6 +294,45 @@ bool CsgExact::PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, cons
         return false;
     const int s2 = (decided & 4) != 0 ? SignOfFloat(det[2]) : Orient(e0, e1, t2, t0, linesMask);
     return s2 == s0;
+}
+
+CsgExactVolume CsgExact::Negate(const CsgExactVolume& v)
+{
+    CsgExactVolume result;
+    result.count_ = v.count_;
+    for (int i = 0; i < v.count_; ++i)
+        result.terms_[i] = -v.terms_[i];
+    return result;
+}
+
+CsgGridInt CsgExact::RoundOnEdge(
+    CsgGridInt low, CsgGridInt high, const CsgExactVolume& numerator, const CsgExactVolume& denominator)
+{
+    const int denominatorSign = denominator.Sign();
+    URHO3D_ASSERT(denominatorSign != 0);
+    if (denominatorSign < 0)
+    {
+        const CsgExactVolume n = Negate(numerator);
+        const CsgExactVolume d = Negate(denominator);
+        return RoundWithEstimate(low, high, n.Approximate() / d.Approximate(), n, d);
+    }
+    return RoundWithEstimate(low, high, numerator.Approximate() / denominator.Approximate(), numerator, denominator);
+}
+
+CsgGridPoint CsgExact::RoundCrossing(const CsgGridPoint& low, const CsgGridPoint& high, const CsgExactVolume& lowVolume,
+    const CsgExactVolume& difference)
+{
+    const int differenceSign = difference.Sign();
+    URHO3D_ASSERT(differenceSign != 0);
+    const bool flip = differenceSign < 0;
+    const CsgExactVolume n = flip ? Negate(lowVolume) : lowVolume;
+    const CsgExactVolume d = flip ? Negate(difference) : difference;
+    const double t = n.Approximate() / d.Approximate();
+    CsgGridPoint result;
+    result.x_ = RoundWithEstimate(low.x_, high.x_, t, n, d);
+    result.y_ = RoundWithEstimate(low.y_, high.y_, t, n, d);
+    result.z_ = RoundWithEstimate(low.z_, high.z_, t, n, d);
+    return result;
 }
 
 } // namespace Urho3D
