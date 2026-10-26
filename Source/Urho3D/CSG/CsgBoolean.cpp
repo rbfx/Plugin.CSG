@@ -89,10 +89,11 @@ int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
 
 /// Classify the elements against the other operand. The result is in the scratch: not zero if inside.
 ///
-/// Each curve edge of an element decides exactly which side of the curve is inside the other operand:
+/// Each curve edge of an element decides which side of the curve is inside the other operand:
 /// the element on the left of an oriented segment is inside for the first operand, and on its right for the second.
-/// Elements joined by an edge off the curve form a patch. Decisions spread across such edges from the nearest
-/// decided element. A patch without curve edges falls back to a point query.
+/// Elements joined by an edge off the curve form a patch. All elements of a patch get the same label:
+/// the sign of the sum of the votes of all curve edges of the patch.
+/// A patch with no net vote falls back to a point query.
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
 void ClassifyElements(
@@ -120,6 +121,53 @@ void ClassifyElements(
             s.loops_[i] = core.Global(mesh, mesh.loops_.vertexIds_[start + i - s.edgeStart_[e]]);
     }
 
+    // Weld by grid point: each id maps to the first id with its grid point, as in BuildRegionSolid.
+    // The curve edges use the same canonical ids as the loops.
+    s.curveEdges_.Clear();
+    s.curveEdges_.Reserve(core.curveEdges_.Size());
+    if (core.outOfRange_)
+    {
+        for (const auto& entry : core.curveEdges_)
+        {
+            bool existed = false;
+            s.curveEdges_.FindOrAdd(entry.key_, existed) = entry.value_;
+        }
+    }
+    else
+    {
+        s.firstId_.Clear();
+        s.firstId_.Reserve(edgeTotal);
+        const auto canonical = [&](int id)
+        {
+            const CsgGridPoint& point = PointGrid(core, id);
+            CsgVec3Key key;
+            key.x_ = static_cast<uint32_t>(point.x_);
+            key.y_ = static_cast<uint32_t>(point.y_);
+            key.z_ = static_cast<uint32_t>(point.z_);
+            bool existed = false;
+            int& slot = s.firstId_.FindOrAdd(key, existed);
+            if (!existed)
+                slot = id;
+            return slot;
+        };
+        for (int i = 0; i < edgeTotal; ++i)
+            s.loops_[i] = canonical(s.loops_[i]);
+        for (const auto& entry : core.curveEdges_)
+        {
+            const int first = canonical(entry.value_.first);
+            const int second = canonical(entry.value_.second);
+            if (first == second)
+                continue;
+            bool existed = false;
+            auto& slotc = s.curveEdges_.FindOrAdd(UndirectedKey(first, second), existed);
+            // Two segments on one edge with opposite sides cancel each other: the edge gets no vote and no twin.
+            if (existed && (slotc.first < 0 || slotc.first != first))
+                slotc = ea::make_pair(-1, -1);
+            else
+                slotc = ea::make_pair(first, second);
+        }
+    }
+
     // The last element with a directed edge owns it, as in the reference.
     s.edgeOwner_.Clear();
     s.edgeOwner_.Reserve(edgeTotal);
@@ -137,8 +185,7 @@ void ClassifyElements(
     // The element across each edge off the curve, or -1 for a curve edge or an unmatched one.
     s.twins_.assign(edgeTotal, -1);
     s.inside_.assign(elementCount, 0);
-    s.decided_.assign(elementCount, 0);
-    s.queue_.clear();
+    s.votes_.assign(elementCount, 0);
     for (int e = 0; e < elementCount; ++e)
     {
         const int* loop = s.loops_.data() + s.edgeStart_[e];
@@ -149,14 +196,18 @@ void ClassifyElements(
         {
             const int from = loop[i];
             const int to = loop[(i + 1) % length];
-            if (split)
+            if (from == to)
+                continue;
+            // An edge on the curve has no twin, also in an element that has no vote.
+            const auto* segment = s.curveEdges_.Find(UndirectedKey(from, to));
+            if (segment)
             {
-                if (const auto* segment = core.curveEdges_.Find(UndirectedKey(from, to)))
+                if (split && segment->first >= 0)
                 {
                     const bool forward = segment->first == from && segment->second == to;
                     votes += forward != second ? 1 : -1;
-                    continue;
                 }
+                continue;
             }
             if (const int* twin = s.edgeOwner_.Find(DirectedKey(to, from)))
             {
@@ -164,66 +215,66 @@ void ClassifyElements(
                     s.twins_[s.edgeStart_[e] + i] = *twin;
             }
         }
-        // Each element next to the curve keeps its own exact decision, so the elements on either side of a curve
-        // edge always differ. The other elements inherit from the nearest decided element across edges off the curve.
-        if (votes == 0)
-            continue;
-        s.inside_[e] = votes > 0 ? 1 : 0;
-        s.decided_[e] = 1;
-        s.queue_.push_back(e);
+        s.votes_[e] = votes;
     }
 
-    for (unsigned head = 0; head < s.queue_.size(); ++head)
+    // Join the elements across the edges off the curve: they form a patch.
+    s.parent_.resize(elementCount);
+    for (int e = 0; e < elementCount; ++e)
+        s.parent_[e] = e;
+    const auto find = [&](int e)
     {
-        const int e = s.queue_[head];
-        for (int k = s.edgeStart_[e]; k < s.edgeStart_[e + 1]; ++k)
+        while (s.parent_[e] != e)
         {
-            const int twin = s.twins_[k];
-            if (twin < 0 || s.decided_[twin])
-                continue;
-            s.inside_[twin] = s.inside_[e];
-            s.decided_[twin] = 1;
-            s.queue_.push_back(twin);
+            s.parent_[e] = s.parent_[s.parent_[e]];
+            e = s.parent_[e];
         }
-    }
-
-    // What remains are patches that the curve does not reach: sample the largest element of each one.
+        return e;
+    };
     for (int e = 0; e < elementCount; ++e)
     {
-        if (s.decided_[e])
-            continue;
-        s.patch_.clear();
-        s.decided_[e] = 1;
-        s.patch_.push_back(e);
-        for (unsigned p = 0; p < s.patch_.size(); ++p)
+        for (int k = s.edgeStart_[e]; k < s.edgeStart_[e + 1]; ++k)
         {
-            for (int k = s.edgeStart_[s.patch_[p]]; k < s.edgeStart_[s.patch_[p] + 1]; ++k)
-            {
-                const int twin = s.twins_[k];
-                if (twin >= 0 && !s.decided_[twin])
-                {
-                    s.decided_[twin] = 1;
-                    s.patch_.push_back(twin);
-                }
-            }
+            if (s.twins_[k] < 0)
+                continue;
+            const int a = find(e);
+            const int b = find(s.twins_[k]);
+            if (a != b)
+                s.parent_[ea::max(a, b)] = ea::min(a, b);
         }
-        int best = e;
-        double bestArea = -1.0;
-        for (const int member : s.patch_)
-        {
-            const double area = PolygonArea(*s.elements_[member].polygon_);
-            if (area > bestArea)
-            {
-                bestArea = area;
-                best = member;
-            }
-        }
-        bool reliable = true;
-        const bool inside =
-            other.ClassifyPoint(PolygonInteriorPoint(*s.elements_[best].polygon_, s.indices_), epsilon, reliable);
-        for (const int member : s.patch_)
-            s.inside_[member] = inside ? 1 : 0;
     }
+
+    // The sum of the votes of all curve edges of a patch decides all its elements.
+    s.patchVotes_.assign(elementCount, 0);
+    for (int e = 0; e < elementCount; ++e)
+        s.patchVotes_[find(e)] += s.votes_[e];
+
+    // A patch with a zero sum gets a point query on its largest element.
+    s.patchBest_.assign(elementCount, -1);
+    s.patchArea_.assign(elementCount, -1.0);
+    for (int e = 0; e < elementCount; ++e)
+    {
+        const int root = find(e);
+        if (s.patchVotes_[root] != 0)
+            continue;
+        const double area = PolygonArea(*s.elements_[e].polygon_);
+        if (area > s.patchArea_[root])
+        {
+            s.patchArea_[root] = area;
+            s.patchBest_[root] = e;
+        }
+    }
+    for (int root = 0; root < elementCount; ++root)
+    {
+        if (s.patchBest_[root] < 0)
+            continue;
+        bool reliable = true;
+        const bool inside = other.ClassifyPoint(
+            PolygonInteriorPoint(*s.elements_[s.patchBest_[root]].polygon_, s.indices_), epsilon, reliable);
+        s.patchVotes_[root] = inside ? 1 : -1;
+    }
+    for (int e = 0; e < elementCount; ++e)
+        s.inside_[e] = s.patchVotes_[find(e)] > 0 ? 1 : 0;
 }
 
 /// Tell if a component that the curve does not reach lies inside the other solid.

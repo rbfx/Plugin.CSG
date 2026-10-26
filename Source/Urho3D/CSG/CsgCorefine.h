@@ -354,10 +354,15 @@ struct CsgBooleanScratch
     ea::vector<int> edgeStart_;
     ea::vector<int> loops_;
     CsgFlatMap<uint64_t, int, CsgPackedKeyHash> edgeOwner_;
+    /// First id of each grid point, and the curve edges on these canonical ids.
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> firstId_;
+    CsgFlatMap<uint64_t, ea::pair<int, int>, CsgPackedKeyHash> curveEdges_;
     ea::vector<int> twins_;
-    ea::vector<uint8_t> decided_;
-    ea::vector<int> queue_;
-    ea::vector<int> patch_;
+    ea::vector<int> votes_;
+    ea::vector<int> parent_;
+    ea::vector<int> patchVotes_;
+    ea::vector<int> patchBest_;
+    ea::vector<double> patchArea_;
     ea::vector<unsigned> indices_;
 };
 

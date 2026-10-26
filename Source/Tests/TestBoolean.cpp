@@ -480,7 +480,7 @@ void RunSweep(float step, unsigned maxFailures)
 // In all of them the union of A and B is right. The next boolean fails because the result has an open edge.
 // The failed samples are about the axis (1, 1, 1) (19), the z axis (2) and the x axis (1).
 // The test fails if more than 48 samples fail. It is a known limit, so the failure is expected.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 36 samples fail: the axis (1, 1, 1) (33), the x axis (2)
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 34 samples fail: the axis (1, 1, 1) (31), the x axis (2)
 // and the z axis (1). The union of A and B is right in all of them. The test also fails in double mode.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
