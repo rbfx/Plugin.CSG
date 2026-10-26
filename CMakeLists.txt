@@ -20,6 +20,14 @@ create_symlink(${Urho3D_PACKAGE_ROOT}/bin/Data ${CMAKE_BINARY_DIR}/../Data)
 create_symlink(${Urho3D_PACKAGE_ROOT}/bin/EditorData ${CMAKE_BINARY_DIR}/../EditorData)
 create_symlink(${RbfxCsg_SOURCE_DIR}/Project/Data ${CMAKE_BINARY_DIR}/../ProjectData)
 
+# Exact CSG arithmetic needs strict floating point rules.
+option (CSG_EXACT_USE_DOUBLE "Use double for the exact CSG arithmetic" OFF)
+set (CSG_STRICT_FP_OPTIONS
+    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off>"
+    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-fno-fast-math>"
+    "$<$<CXX_COMPILER_ID:MSVC>:/fp:strict>"
+)
+
 # CSG plugin.
 add_subdirectory(Source/Urho3D/CSG)
 
