@@ -525,7 +525,10 @@ int CompareMagnitude(const CsgExactMinor& a, const CsgExactMinor& b)
 }
 
 /// Whether the bridge from-to is blocked by the edge pq.
-/// A contact only at an end of the bridge does not block it. A collinear overlap blocks it.
+/// A contact only at an end of the bridge does not block it. A collinear contact blocks it, also at an end.
+/// The callers skip the edges at the end ids, so an edge that touches an end has another id at the same grid
+/// point. Such ids are different points below the grid step. The triangulation uses their float positions, and
+/// there a bridge along such an edge can cross it.
 bool BridgeBlockedBy(const CsgGridPoint2& from, const CsgGridPoint2& to, const CsgGridPoint2& p, const CsgGridPoint2& q)
 {
     if (!CsgExact::SegmentsCross(from, to, p, q))
@@ -684,7 +687,24 @@ private:
 
     /// Choose the projection of the triangle to a coordinate plane. Drop the axis of the largest exact normal
     /// component. Flip the projection if that component is negative, so the face order is counterclockwise.
+    /// If the corners of the triangle are collinear on the grid, use the first triangle of the face with a normal
+    /// that is not zero. If all the triangles of the face are collinear on the grid, drop the z axis.
     void ChooseProjection(int face, int triangle)
+    {
+        dropAxis_ = 2;
+        flip_ = false;
+        if (ProjectionOf(triangle))
+            return;
+        const auto starts = mesh_.solid_.GetTriangleStart();
+        for (unsigned other = starts[face]; other < starts[face + 1]; ++other)
+        {
+            if (static_cast<int>(other) != triangle && ProjectionOf(static_cast<int>(other)))
+                return;
+        }
+    }
+
+    /// Set the projection from the exact normal of the grid corners of a triangle. Return false if the normal is zero.
+    bool ProjectionOf(int triangle)
     {
         const CsgNormal normal = CsgExact::Normal(mesh_.grid_[mesh_.triangleIds_[triangle * 3]],
             mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 1]], mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 2]]);
@@ -695,22 +715,12 @@ private:
             if (CompareMagnitude(*components[axis], *components[best]) > 0)
                 best = axis;
         }
-        int sign = components[best]->Sign();
+        const int sign = components[best]->Sign();
         if (sign == 0)
-        {
-            // The corners are collinear on the grid. The plane of the face gives the axis.
-            const Vector3& n = mesh_.solid_.GetFace(face)->plane_.normal_;
-            const float values[3] = {n.x_, n.y_, n.z_};
-            best = 0;
-            for (int axis = 1; axis < 3; ++axis)
-            {
-                if (std::fabs(values[axis]) > std::fabs(values[best]))
-                    best = axis;
-            }
-            sign = values[best] < 0.0f ? -1 : 1;
-        }
+            return false;
         dropAxis_ = best;
         flip_ = sign < 0;
+        return true;
     }
 
     /// Direction from one id to another in the plane. It is never zero.
@@ -768,6 +778,13 @@ private:
     /// D is the exact difference of the crossing, and k is one factor for all the crossings of the triangle.
     /// The area of the offsets (high - low) / D has the sign of the perturbed area.
     /// Return false if a point of the cycle is not such a crossing.
+    ///
+    /// The area is in double, so its sign is not exact. The exact area is S / P, with P the product of all D and
+    /// S the sum over the edges i of Cross(g_i, g_i+1) times the product of the D_j with j not i and not i + 1.
+    /// The g are the grid differences high - low.
+    /// For n crossings, each term multiplies n - 2 volumes of up to 2^93 and a minor of 2^62. The expansion length
+    /// grows with n, and CsgExact has no helper for such sums. So the exact sign is not cheap. The double area is
+    /// a tie break of a curve of zero size only. The exact AreaSign decides all the other cases.
     bool PerturbedArea(int loop, double& area) const
     {
         const int* cycle = s_.pool_.Data(loop);
@@ -876,19 +893,27 @@ private:
     /// Among the outgoing directions at v, the first one clockwise from the way back to u.
     /// The outgoing directions are the boundary targets, then the curve targets.
     ///
-    /// The directions around v have a cyclic order: the clockwise angle, then the global id for equal directions.
+    /// The directions around v have a cyclic order: the clockwise angle, then the rank for equal directions.
     /// The result is the next direction after v -> u in this order. So a direction equal to v -> u comes first
-    /// if its id is higher than u, and last if its id is lower. The order is exact.
+    /// if its rank is higher than the rank of u, and last if its rank is lower. The order is exact.
+    ///
+    /// The rank of a curve neighbor is its global id. Clockwise from the incoming boundary edge, the order is the
+    /// inside of the triangle and then the outgoing boundary edge. So in a block of equal directions, the incoming
+    /// boundary vertex has the lowest rank and an outgoing boundary target has the highest rank. Then each
+    /// incoming edge gets a different outgoing edge, and Next is a bijection.
     int Turn(int u, int v, const List* outs, const List* branches)
     {
+        constexpr int64_t boundaryRank = int64_t{1} << 40;
         const CsgGridPoint2 zero;
         const CsgGridPoint2 back = Direction(v, u);
+        const int64_t backRank = s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)) ? u - boundaryRank : u;
         const int total = (outs ? outs->count_ : 0) + (branches ? branches->count_ : 0);
         int best = -1;
+        int64_t bestRank = 0;
         int bestGroup = 0;
         CsgGridPoint2 bestDirection;
         int firstOutgoing = -1;
-        const auto visit = [&](const CsgAdjacency& adjacency, const List* list)
+        const auto visit = [&](const CsgAdjacency& adjacency, const List* list, int64_t rankOffset)
         {
             if (!list)
                 return;
@@ -899,33 +924,80 @@ private:
                     firstOutgoing = w;
                 if (w == u && total > 1)
                     continue;
+                const int64_t rank = w + rankOffset;
                 const CsgGridPoint2 direction = Direction(v, w);
-                // Group 0: the direction of v -> u with a higher id. Group 2: the same with a lower id.
+                // Group 0: the direction of v -> u with a higher rank. Group 2: the same with a lower rank.
                 const bool alongBack = CsgExact::Cross2(back, direction) == 0 && CsgExact::Dot2(back, direction) > 0;
-                const int group = alongBack ? (w > u ? 0 : 2) : 1;
+                const int group = alongBack ? (rank > backRank ? 0 : 2) : 1;
                 bool better = best < 0 || group < bestGroup;
                 if (best >= 0 && group == bestGroup)
                 {
                     const int order = group == 1 ? CsgExact::DirectionCompare(zero, back, direction, bestDirection) : 0;
-                    better = order < 0 || (order == 0 && w < best);
+                    better = order < 0 || (order == 0 && rank < bestRank);
                 }
                 if (better)
                 {
                     best = w;
+                    bestRank = rank;
                     bestGroup = group;
                     bestDirection = direction;
                 }
             }
         };
-        visit(s_.boundaryOut_, outs);
-        visit(s_.curve_, branches);
+        visit(s_.boundaryOut_, outs, boundaryRank);
+        visit(s_.curve_, branches, 0);
         return best >= 0 ? best : firstOutgoing;
     }
 
     /// A closed curve inside the triangle is traced once in each direction. The turn that encloses more area is the
     /// island and the other is the hole around it, even when rounding gives both the same sign.
+    /// Move the closed cycles of the curve network that is connected to the triangle boundary to the regions.
+    /// Such a cycle is an inner face of that network, so it is never a hole, even if its area sign is zero or
+    /// negative on the grid. Only a curve network apart from the boundary has an outer face, which is a hole.
+    /// The faces of one network share vertices, so the connection spreads from cycle to cycle by the shared ids.
+    void KeepDetachedClosedCycles()
+    {
+        s_.attachedIds_.clear();
+        for (const int loop : s_.cycles_)
+            s_.attachedIds_.insert(s_.attachedIds_.end(), s_.pool_.Data(loop), s_.pool_.Data(loop) + s_.pool_.Count(loop));
+        ea::sort(s_.attachedIds_.begin(), s_.attachedIds_.end());
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            s_.attachedNew_.clear();
+            int kept = 0;
+            for (const int loop : s_.closedCycles_)
+            {
+                const int* ids = s_.pool_.Data(loop);
+                const int count = s_.pool_.Count(loop);
+                bool attached = false;
+                for (int i = 0; i < count && !attached; ++i)
+                    attached = ea::binary_search(s_.attachedIds_.begin(), s_.attachedIds_.end(), ids[i]);
+                if (!attached)
+                {
+                    s_.closedCycles_[kept++] = loop;
+                    continue;
+                }
+                s_.cycles_.push_back(loop);
+                s_.attachedNew_.insert(s_.attachedNew_.end(), ids, ids + count);
+                changed = true;
+            }
+            s_.closedCycles_.resize(kept);
+            if (changed)
+            {
+                s_.attachedIds_.insert(s_.attachedIds_.end(), s_.attachedNew_.begin(), s_.attachedNew_.end());
+                ea::sort(s_.attachedIds_.begin(), s_.attachedIds_.end());
+            }
+        }
+    }
+
+    /// The two turns of a curve of zero size have the same exact sign 0. Then PerturbedArea decides in double.
     void ClassifyClosedCycles()
     {
+        if (s_.closedCycles_.empty())
+            return;
+        KeepDetachedClosedCycles();
         const int closedCount = static_cast<int>(s_.closedCycles_.size());
         if (closedCount == 0)
             return;
@@ -1101,6 +1173,116 @@ private:
         return !(CsgExact::Cross2(e0, d) >= 0 && CsgExact::Cross2(d, e1) >= 0);
     }
 
+    /// Index of the nearest vertex of the loop after or before the vertex index at another point. Return -1 if none.
+    int OtherPoint(int loop, int index, int step) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        const CsgGridPoint2 v = Point(ids[index]);
+        for (int k = 1; k < count; ++k)
+        {
+            const int other = ((index + step * k) % count + count) % count;
+            if (Point(ids[other]) != v)
+                return other;
+        }
+        return -1;
+    }
+
+    /// Whether the counterclockwise angle from the reference to a is less than the angle to b. Angles are in [0, 2 pi).
+    static bool CounterclockwiseLess(const CsgGridPoint2& reference, const CsgGridPoint2& a, const CsgGridPoint2& b)
+    {
+        const auto half = [&reference](const CsgGridPoint2& d)
+        {
+            const int cross = CsgExact::Cross2(reference, d);
+            return cross > 0 || (cross == 0 && CsgExact::Dot2(reference, d) > 0) ? 0 : 1;
+        };
+        const int ha = half(a);
+        const int hb = half(b);
+        if (ha != hb)
+            return ha < hb;
+        return CsgExact::Cross2(a, b) > 0;
+    }
+
+    /// Whether the point is on the boundary of the loop: at a vertex or on an edge.
+    bool OnBoundary(int loop, const CsgGridPoint2& point) const
+    {
+        const int* ids = s_.pool_.Data(loop);
+        const int count = s_.pool_.Count(loop);
+        for (int i = 0; i < count; ++i)
+        {
+            const CsgGridPoint2 p = Point(ids[i]);
+            const CsgGridPoint2 q = Point(ids[(i + 1) % count]);
+            if (p == point
+                || (CsgExact::Orient2(p, q, point) == 0 && ea::min(p.u_, q.u_) <= point.u_ && point.u_ <= ea::max(p.u_, q.u_)
+                    && ea::min(p.v_, q.v_) <= point.v_ && point.v_ <= ea::max(p.v_, q.v_)))
+                return true;
+        }
+        return false;
+    }
+
+    /// Whether the hole lies inside the region. A hole vertex off the boundary of the region decides by parity.
+    /// A hole can share its vertices and edges with the region, because ids at one grid point are not merged.
+    /// If every hole vertex is on the boundary of the region, the side of the region next to the hole decides.
+    bool HoleInside(int region, int hole) const
+    {
+        const int* holeIds = s_.pool_.Data(hole);
+        const int holeSize = s_.pool_.Count(hole);
+        for (int k = 0; k < holeSize; ++k)
+        {
+            const CsgGridPoint2 v = Point(holeIds[k]);
+            if (!OnBoundary(region, v))
+                return Contains(region, v);
+        }
+        return ContainsBesideHole(region, hole, 0);
+    }
+
+    /// Whether the region contains the points just outside the hole at its vertex index.
+    /// The test point is the hole vertex v, moved a tiny step into the outside of the hole. The step goes in the
+    /// direction d of the next hole edge, turned a tiny angle counterclockwise. That is the left side of the hole.
+    /// The test is exact. If v is on the boundary of the region, the side of the region at v decides.
+    bool ContainsBesideHole(int region, int hole, int index) const
+    {
+        const CsgGridPoint2 v = Point(s_.pool_.Data(hole)[index]);
+        const int next = OtherPoint(hole, index, 1);
+        if (next < 0)
+            return Contains(region, v);
+        const CsgGridPoint2 d = CsgExact::Difference(Point(s_.pool_.Data(hole)[next]), v);
+        const int* ids = s_.pool_.Data(region);
+        const int count = s_.pool_.Count(region);
+        bool touches = false;
+        for (int i = 0; i < count; ++i)
+        {
+            const CsgGridPoint2 p = Point(ids[i]);
+            if (p == v)
+            {
+                // The inside of the region at this vertex runs counterclockwise from the next edge to the previous
+                // edge. Equal edge directions make a full turn.
+                touches = true;
+                const int before = OtherPoint(region, i, -1);
+                const int after = OtherPoint(region, i, 1);
+                if (before < 0 || after < 0)
+                    continue;
+                const CsgGridPoint2 e0 = CsgExact::Difference(Point(ids[before]), v);
+                const CsgGridPoint2 e1 = CsgExact::Difference(Point(ids[after]), v);
+                const bool full = CsgExact::Cross2(e1, e0) == 0 && CsgExact::Dot2(e1, e0) > 0;
+                if (full || CounterclockwiseLess(e1, d, e0))
+                    return true;
+                continue;
+            }
+            const CsgGridPoint2 q = Point(ids[(i + 1) % count]);
+            if (q == v || CsgExact::Orient2(p, q, v) != 0 || ea::min(p.u_, q.u_) > v.u_ || v.u_ > ea::max(p.u_, q.u_)
+                || ea::min(p.v_, q.v_) > v.v_ || v.v_ > ea::max(p.v_, q.v_))
+                continue;
+            // The point v is inside the edge p-q. The inside of the region is on the left of the edge.
+            touches = true;
+            const CsgGridPoint2 edge = CsgExact::Difference(q, p);
+            const int cross = CsgExact::Cross2(edge, d);
+            if (cross > 0 || (cross == 0 && CsgExact::Dot2(edge, d) > 0))
+                return true;
+        }
+        return !touches && Contains(region, v);
+    }
+
     /// Index pair of the closest vertices of the loops.
     ea::pair<int, int> Nearest(int outer, int hole) const
     {
@@ -1270,9 +1452,8 @@ private:
             s_.twin_.assign(holeIds, holeIds + holeSize);
             ea::sort(s_.twin_.begin(), s_.twin_.end());
             s_.twin_.erase(ea::unique(s_.twin_.begin(), s_.twin_.end()), s_.twin_.end());
-            // Probe with the first hole vertex. A point on an edge counts as inside, so the region around the hole
-            // contains it. The smallest such region is the nearest one around the hole.
-            const CsgGridPoint2 probe = Point(holeIds[0]);
+            // The islands inside the hole touch the hole, but they do not contain it. The smallest region that
+            // contains the hole is the nearest one around it.
             int index = -1;
             int fallback = -1;
             double smallest = std::numeric_limits<double>::infinity();
@@ -1283,7 +1464,7 @@ private:
                     continue;
                 if (fallback < 0)
                     fallback = r;
-                if (!Contains(region, probe))
+                if (!HoleInside(region, hole))
                     continue;
                 const double area = AreaMagnitude(region);
                 if (area < smallest)

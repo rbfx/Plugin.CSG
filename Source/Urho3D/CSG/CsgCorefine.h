@@ -244,6 +244,9 @@ struct CsgSplitScratch
     ea::vector<int> groupSameHash_;
     ea::vector<int> memberNext_;
     CsgFlatMap<uint64_t, int, CsgPackedKeyHash> groupByHash_;
+    /// Sorted ids of the curve network that is connected to the triangle boundary.
+    ea::vector<int> attachedIds_;
+    ea::vector<int> attachedNew_;
     /// Sort buffers.
     ea::vector<double> keys_;
     ea::vector<int> order_;

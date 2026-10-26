@@ -518,3 +518,135 @@ TEST_CASE("Split places a hole inside an island", "[split][corefine]")
     // Each curve has an island: boundary region, two islands and the bridged pieces, in each of the two triangles.
     CHECK(result.a_.regions_.size() >= 2 * 5);
 }
+
+namespace
+{
+
+CsgPolygon MakeFlatPolygon(std::initializer_list<Vector3> corners)
+{
+    ea::vector<ModelVertex> vertices;
+    for (const Vector3& corner : corners)
+    {
+        ModelVertex vertex;
+        vertex.SetPosition(corner);
+        vertices.push_back(vertex);
+    }
+    return CsgPolygon(ea::move(vertices), 2);
+}
+
+/// Result of a split of one triangle with curve segments made by hand.
+struct HandSplit
+{
+    CsgSplitResult::State state_{};
+    /// Area of each region in the plane z = 0. It is positive for the counterclockwise order.
+    ea::vector<double> areas_;
+};
+
+/// Split the one triangle of the operand with the curve segments between the points.
+/// The triangle and the points lie in the plane z = 0. The segments do not come from an intersection.
+HandSplit SplitWithSegments(const ea::vector<CsgPolygon>& aPolygons, const ea::vector<CsgPolygon>& bPolygons,
+    bool splitSecond, const ea::vector<ea::pair<Vector3, Vector3>>& segments)
+{
+    const CsgSolid a(aPolygons);
+    const CsgSolid b(bPolygons);
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    const auto idOf = [&core](const Vector3& point)
+    {
+        for (const Mesh* mesh : {&core.a_, &core.b_})
+        {
+            for (int i = 0; i < mesh->VertexCount(); ++i)
+            {
+                if (mesh->loops_.positions_[i] == point)
+                    return core.Global(*mesh, i);
+            }
+        }
+        FAIL("The point is not a vertex of the operands.");
+        return -1;
+    };
+    const Mesh& mesh = splitSecond ? core.b_ : core.a_;
+    REQUIRE(mesh.triangleFace_.size() == 1);
+    CsgSegmentLists lists;
+    lists.Reset(1);
+    for (const auto& segment : segments)
+        lists.Append(0, idOf(segment.first), idOf(segment.second));
+
+    CsgScratch scratch;
+    CsgSplitResult result;
+    core.SplitOperand(mesh, lists, scratch, result);
+    HandSplit split;
+    split.state_ = result.GetState(0);
+    for (int region = 0; region < result.RegionCount(); ++region)
+    {
+        const int* ids = result.RegionIds(region);
+        const int count = result.RegionSize(region);
+        double area = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const int p = ids[i];
+            const int q = ids[(i + 1) % count];
+            const Vector3& pp = p < core.b_.offset_ ? core.a_.loops_.positions_[p] : core.b_.loops_.positions_[p - core.b_.offset_];
+            const Vector3& qq = q < core.b_.offset_ ? core.a_.loops_.positions_[q] : core.b_.loops_.positions_[q - core.b_.offset_];
+            area += 0.5 * (static_cast<double>(pp.x_) * qq.y_ - static_cast<double>(qq.x_) * pp.y_);
+        }
+        split.areas_.push_back(area);
+    }
+    return split;
+}
+
+void CheckHandSplit(const HandSplit& split, double triangleArea, unsigned regionCount)
+{
+    CHECK(split.state_ == CsgSplitResult::State::Split);
+    CHECK(split.areas_.size() == regionCount);
+    double sum = 0.0;
+    for (const double area : split.areas_)
+    {
+        CHECK(area > 0.0);
+        sum += area;
+    }
+    CHECK(sum == Catch::Approx(triangleArea));
+}
+
+} // namespace
+
+TEST_CASE("Split orders a curve that has the direction of a boundary edge", "[split][corefine]")
+{
+    // At the corner (0, 0) the curve goes to (2, 0) along the next boundary edge and to (0, 2) along the previous
+    // boundary edge. The incoming boundary edge must come first in the tie and the outgoing boundary edge last.
+    const Vector3 p0(0, 0, 0), p1(4, 0, 0), p2(0, 4, 0);
+    const Vector3 c(2, 0, 0), d(1, 1, 0), e(0, 2, 0);
+    const ea::vector<ea::pair<Vector3, Vector3>> segments = {{p0, c}, {c, d}, {d, p0}, {p0, e}, {e, d}};
+    ea::vector<CsgPolygon> triangle;
+    triangle.push_back(MakeFlatPolygon({p0, p1, p2}));
+    ea::vector<CsgPolygon> points;
+    points.push_back(MakeFlatPolygon({c, d, e}));
+    // The curve points have higher ids than the corners in the first split and lower ids in the second split.
+    CheckHandSplit(SplitWithSegments(triangle, points, false, segments), 8.0, 3);
+    CheckHandSplit(SplitWithSegments(points, triangle, true, segments), 8.0, 3);
+}
+
+TEST_CASE("Split places the hole of a curve with two inner faces in the region around it", "[split][corefine]")
+{
+    const Vector3 p0(0, 0, 0), p1(8, 0, 0), p2(0, 8, 0);
+    ea::vector<CsgPolygon> triangle;
+    triangle.push_back(MakeFlatPolygon({p0, p1, p2}));
+    SECTION("theta")
+    {
+        // A square with a diagonal. The two inner faces touch every vertex of the hole.
+        const Vector3 s0(1, 1, 0), s1(3, 1, 0), s2(3, 3, 0), s3(1, 3, 0);
+        ea::vector<CsgPolygon> points;
+        points.push_back(MakeFlatPolygon({s0, s1, s2, s3}));
+        const ea::vector<ea::pair<Vector3, Vector3>> segments = {{s0, s1}, {s1, s2}, {s2, s3}, {s3, s0}, {s0, s2}};
+        CheckHandSplit(SplitWithSegments(triangle, points, false, segments), 32.0, 4);
+    }
+    SECTION("figure 8")
+    {
+        // Two triangles that touch at one vertex. The hole visits that vertex twice.
+        const Vector3 x0(2, 2, 0), a1(1, 1, 0), a2(3, 1, 0), b1(3, 3, 0), b2(1, 3, 0);
+        ea::vector<CsgPolygon> points;
+        points.push_back(MakeFlatPolygon({x0, a1, a2}));
+        points.push_back(MakeFlatPolygon({x0, b1, b2}));
+        const ea::vector<ea::pair<Vector3, Vector3>> segments = {
+            {x0, a1}, {a1, a2}, {a2, x0}, {x0, b1}, {b1, b2}, {b2, x0}};
+        CheckHandSplit(SplitWithSegments(triangle, points, false, segments), 32.0, 4);
+    }
+}
