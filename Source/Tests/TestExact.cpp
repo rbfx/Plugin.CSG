@@ -23,29 +23,31 @@ namespace Urho3D
 namespace
 {
 
-// The integer types under test. The portable struct always runs. The default type runs too, when it differs.
-#if CSG_HAS_NATIVE_INT128
-using CsgTestTypes = std::tuple<CsgInt128Portable, CsgInt128>;
+// The integer types under test. The portable struct always runs. The compiler type runs too, when it exists.
+#ifdef CSG_TEST_HAS_NATIVE_INT128
+using CsgTestTypes = std::tuple<CsgTest::Int128Portable, CsgTest::Int128Native>;
 #else
-using CsgTestTypes = std::tuple<CsgInt128Portable>;
+using CsgTestTypes = std::tuple<CsgTest::Int128Portable>;
 #endif
 
-CsgInt128Portable MakeInt(const CsgInt128Portable*, int64_t hi, uint64_t lo)
+CsgTest::Int128Portable MakeInt(const CsgTest::Int128Portable*, int64_t hi, uint64_t lo)
 {
-    return CsgInt128Portable::FromParts(lo, hi);
+    return CsgTest::Int128Portable::FromParts(lo, hi);
 }
 
-#if CSG_HAS_COMPILER_INT128
-CsgCompilerInt128 MakeInt(const CsgCompilerInt128*, int64_t hi, uint64_t lo)
+#ifdef CSG_TEST_HAS_NATIVE_INT128
+CsgTest::Int128Native MakeInt(const CsgTest::Int128Native*, int64_t hi, uint64_t lo)
 {
-    return static_cast<CsgCompilerInt128>((static_cast<CsgCompilerUInt128>(static_cast<uint64_t>(hi)) << 64) | lo);
+    return static_cast<CsgTest::Int128Native>(
+        (static_cast<CsgTest::UInt128Native>(static_cast<uint64_t>(hi)) << 64) | lo);
 }
 
-CsgCompilerInt128 ToNative(const CsgInt128Portable& value)
+CsgTest::Int128Native ToNative(const CsgTest::Int128Portable& value)
 {
-    return MakeInt(static_cast<const CsgCompilerInt128*>(nullptr), value.hi_, value.lo_);
+    return MakeInt(static_cast<const CsgTest::Int128Native*>(nullptr), value.hi_, value.lo_);
 }
 #endif
+
 
 template <typename Int>
 Int Make(int64_t hi, uint64_t lo)
@@ -91,14 +93,14 @@ bool ReferenceCrosses(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgG
 
 TEST_CASE("Portable 128 bit product matches the compiler type", "[exact]")
 {
-    REQUIRE(CsgInt128Portable::Multiply(3, -4) == CsgInt128Portable(-12));
-    REQUIRE(CsgInt128Portable::Multiply(-3, -4) == CsgInt128Portable(12));
+    REQUIRE(CsgTest::Int128Portable::Multiply(3, -4) == CsgTest::Int128Portable(-12));
+    REQUIRE(CsgTest::Int128Portable::Multiply(-3, -4) == CsgTest::Int128Portable(12));
     const auto minimum = std::numeric_limits<int64_t>::min();
     // (-2^63) * (-2^63) = 2^126
-    REQUIRE(CsgInt128Portable::Multiply(minimum, minimum) == CsgInt128Portable::FromParts(0, int64_t(1) << 62));
-    REQUIRE(CsgInt128Portable::Multiply(minimum, 1) == CsgInt128Portable(minimum));
+    REQUIRE(CsgTest::Int128Portable::Multiply(minimum, minimum) == CsgTest::Int128Portable::FromParts(0, int64_t(1) << 62));
+    REQUIRE(CsgTest::Int128Portable::Multiply(minimum, 1) == CsgTest::Int128Portable(minimum));
 
-#ifdef __SIZEOF_INT128__
+#ifdef CSG_TEST_HAS_NATIVE_INT128
     std::mt19937_64 random(12345);
     const int64_t bound = int64_t(1) << 62;
     std::uniform_int_distribution<int64_t> distribution(-bound + 1, bound - 1);
@@ -106,31 +108,31 @@ TEST_CASE("Portable 128 bit product matches the compiler type", "[exact]")
     {
         const int64_t a = distribution(random);
         const int64_t b = distribution(random);
-        const CsgCompilerInt128 expected = static_cast<CsgCompilerInt128>(a) * b;
-        const CsgInt128Portable product = CsgInt128Portable::Multiply(a, b);
+        const CsgTest::Int128Native expected = static_cast<CsgTest::Int128Native>(a) * b;
+        const CsgTest::Int128Portable product = CsgTest::Int128Portable::Multiply(a, b);
         REQUIRE(ToNative(product) == expected);
-        REQUIRE(ToNative(CsgInt128Portable(a) * CsgInt128Portable(b)) == expected);
-        REQUIRE(ToNative(CsgMul64<CsgInt128Portable>(a, b)) == expected);
+        REQUIRE(ToNative(CsgTest::Int128Portable(a) * CsgTest::Int128Portable(b)) == expected);
+        REQUIRE(ToNative(CsgTest::Mul64<CsgTest::Int128Portable>(a, b)) == expected);
     }
 
     // Wrapping arithmetic on full 128 bit values.
     std::uniform_int_distribution<uint64_t> bits;
     for (int i = 0; i < 10000; ++i)
     {
-        const CsgInt128Portable x = CsgInt128Portable::FromParts(bits(random), static_cast<int64_t>(bits(random)));
-        const CsgInt128Portable y = CsgInt128Portable::FromParts(bits(random), static_cast<int64_t>(bits(random)));
+        const CsgTest::Int128Portable x = CsgTest::Int128Portable::FromParts(bits(random), static_cast<int64_t>(bits(random)));
+        const CsgTest::Int128Portable y = CsgTest::Int128Portable::FromParts(bits(random), static_cast<int64_t>(bits(random)));
         const int64_t small = static_cast<int64_t>(bits(random));
-        const CsgCompilerUInt128 ux = static_cast<CsgCompilerUInt128>(ToNative(x));
-        const CsgCompilerUInt128 uy = static_cast<CsgCompilerUInt128>(ToNative(y));
-        const CsgCompilerUInt128 us = static_cast<CsgCompilerUInt128>(static_cast<CsgCompilerInt128>(small));
-        REQUIRE(static_cast<CsgCompilerUInt128>(ToNative(x + y)) == ux + uy);
-        REQUIRE(static_cast<CsgCompilerUInt128>(ToNative(x - y)) == ux - uy);
-        REQUIRE(static_cast<CsgCompilerUInt128>(ToNative(-x)) == CsgCompilerUInt128(0) - ux);
-        REQUIRE(static_cast<CsgCompilerUInt128>(ToNative(x * y)) == ux * uy);
-        REQUIRE(static_cast<CsgCompilerUInt128>(ToNative(CsgMul(x, small))) == ux * us);
+        const CsgTest::UInt128Native ux = static_cast<CsgTest::UInt128Native>(ToNative(x));
+        const CsgTest::UInt128Native uy = static_cast<CsgTest::UInt128Native>(ToNative(y));
+        const CsgTest::UInt128Native us = static_cast<CsgTest::UInt128Native>(static_cast<CsgTest::Int128Native>(small));
+        REQUIRE(static_cast<CsgTest::UInt128Native>(ToNative(x + y)) == ux + uy);
+        REQUIRE(static_cast<CsgTest::UInt128Native>(ToNative(x - y)) == ux - uy);
+        REQUIRE(static_cast<CsgTest::UInt128Native>(ToNative(-x)) == CsgTest::UInt128Native(0) - ux);
+        REQUIRE(static_cast<CsgTest::UInt128Native>(ToNative(x * y)) == ux * uy);
+        REQUIRE(static_cast<CsgTest::UInt128Native>(ToNative(CsgTest::Mul(x, small))) == ux * us);
         REQUIRE((x < y) == (ToNative(x) < ToNative(y)));
         REQUIRE((x >= y) == (ToNative(x) >= ToNative(y)));
-        REQUIRE(x.Sign() == CsgSign(ToNative(x)));
+        REQUIRE(x.Sign() == CsgTest::Sign(ToNative(x)));
     }
 #endif
 }
@@ -141,7 +143,7 @@ TEMPLATE_LIST_TEST_CASE("Sign of product difference", "[exact]", CsgTestTypes)
 
     SECTION("Random values that fit in the compiler type")
     {
-#ifdef __SIZEOF_INT128__
+#ifdef CSG_TEST_HAS_NATIVE_INT128
         std::mt19937_64 random(777);
         const int64_t bound = int64_t(1) << 62;
         std::uniform_int_distribution<int64_t> distribution(-bound + 1, bound - 1);
@@ -153,9 +155,9 @@ TEMPLATE_LIST_TEST_CASE("Sign of product difference", "[exact]", CsgTestTypes)
             const bool equal = (i % 4) == 0;
             const int64_t c = equal ? b : distribution(random);
             const int64_t d = equal ? a : distribution(random);
-            const CsgCompilerInt128 difference = static_cast<CsgCompilerInt128>(a) * b - static_cast<CsgCompilerInt128>(c) * d;
+            const CsgTest::Int128Native difference = static_cast<CsgTest::Int128Native>(a) * b - static_cast<CsgTest::Int128Native>(c) * d;
             const int expected = difference > 0 ? 1 : (difference < 0 ? -1 : 0);
-            REQUIRE(CsgSignOfProductDifference<Int>(Int(a), Int(b), Int(c), Int(d)) == expected);
+            REQUIRE(CsgTest::SignOfProductDifference<Int>(Int(a), Int(b), Int(c), Int(d)) == expected);
         }
 #endif
     }
@@ -170,23 +172,23 @@ TEMPLATE_LIST_TEST_CASE("Sign of product difference", "[exact]", CsgTestTypes)
         const Int minusOne = Int(-1);
 
         // 2^127 - 2^127 = 0
-        REQUIRE(CsgSignOfProductDifference<Int>(pow126, two, pow126, two) == 0);
-        REQUIRE(CsgSignOfProductDifference<Int>(pow126, two, pow126, one) == 1);
-        REQUIRE(CsgSignOfProductDifference<Int>(pow126, one, pow126, two) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(pow126, two, pow126, two) == 0);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(pow126, two, pow126, one) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(pow126, one, pow126, two) == -1);
         // (-2^127) * 1 - (2^127 - 1) * (-1) = -1
-        REQUIRE(CsgSignOfProductDifference<Int>(minimum, one, maximum, minusOne) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(minimum, one, maximum, minusOne) == -1);
         // (-2^127)^2 = 2^254 is larger than (2^127 - 1)^2
-        REQUIRE(CsgSignOfProductDifference<Int>(minimum, minimum, maximum, maximum) == 1);
-        REQUIRE(CsgSignOfProductDifference<Int>(maximum, maximum, minimum, minimum) == -1);
-        REQUIRE(CsgSignOfProductDifference<Int>(minimum, minimum, minimum, minimum) == 0);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(minimum, minimum, maximum, maximum) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(maximum, maximum, minimum, minimum) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(minimum, minimum, minimum, minimum) == 0);
         // Products that differ only in the lowest bit of a 256 bit value.
-        REQUIRE(CsgSignOfProductDifference<Int>(maximum, maximum, maximum, Make<Int>(std::numeric_limits<int64_t>::max(), ~uint64_t(0) - 1)) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(maximum, maximum, maximum, Make<Int>(std::numeric_limits<int64_t>::max(), ~uint64_t(0) - 1)) == 1);
         // Opposite signs: -(2^127) - (2^127 - 1) < 0
-        REQUIRE(CsgSignOfProductDifference<Int>(minimum, one, maximum, one) == -1);
-        REQUIRE(CsgSignOfProductDifference<Int>(maximum, one, minimum, one) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(minimum, one, maximum, one) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(maximum, one, minimum, one) == 1);
         // Equal magnitudes with negative products: (-a) * b - (-c) * d where a * b == c * d
-        REQUIRE(CsgSignOfProductDifference<Int>(Int(-6), Int(7), Int(-14), Int(3)) == 0);
-        REQUIRE(CsgSignOfProductDifference<Int>(Int(-6), Int(7), Int(-14), Int(2)) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(Int(-6), Int(7), Int(-14), Int(3)) == 0);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(Int(-6), Int(7), Int(-14), Int(2)) == -1);
     }
 
     SECTION("Zero cases")
@@ -194,12 +196,12 @@ TEMPLATE_LIST_TEST_CASE("Sign of product difference", "[exact]", CsgTestTypes)
         const Int zero = Int(0);
         const Int five = Int(5);
         const Int minusFive = Int(-5);
-        REQUIRE(CsgSignOfProductDifference<Int>(zero, five, zero, minusFive) == 0);
-        REQUIRE(CsgSignOfProductDifference<Int>(zero, five, five, five) == -1);
-        REQUIRE(CsgSignOfProductDifference<Int>(zero, five, five, minusFive) == 1);
-        REQUIRE(CsgSignOfProductDifference<Int>(five, five, zero, zero) == 1);
-        REQUIRE(CsgSignOfProductDifference<Int>(minusFive, five, zero, five) == -1);
-        REQUIRE(CsgSignOfProductDifference<Int>(five, minusFive, five, minusFive) == 0);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(zero, five, zero, minusFive) == 0);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(zero, five, five, five) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(zero, five, five, minusFive) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(five, five, zero, zero) == 1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(minusFive, five, zero, five) == -1);
+        REQUIRE(CsgTest::SignOfProductDifference<Int>(five, minusFive, five, minusFive) == 0);
     }
 }
 
@@ -520,6 +522,62 @@ TEST_CASE("Float expansion of a 128 bit number is exact", "[exact]")
         REQUIRE(CsgTest::ToInt128(terms.data(), static_cast<int>(terms.size())) == value);
     }
     REQUIRE(CsgTest::FromInt128(CsgTest::Int128(int64_t(0))).empty());
+}
+
+TEST_CASE("Approximate of an expansion with large values", "[exact]")
+{
+    // Build the compressed expansion of a number.
+    const auto build = [](const CsgTest::Int128& value, CsgExactVolume& out)
+    {
+        const ea::vector<float> terms = CsgTest::FromInt128(value);
+        REQUIRE(terms.size() <= 24);
+        for (size_t i = 0; i < terms.size(); ++i)
+            out.terms_[i] = terms[i];
+        out.count_ = CsgCompress(static_cast<int>(terms.size()), out.terms_);
+        REQUIRE(out.count_ >= 0);
+    };
+    // The result is correct when it differs from the expected value by at most one unit in the last place.
+    const auto withinOneUlp = [](double result, double expected)
+    {
+        const double ulp = std::nextafter(std::fabs(expected), std::numeric_limits<double>::infinity()) - std::fabs(expected);
+        return std::fabs(result - expected) <= ulp;
+    };
+
+    const CsgTest::Int128 pow70 = CsgTest::ShiftLeft(CsgTest::Int128(int64_t(1)), 70);
+    const CsgTest::Int128 pow74 = CsgTest::ShiftLeft(CsgTest::Int128(int64_t(1)), 74);
+
+    SECTION("Plus and minus 2^70 + 1")
+    {
+        CsgExactVolume positive;
+        build(pow70 + CsgTest::Int128(int64_t(1)), positive);
+        CsgExactVolume negative;
+        build(CsgTest::Int128(int64_t(0)) - (pow70 + CsgTest::Int128(int64_t(1))), negative);
+        const double expected = std::ldexp(1.0, 70);
+        REQUIRE(withinOneUlp(positive.Approximate(), expected));
+        REQUIRE(withinOneUlp(negative.Approximate(), -expected));
+        REQUIRE(withinOneUlp(CsgExpansionApproximate(positive.count_, positive.terms_), expected));
+        REQUIRE(withinOneUlp(CsgExpansionApproximate(negative.count_, negative.terms_), -expected));
+        REQUIRE(positive.Sign() == 1);
+        REQUIRE(negative.Sign() == -1);
+    }
+
+    SECTION("2^74 + 12345")
+    {
+        CsgExactVolume value;
+        build(pow74 + CsgTest::Int128(int64_t(12345)), value);
+        const double expected = std::ldexp(1.0, 74) + 12345.0;
+        REQUIRE(withinOneUlp(value.Approximate(), expected));
+        REQUIRE(withinOneUlp(CsgExpansionApproximate(value.count_, value.terms_), expected));
+    }
+
+    SECTION("Zero")
+    {
+        CsgExactVolume zero;
+        build(CsgTest::Int128(int64_t(0)), zero);
+        REQUIRE(zero.count_ == 0);
+        REQUIRE(zero.Approximate() == 0.0);
+        REQUIRE(CsgExpansionApproximate(0, zero.terms_) == 0.0);
+    }
 }
 
 namespace
