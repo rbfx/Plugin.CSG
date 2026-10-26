@@ -5,6 +5,8 @@
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
 
+#include "TestExactReference.h"
+
 #include <catch2/catch_amalgamated.hpp>
 
 #include <cstdint>
@@ -320,6 +322,45 @@ TEST_CASE("Orient results are equal for both 128 bit types", "[exact]")
         }
     }
 #endif
+}
+
+TEST_CASE("Reference oracle matches the library Orient", "[exact]")
+{
+    std::mt19937_64 random(8086);
+    // Small values give many degenerate cases. Large values stay inside the grid range of 2^40.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, int64_t(1) << 23})
+    {
+        std::uniform_int_distribution<int64_t> coordinate(-range, range);
+        for (int i = 0; i < 3000; ++i)
+        {
+            const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint b = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
+            for (int second = 0; second < 16; ++second)
+                REQUIRE(CsgExact::Orient(a, b, c, d, second) == CsgTest::ReferenceOrient(a, b, c, d, second));
+            REQUIRE(CsgSign(CsgExact::Volume(a, b, c, d)) == CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d)));
+            // The perturbation never changes a nonzero volume.
+            const int volumeSign = CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d));
+            if (volumeSign != 0)
+                REQUIRE(CsgTest::ReferenceOrient(a, b, c, d, 0) == volumeSign);
+        }
+    }
+}
+
+TEST_CASE("Float expansion of a 128 bit number is exact", "[exact]")
+{
+    std::mt19937_64 random(31337);
+    std::uniform_int_distribution<uint64_t> bits;
+    for (int i = 0; i < 2000; ++i)
+    {
+        const int64_t hi = static_cast<int64_t>(bits(random)) >> (random() % 64);
+        const CsgTest::Int128 value = (CsgTest::Int128(hi) * CsgTest::Int128(int64_t(1) << 62)) * CsgTest::Int128(4)
+            + CsgTest::Int128(static_cast<int64_t>(bits(random) >> 1));
+        const ea::vector<float> terms = CsgTest::FromInt128(value);
+        REQUIRE(CsgTest::ToInt128(terms.data(), static_cast<int>(terms.size())) == value);
+    }
+    REQUIRE(CsgTest::FromInt128(CsgTest::Int128(int64_t(0))).empty());
 }
 
 TEST_CASE("Exact filter", "[exact]")

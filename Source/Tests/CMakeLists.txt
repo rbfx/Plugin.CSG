@@ -7,6 +7,9 @@ set (TARGET_NAME Tests.CSG)
 set (SOURCE_FILES
     TestMain.cpp
     TestExact.cpp
+    TestExactReference.cpp
+    TestExactReference.h
+    TestInt128.h
     TestGeometry.cpp
     TestGeometry.h
     TestCommon.cpp
