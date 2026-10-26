@@ -33,19 +33,6 @@ constexpr double EDGE_ORDER_TOLERANCE = 1e-9;
 /// Number of ids that the sort of the crossings of an edge sorts by insertion.
 constexpr int INSERTION_SORT_LIMIT = 16;
 
-/// Convert a 128 bit number to double. The function has the same type as CsgInt128.
-#if CSG_HAS_NATIVE_INT128
-double ToDouble(const CsgInt128& value)
-{
-    return static_cast<double>(value);
-}
-#else
-double ToDouble(const CsgInt128& value)
-{
-    return CsgInt128PortableToDouble(value);
-}
-#endif
-
 int SignOfFloat(float value)
 {
     return value > 0.0f ? 1 : -1;
@@ -153,62 +140,26 @@ void Sides(const Mesh& corners, int triangle, const Mesh& other, int otherTriang
 
 } // namespace
 
-double CsgInt128PortableToDouble(const CsgInt128Portable& value)
-{
-    const CsgDetail::Magnitude128 magnitude = CsgDetail::GetMagnitude(value);
-    if (magnitude.sign_ == 0)
-        return 0.0;
-    const uint64_t hi = magnitude.hi_;
-    const uint64_t lo = magnitude.lo_;
-    double result;
-    if (hi == 0)
-    {
-        // A 64 bit number converts with one rounding.
-        result = static_cast<double>(lo);
-    }
-    else
-    {
-        // Keep the top 64 bits of the magnitude. A double has 53 bits, so bit 0 of the top part is far below the
-        // rounding position. A sticky bit in bit 0 keeps the round to nearest even correct.
-        int shift = 0;
-        for (uint64_t rest = hi; rest != 0; rest >>= 1)
-            ++shift;
-        uint64_t top;
-        bool sticky;
-        if (shift == 64)
-        {
-            top = hi;
-            sticky = lo != 0;
-        }
-        else
-        {
-            top = (hi << (64 - shift)) | (lo >> shift);
-            sticky = (lo & ((uint64_t{1} << shift) - 1)) != 0;
-        }
-        if (sticky)
-            top |= 1;
-        result = std::ldexp(static_cast<double>(top), shift);
-    }
-    return magnitude.sign_ < 0 ? -result : result;
-}
-
 int CompareOnEdge(const Crossing& x, const Crossing& y)
 {
-    const CsgInt128 dx = x.lowVolume_ - x.highVolume_;
-    const CsgInt128 dy = y.lowVolume_ - y.highVolume_;
+    const CsgExactVolume& dx = x.difference_;
+    const CsgExactVolume& dy = y.difference_;
     // t_x - t_y = (Lx * Dy - Ly * Dx) / (Dx * Dy)
-    const int numeratorSign = CsgSignOfProductDifference<CsgInt128>(x.lowVolume_, dy, y.lowVolume_, dx);
-    const int denominatorSign = CsgSign(dx) * CsgSign(dy);
+    const int numeratorSign = CsgExpansionProductDifferenceSign(
+        x.lowVolume_.count_, x.lowVolume_.terms_, dy.count_, dy.terms_, y.lowVolume_.count_, y.lowVolume_.terms_,
+        dx.count_, dx.terms_);
+    const int denominatorSign = dx.Sign() * dy.Sign();
     if (numeratorSign != 0)
         return numeratorSign * denominatorSign;
 
     // Tie: compare delta * (Nx / Dx - Ny / Dy), component by component.
     const int shift = x.key_.edgeInSecond_ ? 1 : -1;
-    const CsgInt128 components[3][2] = {
-        {x.normal_.x_, y.normal_.x_}, {x.normal_.y_, y.normal_.y_}, {x.normal_.z_, y.normal_.z_}};
+    const CsgExactMinor* components[3][2] = {
+        {&x.normal_.x_, &y.normal_.x_}, {&x.normal_.y_, &y.normal_.y_}, {&x.normal_.z_, &y.normal_.z_}};
     for (const auto& component : components)
     {
-        const int differenceSign = CsgSignOfProductDifference<CsgInt128>(component[0], dy, component[1], dx);
+        const int differenceSign = CsgExpansionProductDifferenceSign(component[0]->count_, component[0]->terms_,
+            dy.count_, dy.terms_, component[1]->count_, component[1]->terms_, dx.count_, dx.terms_);
         if (differenceSign != 0)
             return differenceSign * denominatorSign * shift;
     }
@@ -412,13 +363,13 @@ int Corefinement::CrossingId(
     if (existed)
         return idRef;
 
-    const CsgInt128 lowVolume = CsgExact::Volume(t0, t1, t2, edges.grid_[key.low_]);
-    const CsgInt128 highVolume = CsgExact::Volume(t0, t1, t2, edges.grid_[key.high_]);
+    const CsgNormal normal = CsgExact::Normal(t0, t1, t2);
+    const CsgExactVolume lowVolume = CsgExact::Dot(normal, t0, edges.grid_[key.low_]);
+    const CsgExactVolume difference = CsgExact::Dot(normal, edges.grid_[key.high_], edges.grid_[key.low_]);
     double t = 0.5;
-    if (lowVolume != highVolume)
+    if (difference.Sign() != 0)
     {
-        const double low = ToDouble(lowVolume);
-        t = low / (low - ToDouble(highVolume));
+        t = lowVolume.Approximate() / difference.Approximate();
         t = std::isnan(t) ? 0.5 : (t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t));
     }
     const Vector3& lowPosition = edges.loops_.positions_[key.low_];
@@ -431,8 +382,8 @@ int Corefinement::CrossingId(
     crossing.t_ = t;
     crossing.key_ = key;
     crossing.lowVolume_ = lowVolume;
-    crossing.highVolume_ = highVolume;
-    crossing.normal_ = CsgExact::Normal(t0, t1, t2);
+    crossing.difference_ = difference;
+    crossing.normal_ = normal;
 
     bool listExisted = false;
     EdgeList& list = edgeCrossings_[key.edgeInSecond_ ? 1 : 0].FindOrAdd(

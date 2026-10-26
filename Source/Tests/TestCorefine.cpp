@@ -5,6 +5,7 @@
 #include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgSolid.h"
 
+#include "TestExactReference.h"
 #include "TestGeometry.h"
 
 #include <Urho3D/Math/Quaternion.h>
@@ -18,6 +19,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <limits>
+#include <random>
 #include <tuple>
 #include <utility>
 
@@ -421,14 +423,28 @@ TEST_CASE("Corefine survives a NaN corner", "[corefine]")
 namespace
 {
 
-Crossing MakeCrossing(int low, int high, bool edgeInSecond, const CsgInt128& normalX = 0,
-    const CsgInt128& normalY = 0, const CsgInt128& normalZ = 0)
+/// Convert a 128 bit test number to an expansion that is safe to sum. The number must be below 2^75 for N = 24.
+template <int N> CsgExactValue<N> MakeValue(const CsgTest::Int128& value)
+{
+    const ea::vector<float> terms = CsgTest::FromInt128(value);
+    CsgExactValue<N> result;
+    REQUIRE(static_cast<int>(terms.size()) <= N);
+    for (size_t i = 0; i < terms.size(); ++i)
+        result.terms_[i] = static_cast<CsgReal>(terms[i]);
+    // The chunks of the conversion are not strongly nonoverlapping. The compression makes them so.
+    result.count_ = CsgCompress(static_cast<int>(terms.size()), result.terms_);
+    return result;
+}
+
+Crossing MakeCrossing(const CsgTest::Int128& low, const CsgTest::Int128& high, bool edgeInSecond,
+    const CsgTest::Int128& normalX = CsgTest::Int128(int64_t{0}), const CsgTest::Int128& normalY = CsgTest::Int128(int64_t{0}),
+    const CsgTest::Int128& normalZ = CsgTest::Int128(int64_t{0}))
 {
     Crossing crossing;
-    crossing.lowVolume_ = low;
-    crossing.highVolume_ = high;
+    crossing.lowVolume_ = MakeValue<24>(low);
+    crossing.difference_ = MakeValue<24>(low - high);
     crossing.key_.edgeInSecond_ = edgeInSecond;
-    crossing.normal_ = {normalX, normalY, normalZ};
+    crossing.normal_ = {MakeValue<4>(normalX), MakeValue<4>(normalY), MakeValue<4>(normalZ)};
     return crossing;
 }
 
@@ -494,39 +510,98 @@ TEST_CASE("Corefine CompareOnEdge orders crossings exactly", "[corefine]")
     }
     SECTION("Volumes beyond 64 bits")
     {
-        const CsgInt128 big = CsgMul64<CsgInt128>(int64_t{1} << 50, int64_t{1} << 50); // 2^100
-        Crossing x;
-        x.lowVolume_ = big;
-        x.highVolume_ = CsgInt128(0) - big;
+        const CsgTest::Int128 big = CsgTest::Mul64<CsgTest::Int128>(int64_t{1} << 35, int64_t{1} << 35); // 2^70
+        const CsgTest::Int128 zero = CsgTest::Int128(int64_t{0});
         Crossing y = MakeCrossing(1, -1, false);
         // Both parameters are 0.5 exactly.
-        CHECK(CompareOnEdge(x, y) == 0);
-        // A difference of one part in 2^101 needs the full precision of the products.
-        x.lowVolume_ = big + CsgInt128(1);
+        CHECK(CompareOnEdge(MakeCrossing(big, zero - big, false), y) == 0);
+        // A difference of one part in 2^71 needs the full precision of the products.
+        const CsgTest::Int128 more = big + CsgTest::Int128(int64_t{1});
+        const Crossing x = MakeCrossing(more, zero - big, false);
         CHECK(CompareOnEdge(x, y) == 1);
         CHECK(CompareOnEdge(y, x) == -1);
     }
 }
 
-TEST_CASE("Corefine converts a portable 128 bit number with one rounding", "[corefine]")
+TEST_CASE("Crossing order matches the int128 oracle", "[corefine]")
 {
-    // 2^117 + 2^64 + 1: the part below the rounding position is more than half of one step, so it rounds up.
-    // Rounding in three steps would give 2^117.
-    const CsgInt128Portable value = CsgInt128Portable::FromParts(1, (int64_t{1} << 53) + 1);
-    CHECK(CsgInt128PortableToDouble(value) == std::ldexp(1.0, 117) + std::ldexp(1.0, 65));
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable() - value) == -(std::ldexp(1.0, 117) + std::ldexp(1.0, 65)));
-    // The exact half rounds to even.
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable::FromParts(0, (int64_t{1} << 53) + 1)) == std::ldexp(1.0, 117));
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable::FromParts(0, (int64_t{1} << 53) + 3))
-        == std::ldexp(1.0, 117) + std::ldexp(1.0, 66));
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable()) == 0.0);
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable(-5)) == -5.0);
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable(int64_t{1} << 62)) == std::ldexp(1.0, 62));
-    // The most negative number.
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable::FromParts(0, INT64_MIN)) == -std::ldexp(1.0, 127));
-    // The highest bit of the high limb.
-    CHECK(CsgInt128PortableToDouble(CsgInt128Portable::FromParts(~uint64_t{0}, INT64_MAX))
-        == std::ldexp(1.0, 127));
+    using CsgTest::Int128;
+    std::mt19937_64 random(2468);
+    const auto uniform = [&random](int bits)
+    {
+        std::uniform_int_distribution<int64_t> distribution(-(int64_t{1} << bits), int64_t{1} << bits);
+        return distribution(random);
+    };
+    // Random value below 2^75: the product of two numbers up to 2^37.
+    const auto bigValue = [&uniform](int bits) { return CsgTest::Mul64<Int128>(uniform(bits), uniform(bits)); };
+
+    int zeros = 0;
+    int nonzeros = 0;
+    for (int i = 0; i < 20000; ++i)
+    {
+        const bool edgeInSecond = (random() & 1) != 0;
+        Int128 lowX, highX, lowY, highY;
+        Int128 normalX[3], normalY[3];
+        switch (i % 4)
+        {
+        case 0:
+            // Random values at full range.
+            lowX = bigValue(37);
+            highX = bigValue(37);
+            lowY = bigValue(37);
+            highY = bigValue(37);
+            for (int k = 0; k < 3; ++k)
+            {
+                normalX[k] = CsgTest::Mul64<Int128>(uniform(24), uniform(24));
+                normalY[k] = CsgTest::Mul64<Int128>(uniform(24), uniform(24));
+            }
+            break;
+        case 1:
+            // Tiny values: many zero volumes, zero differences and equal ratios.
+            lowX = Int128(uniform(2));
+            highX = Int128(uniform(2));
+            lowY = Int128(uniform(2));
+            highY = Int128(uniform(2));
+            for (int k = 0; k < 3; ++k)
+            {
+                normalX[k] = Int128(uniform(2));
+                normalY[k] = Int128(uniform(2));
+            }
+            break;
+        default:
+        {
+            // Equal ratios: both crossings are multiples of one base crossing. The normals may tie too.
+            const int64_t baseLow = uniform(28);
+            const int64_t baseHigh = uniform(28);
+            const int64_t factorX = uniform(20);
+            const int64_t factorY = uniform(20);
+            lowX = CsgTest::Mul64<Int128>(baseLow, factorX);
+            highX = CsgTest::Mul64<Int128>(baseHigh, factorX);
+            lowY = CsgTest::Mul64<Int128>(baseLow, factorY);
+            highY = CsgTest::Mul64<Int128>(baseHigh, factorY);
+            for (int k = 0; k < 3; ++k)
+            {
+                const int64_t baseNormal = i % 4 == 2 ? uniform(3) : uniform(24);
+                normalX[k] = CsgTest::Mul64<Int128>(baseNormal, factorX);
+                normalY[k] = CsgTest::Mul64<Int128>(baseNormal, factorY);
+                // Sometimes one component differs so that the tie-break moves to the next component.
+                if ((random() % 8) == 0)
+                    normalY[k] = normalY[k] + Int128(int64_t{1});
+            }
+            break;
+        }
+        }
+        const Crossing x = MakeCrossing(lowX, highX, edgeInSecond, normalX[0], normalX[1], normalX[2]);
+        const Crossing y = MakeCrossing(lowY, highY, edgeInSecond, normalY[0], normalY[1], normalY[2]);
+        CsgTest::ReferenceCrossing referenceX{lowX, highX, {normalX[0], normalX[1], normalX[2]}, edgeInSecond};
+        CsgTest::ReferenceCrossing referenceY{lowY, highY, {normalY[0], normalY[1], normalY[2]}, edgeInSecond};
+        const int expected = CsgTest::ReferenceCompareOnEdge(referenceX, referenceY);
+        REQUIRE(CompareOnEdge(x, y) == expected);
+        REQUIRE(CompareOnEdge(y, x) == CsgTest::ReferenceCompareOnEdge(referenceY, referenceX));
+        (expected == 0 ? zeros : nonzeros)++;
+    }
+    CHECK(zeros > 500);
+    CHECK(nonzeros > 5000);
 }
 
 TEST_CASE("Corefine sorts more than 16 crossings of one edge", "[corefine]")

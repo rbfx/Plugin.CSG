@@ -35,11 +35,12 @@ struct Crossing
     /// Parameter along the edge from its lower to its higher welded id.
     double t_{};
     CsgCrossingKey key_;
-    /// Exact plane volumes of the edge ends against the crossed triangle. They order the crossings on one edge.
-    CsgInt128 lowVolume_{};
-    CsgInt128 highVolume_{};
+    /// Exact plane volume of the lower edge end against the crossed triangle. It orders the crossings on one edge.
+    CsgExactVolume lowVolume_{};
+    /// The value lowVolume - highVolume, which equals normal . (low - high). It orders the crossings on one edge.
+    CsgExactVolume difference_{};
     /// Normal of the crossed triangle. It breaks ties between crossings on one edge.
-    CsgNormal<CsgInt128> normal_{};
+    CsgNormal normal_{};
 };
 
 /// Order two crossings of one edge by their parameter from its lower to its higher end.
@@ -435,10 +436,6 @@ Vector3 PointPosition(const Corefinement& core, int id);
 /// Return false and leave the output unchanged if an id does not belong to the face. The caller then keeps the
 /// triangle whole, as for a Failed split.
 bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const int* ids, int count, CsgPolygon& output);
-
-/// Convert a portable 128 bit number to double with one correct rounding (round to nearest even).
-/// The native 128 bit type has its own conversion. This function exists in both modes for the tests.
-double CsgInt128PortableToDouble(const CsgInt128Portable& value);
 
 /// Curve segment of the crossing step for the tests. The ends are crossing indices (global id minus the base).
 struct CsgCorefineTestSegment

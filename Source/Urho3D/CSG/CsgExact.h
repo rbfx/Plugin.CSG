@@ -330,18 +330,16 @@ struct CsgGridPoint
     friend bool operator!=(const CsgGridPoint& a, const CsgGridPoint& b) { return !(a == b); }
 };
 
-/// Exact 128 bit vector.
-template <typename Int>
+/// Exact vector of three minors. Each component has a magnitude below 2^50.
 struct CsgNormal
 {
-    Int x_;
-    Int y_;
-    Int z_;
+    CsgExactMinor x_;
+    CsgExactMinor y_;
+    CsgExactMinor z_;
 };
 
 /// Exact orientation tests with the symbolic displacement of the second operand.
-/// The functions Orient, Crosses and PassesInside use float expansions.
-/// The functions with the suffix T work with the 128 bit type Int.
+/// The functions use float expansions.
 class PLUGIN_RBFXCSG_API CsgExact
 {
 public:
@@ -356,10 +354,14 @@ public:
     static CsgExactMinor MinorExact(CsgReal a, CsgReal b, CsgReal c, CsgReal d);
 
     /// Unperturbed (d - a) . ((b - a) x (c - a)), exactly.
-    static CsgInt128 Volume(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d);
+    static CsgExactVolume Volume(
+        const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d);
 
     /// (b - a) x (c - a), exactly.
-    static CsgNormal<CsgInt128> Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c);
+    static CsgNormal Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c);
+
+    /// Exact n . (to - from).
+    static CsgExactVolume Dot(const CsgNormal& n, const CsgGridPoint& from, const CsgGridPoint& to);
 
     /// Whether the edge (e0, e1) crosses the interior of the triangle (t0, t1, t2) of the other operand.
     /// The output e1Above tells whether e1 lies on the side to which the triangle normal points.
@@ -370,12 +372,6 @@ public:
     /// Whether the line through an edge that crosses the plane of a triangle passes inside that triangle.
     static bool PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0,
         const CsgGridPoint& t1, const CsgGridPoint& t2, bool edgeInSecond);
-
-    template <typename Int>
-    static Int VolumeT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d);
-
-    template <typename Int>
-    static CsgNormal<Int> NormalT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c);
 };
 
 } // namespace Urho3D

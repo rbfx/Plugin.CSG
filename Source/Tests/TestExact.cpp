@@ -240,24 +240,20 @@ TEST_CASE("Orient on tetrahedra", "[exact]")
     }
 }
 
-TEMPLATE_LIST_TEST_CASE("Volume and normal on tetrahedra", "[exact]", CsgTestTypes)
+TEST_CASE("Volume and normal on tetrahedra", "[exact]")
 {
-    using Int = TestType;
-
     const CsgGridPoint a = P(0, 0, 0);
     const CsgGridPoint b = P(Unit, 0, 0);
     const CsgGridPoint c = P(0, Unit, 0);
     const CsgGridPoint d = P(0, 0, Unit);
 
-    {
-        const CsgNormal<Int> normal = CsgExact::NormalT<Int>(a, b, c);
-        REQUIRE(normal.x_ == Int(0));
-        REQUIRE(normal.y_ == Int(0));
-        REQUIRE(normal.z_ == CsgMul64<Int>(Unit, Unit));
-        REQUIRE(CsgExact::VolumeT<Int>(a, b, c, d) == CsgMul(CsgMul64<Int>(Unit, Unit), Unit));
-        REQUIRE(CsgExact::VolumeT<Int>(a, c, b, d) == -CsgMul(CsgMul64<Int>(Unit, Unit), Unit));
-        REQUIRE(CsgExact::VolumeT<Int>(a, b, c, P(5, 5, 0)) == Int(0));
-    }
+    const CsgNormal normal = CsgExact::Normal(a, b, c);
+    REQUIRE(normal.x_.Sign() == 0);
+    REQUIRE(normal.y_.Sign() == 0);
+    REQUIRE(normal.z_.Approximate() == static_cast<double>(Unit) * Unit);
+    REQUIRE(CsgExact::Volume(a, b, c, d).Approximate() == static_cast<double>(Unit) * Unit * Unit);
+    REQUIRE(CsgExact::Volume(a, c, b, d).Approximate() == -static_cast<double>(Unit) * Unit * Unit);
+    REQUIRE(CsgExact::Volume(a, b, c, P(5, 5, 0)).Sign() == 0);
 }
 
 TEST_CASE("Orient perturbation matches the numeric displacement", "[exact]")
@@ -321,38 +317,6 @@ TEST_CASE("Orient perturbation matches the numeric displacement", "[exact]")
     REQUIRE(nonzero > 1000);
 }
 
-TEST_CASE("Volume and normal results are equal for both 128 bit types", "[exact]")
-{
-#if CSG_HAS_NATIVE_INT128
-    std::mt19937_64 random(4242);
-    // Cover small values with many degenerate cases and values near the limit of 2^23.
-    for (const int64_t range : {int64_t(3), int64_t(1) << 20, (int64_t(1) << 23) - 1})
-    {
-        std::uniform_int_distribution<int64_t> coordinate(-range, range);
-        for (int i = 0; i < 2000; ++i)
-        {
-            const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
-            const CsgGridPoint b = P(coordinate(random), coordinate(random), coordinate(random));
-            const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
-            const CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
-            const int second = static_cast<int>(random() % 16);
-            // The volume has no filter. A nonzero volume gives the sign of Orient for every mask.
-            const int volumeSign = CsgSign(CsgExact::VolumeT<CsgCompilerInt128>(a, b, c, d));
-            if (volumeSign != 0)
-                REQUIRE(CsgExact::Orient(a, b, c, d, second) == volumeSign);
-            REQUIRE(CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d)) == volumeSign);
-            REQUIRE(ToNative(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d))
-                == CsgExact::VolumeT<CsgCompilerInt128>(a, b, c, d));
-            const CsgNormal<CsgInt128Portable> np = CsgExact::NormalT<CsgInt128Portable>(a, b, c);
-            const CsgNormal<CsgCompilerInt128> nn = CsgExact::NormalT<CsgCompilerInt128>(a, b, c);
-            REQUIRE(ToNative(np.x_) == nn.x_);
-            REQUIRE(ToNative(np.y_) == nn.y_);
-            REQUIRE(ToNative(np.z_) == nn.z_);
-        }
-    }
-#endif
-}
-
 TEST_CASE("Reference oracle matches the library Orient", "[exact]")
 {
     std::mt19937_64 random(8086);
@@ -368,7 +332,7 @@ TEST_CASE("Reference oracle matches the library Orient", "[exact]")
             const CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
             for (int second = 0; second < 16; ++second)
                 REQUIRE(CsgExact::Orient(a, b, c, d, second) == CsgTest::ReferenceOrient(a, b, c, d, second));
-            REQUIRE(CsgSign(CsgExact::Volume(a, b, c, d)) == CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d)));
+            REQUIRE(CsgExact::Volume(a, b, c, d).Sign() == CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d)));
             // The perturbation never changes a nonzero volume.
             const int volumeSign = CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d));
             if (volumeSign != 0)
@@ -783,6 +747,30 @@ TEST_CASE("Expansion scale, sum and compress are exact", "[exact]")
     }
 }
 
+TEST_CASE("Volume and normal match the int128 oracle", "[exact]")
+{
+    std::mt19937_64 random(8087);
+    // Small values give many degenerate cases. Large values stay inside the grid range of 2^23.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, (int64_t(1) << 23) - 1})
+    {
+        std::uniform_int_distribution<int64_t> coordinate(-range, range);
+        for (int i = 0; i < 3000; ++i)
+        {
+            const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint b = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgGridPoint d = P(coordinate(random), coordinate(random), coordinate(random));
+            const CsgExactVolume volume = CsgExact::Volume(a, b, c, d);
+            REQUIRE(ExpansionValue(volume.terms_, volume.count_) == CsgTest::ReferenceVolume(a, b, c, d));
+            const CsgNormal normal = CsgExact::Normal(a, b, c);
+            const CsgTest::ReferenceNormal expected = CsgTest::ReferenceNormalOf(a, b, c);
+            REQUIRE(ExpansionValue(normal.x_.terms_, normal.x_.count_) == expected.x_);
+            REQUIRE(ExpansionValue(normal.y_.terms_, normal.y_.count_) == expected.y_);
+            REQUIRE(ExpansionValue(normal.z_.terms_, normal.z_.count_) == expected.z_);
+        }
+    }
+}
+
 TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
 {
     const Int128 limit = Power2(75);
@@ -905,10 +893,10 @@ TEST_CASE("Exact filter", "[exact]")
         REQUIRE((runFilter(a, b, c, d, det) & 1) == 0);
         REQUIRE(CsgExact::Orient(a, b, c, d, 0) == 0);
         // The volume has no filter. It is exactly zero.
-        REQUIRE(CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, d)) == 0);
+        REQUIRE(CsgExact::Volume(a, b, c, d).Sign() == 0);
         // One grid unit above the plane: the exact sign is nonzero.
         const CsgGridPoint above = P(d.x_, d.y_, d.z_ + 1);
-        const int exactSign = CsgSign(CsgExact::VolumeT<CsgInt128Portable>(a, b, c, above));
+        const int exactSign = CsgExact::Volume(a, b, c, above).Sign();
         REQUIRE(exactSign != 0);
         REQUIRE(CsgExact::Orient(a, b, c, above, 0) == exactSign);
     }

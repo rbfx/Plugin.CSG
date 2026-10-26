@@ -38,22 +38,6 @@ void AddWeighted(CsgReal* accumulator, int& count, const CsgExactMinor& minor, i
 
 } // namespace
 
-template <typename Int>
-CsgNormal<Int> CsgExact::NormalT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
-{
-    const int64_t ux = b.x_ - a.x_, uy = b.y_ - a.y_, uz = b.z_ - a.z_;
-    const int64_t vx = c.x_ - a.x_, vy = c.y_ - a.y_, vz = c.z_ - a.z_;
-    return {CsgMul64<Int>(uy, vz) - CsgMul64<Int>(uz, vy), CsgMul64<Int>(uz, vx) - CsgMul64<Int>(ux, vz),
-        CsgMul64<Int>(ux, vy) - CsgMul64<Int>(uy, vx)};
-}
-
-template <typename Int>
-Int CsgExact::VolumeT(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d)
-{
-    const CsgNormal<Int> n = NormalT<Int>(a, b, c);
-    return CsgMul(n.x_, d.x_ - a.x_) + CsgMul(n.y_, d.y_ - a.y_) + CsgMul(n.z_, d.z_ - a.z_);
-}
-
 int CsgInternal::Filter(const CsgFloat4& ux, const CsgFloat4& uy, const CsgFloat4& uz, const CsgFloat4& vx,
     const CsgFloat4& vy, const CsgFloat4& vz, const CsgFloat4& wx, const CsgFloat4& wy, const CsgFloat4& wz,
     CsgFloat4& det)
@@ -166,14 +150,45 @@ int CsgExact::Orient(
     return 0;
 }
 
-CsgInt128 CsgExact::Volume(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d)
+CsgNormal CsgExact::Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
 {
-    return VolumeT<CsgInt128>(a, b, c, d);
+    const CsgReal ux = static_cast<CsgReal>(static_cast<int64_t>(b.x_) - a.x_);
+    const CsgReal uy = static_cast<CsgReal>(static_cast<int64_t>(b.y_) - a.y_);
+    const CsgReal uz = static_cast<CsgReal>(static_cast<int64_t>(b.z_) - a.z_);
+    const CsgReal vx = static_cast<CsgReal>(static_cast<int64_t>(c.x_) - a.x_);
+    const CsgReal vy = static_cast<CsgReal>(static_cast<int64_t>(c.y_) - a.y_);
+    const CsgReal vz = static_cast<CsgReal>(static_cast<int64_t>(c.z_) - a.z_);
+    return {MinorExact(uy, vz, uz, vy), MinorExact(uz, vx, ux, vz), MinorExact(ux, vy, uy, vx)};
 }
 
-CsgNormal<CsgInt128> CsgExact::Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
+CsgExactVolume CsgExact::Dot(const CsgNormal& n, const CsgGridPoint& from, const CsgGridPoint& to)
 {
-    return NormalT<CsgInt128>(a, b, c);
+    const CsgReal scales[3] = {static_cast<CsgReal>(static_cast<int64_t>(to.x_) - from.x_),
+        static_cast<CsgReal>(static_cast<int64_t>(to.y_) - from.y_),
+        static_cast<CsgReal>(static_cast<int64_t>(to.z_) - from.z_)};
+    const CsgExactMinor* components[3] = {&n.x_, &n.y_, &n.z_};
+
+    // Each minor has at most 4 terms. Each scaled minor has at most 8 terms. The sums have 16 and 24 terms.
+    CsgReal scaled[3][8];
+    int scaledCount[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        scaledCount[i] = CsgScaleExpansion(components[i]->count_, components[i]->terms_, scales[i], scaled[i]);
+        scaledCount[i] = CsgCompress(scaledCount[i], scaled[i]);
+    }
+    CsgReal partial[16];
+    int partialCount = CsgExpansionSum(scaledCount[0], scaled[0], scaledCount[1], scaled[1], partial);
+    partialCount = CsgCompress(partialCount, partial);
+    CsgExactVolume result;
+    result.count_ = CsgExpansionSum(partialCount, partial, scaledCount[2], scaled[2], result.terms_);
+    result.count_ = CsgCompress(result.count_, result.terms_);
+    return result;
+}
+
+CsgExactVolume CsgExact::Volume(
+    const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d)
+{
+    return Dot(Normal(a, b, c), a, d);
 }
 
 bool CsgExact::Crosses(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1,
@@ -216,15 +231,5 @@ bool CsgExact::PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, cons
     const int s2 = (decided & 4) != 0 ? SignOfFloat(det[2]) : Orient(e0, e1, t2, t0, linesMask);
     return s2 == s0;
 }
-
-#define CSG_INSTANTIATE_EXACT(INT) \
-    template INT CsgExact::VolumeT<INT>( \
-        const CsgGridPoint&, const CsgGridPoint&, const CsgGridPoint&, const CsgGridPoint&); \
-    template CsgNormal<INT> CsgExact::NormalT<INT>(const CsgGridPoint&, const CsgGridPoint&, const CsgGridPoint&)
-
-CSG_INSTANTIATE_EXACT(CsgInt128Portable);
-#if CSG_HAS_NATIVE_INT128
-CSG_INSTANTIATE_EXACT(CsgInt128);
-#endif
 
 } // namespace Urho3D
