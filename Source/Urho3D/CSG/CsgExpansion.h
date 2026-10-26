@@ -53,10 +53,20 @@ template <int N> struct CsgExactValue
     double Approximate() const { return CsgExpansionApproximate(count_, terms_); }
 };
 
-/// Expansion for the values of a 2x2 minor. The magnitude of the value is below 2^50.
+/// Expansion for the values of a 2x2 minor: two products of two terms each.
+/// The magnitude bound is CsgExactMinorBits in CsgExact.h.
 using CsgExactMinor = CsgExactValue<4>;
-/// Expansion for the values of a 3x3 determinant. The magnitude of the value is below 2^75.
+/// Expansion for the values of a 3x3 determinant: three minors, each multiplied by one term.
+/// The magnitude bound is CsgExactVolumeBits in CsgExact.h.
 using CsgExactVolume = CsgExactValue<24>;
+
+#if defined(CSG_EXACT_USE_DOUBLE)
+/// The inputs of CsgExpansionProductDifferenceSign must have a magnitude below 2^CsgProductDifferenceInputBits.
+constexpr int CsgProductDifferenceInputBits = 123;
+#else
+/// The inputs of CsgExpansionProductDifferenceSign must have a magnitude below 2^CsgProductDifferenceInputBits.
+constexpr int CsgProductDifferenceInputBits = 75;
+#endif
 
 /// Exact sum of two numbers: a + b = result + error. The result is the rounded sum.
 PLUGIN_RBFXCSG_API CsgReal CsgTwoSum(CsgReal a, CsgReal b, CsgReal& error);
@@ -92,8 +102,9 @@ PLUGIN_RBFXCSG_API int CsgExpansionSum(int countE, const CsgReal* e, int countF,
 PLUGIN_RBFXCSG_API int CsgCompress(int count, CsgReal* e);
 
 /// Return the sign of e * f - g * h. The inputs are expansions.
-/// The magnitude of each input must be below 2^75. Each term must be a multiple of an integer power of two
-/// that is not smaller than 1. Each expansion has at most 24 terms.
+/// The magnitude of each input must be below 2^CsgProductDifferenceInputBits.
+/// Each term must be a multiple of an integer power of two that is not smaller than 1.
+/// Each expansion has at most 24 terms.
 PLUGIN_RBFXCSG_API int CsgExpansionProductDifferenceSign(
     int ce, const CsgReal* e, int cf, const CsgReal* f, int cg, const CsgReal* g, int ch, const CsgReal* h);
 

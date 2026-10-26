@@ -636,6 +636,7 @@ TEST_CASE("Triangulated union of boxes has the winding of the face on all triang
 // The boxes are rotated, so the strips are not aligned with an axis and the cross products do not cancel.
 // The grid step is 2^-10 units. The exact tests snap the corners of rotated boxes one by one.
 // The snapped corners do not stay coplanar. This gives wrong unions and ribbons.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units and the test passes. The float mode still fails.
 TEST_CASE("known limit: triangulated union of boxes far from the origin has no ribbon",
     "[triangulate][boolean][!mayfail]")
 {

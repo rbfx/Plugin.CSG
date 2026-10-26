@@ -63,7 +63,7 @@ CsgGridPoint P(int64_t x, int64_t y, int64_t z)
     return point;
 }
 
-constexpr int64_t Unit = 1 << 10;
+constexpr int64_t Unit = static_cast<int64_t>(CsgGridScale);
 
 /// Crosses with the oracle orientation. The structure is the same as in the library.
 bool ReferencePassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0,
@@ -321,8 +321,8 @@ TEST_CASE("Orient perturbation matches the numeric displacement", "[exact]")
 TEST_CASE("Reference oracle matches the library Orient", "[exact]")
 {
     std::mt19937_64 random(8086);
-    // Small values give many degenerate cases. Large values stay inside the grid range of 2^23.
-    for (const int64_t range : {int64_t(3), int64_t(1) << 10, (int64_t(1) << 23) - 1})
+    // Small values give many degenerate cases. Large values stay inside the range of the grid.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, CsgGridIntegerLimit - 1})
     {
         std::uniform_int_distribution<int64_t> coordinate(-range, range);
         for (int i = 0; i < 3000; ++i)
@@ -345,7 +345,7 @@ TEST_CASE("Reference oracle matches the library Orient", "[exact]")
 TEST_CASE("Orient matches the int128 oracle", "[exact]")
 {
     std::mt19937_64 random(20240601);
-    const int64_t limit = (int64_t(1) << 23) - 1;
+    const int64_t limit = CsgGridIntegerLimit - 1;
     for (const int64_t range : {int64_t(3), int64_t(1) << 10, limit})
     {
         std::uniform_int_distribution<int64_t> coordinate(-range, range);
@@ -456,7 +456,7 @@ TEST_CASE("Orient matches the int128 oracle", "[exact]")
 TEST_CASE("Orient stress test against the int128 oracle", "[exact][stress]")
 {
     std::mt19937_64 random(987654321);
-    const int64_t range = (int64_t(1) << 23) - 1;
+    const int64_t range = CsgGridIntegerLimit - 1;
     std::uniform_int_distribution<int64_t> coordinate(-range, range);
     std::uniform_int_distribution<int> mask(0, 15);
     std::uniform_int_distribution<int> factor(-2, 3);
@@ -533,7 +533,7 @@ TEST_CASE("Orient stress test against the int128 oracle", "[exact][stress]")
 TEST_CASE("Crosses and PassesInside match the int128 oracle", "[exact]")
 {
     std::mt19937_64 random(777);
-    const int64_t limit = (int64_t(1) << 23) - 1;
+    const int64_t limit = CsgGridIntegerLimit - 1;
     int crossings = 0;
     for (const int64_t range : {int64_t(3), int64_t(1) << 10, limit})
     {
@@ -937,8 +937,8 @@ TEST_CASE("Expansion scale, sum and compress are exact", "[exact]")
 TEST_CASE("Volume and normal match the int128 oracle", "[exact]")
 {
     std::mt19937_64 random(8087);
-    // Small values give many degenerate cases. Large values stay inside the grid range of 2^23.
-    for (const int64_t range : {int64_t(3), int64_t(1) << 10, (int64_t(1) << 23) - 1})
+    // Small values give many degenerate cases. Large values stay inside the range of the grid.
+    for (const int64_t range : {int64_t(3), int64_t(1) << 10, CsgGridIntegerLimit - 1})
     {
         std::uniform_int_distribution<int64_t> coordinate(-range, range);
         for (int i = 0; i < 3000; ++i)
@@ -960,7 +960,9 @@ TEST_CASE("Volume and normal match the int128 oracle", "[exact]")
 
 TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
 {
-    const Int128 limit = Power2(75);
+    // The inputs use the full range of the function: 2^75 in float mode and 2^123 in double mode.
+    constexpr int InputBits = CsgProductDifferenceInputBits;
+    const Int128 limit = Power2(InputBits);
     const Int128 zero = MakeInt128(0);
     const Int128 one = MakeInt128(1);
 
@@ -982,8 +984,8 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
     SECTION("Random values")
     {
         for (int i = 0; i < 20000; ++i)
-            check(RandomInt128(random, 75), RandomInt128(random, 75), RandomInt128(random, 75),
-                RandomInt128(random, 75));
+            check(RandomInt128(random, InputBits), RandomInt128(random, InputBits), RandomInt128(random, InputBits),
+                RandomInt128(random, InputBits));
     }
 
     SECTION("Equal products")
@@ -1005,7 +1007,7 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
         for (int i = 0; i < 5000; ++i)
         {
             // n * n - (n - 1) * (n + 1) = 1
-            Int128 n = RandomInt128(random, 74);
+            Int128 n = RandomInt128(random, InputBits - 1);
             if (n < zero)
                 n = zero - n;
             check(n, n, n - one, n + one);
@@ -1022,8 +1024,8 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
     {
         for (int i = 0; i < 2000; ++i)
         {
-            const Int128 a = RandomInt128(random, 75);
-            const Int128 b = RandomInt128(random, 75);
+            const Int128 a = RandomInt128(random, InputBits);
+            const Int128 b = RandomInt128(random, InputBits);
             check(zero, a, b, zero);
             check(zero, a, zero, b);
             check(a, b, zero, a);
@@ -1032,10 +1034,11 @@ TEST_CASE("Expansion product difference sign matches the oracle", "[exact]")
         }
     }
 
-    SECTION("Values near 2^75")
+    SECTION("Values near the input limit")
     {
         const Int128 values[] = {limit - one, zero - (limit - one), limit - MakeInt128(2),
-            zero - (limit - MakeInt128(2)), Power2(74), zero - Power2(74), Power2(74) + one, Power2(50), one,
+            zero - (limit - MakeInt128(2)), Power2(InputBits - 1), zero - Power2(InputBits - 1),
+            Power2(InputBits - 1) + one, Power2(50), one,
             zero - one};
         for (const Int128& a : values)
             for (const Int128& b : values)
@@ -1100,7 +1103,7 @@ TEST_CASE("Exact filter", "[exact]")
     SECTION("Decided lanes have the sign of the reference")
     {
         std::mt19937_64 random(2024);
-        const int64_t limit = (int64_t(1) << 23) - 1;
+        const int64_t limit = CsgGridIntegerLimit - 1;
         std::uniform_int_distribution<int64_t> coordinate(-limit, limit);
         std::uniform_int_distribution<int> factor(-1, 1);
         std::uniform_int_distribution<int> axisPick(0, 2);
@@ -1200,10 +1203,11 @@ TEST_CASE("Grid point snapping", "[exact]")
 
     REQUIRE(from(0.5f, -0.5f, 0.0f) == P(Unit / 2, -Unit / 2, 0));
     REQUIRE(from(1.0f, -1.0f, 2.0f) == P(Unit, -Unit, 2 * Unit));
-    // 1e-4 * 2^10 = 0.1024 rounds to zero.
-    REQUIRE(from(1e-4f, -1e-4f, 0.0f) == P(0, 0, 0));
+    // 0.1 grid steps round to zero. In float mode this is 1e-4 * 2^10 = 0.1024 steps.
+    const float tenthStep = static_cast<float>(0.1 / CsgGridScale);
+    REQUIRE(from(tenthStep, -tenthStep, 0.0f) == P(0, 0, 0));
     // 8191.99f is the float 8191.990234375 = 8388598 / 1024, so the grid value is exact.
-    REQUIRE(from(8191.99f, -8191.99f, 0.0f) == P(8388598, -8388598, 0));
+    REQUIRE(from(8191.99f, -8191.99f, 0.0f) == P(8388598 * (Unit / 1024), -8388598 * (Unit / 1024), 0));
 
     // A value between two grid points goes to the even one: 0.5, 1.5, 2.5 and -0.5, -1.5 grid units.
     const float step = 1.0f / float(Unit);

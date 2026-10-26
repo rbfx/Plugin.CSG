@@ -29,7 +29,11 @@ constexpr CsgReal Splitter =
     static_cast<CsgReal>(std::uint64_t{1} << ((std::numeric_limits<CsgReal>::digits + 1) / 2)) + CsgReal(1);
 
 /// Scale factor 2^-80. It makes the product of two 2^75 values fit in the range of float.
+/// In double mode the inputs are below 2^123. The scaled product is below 2^166 and the range of double holds it.
+/// The scaled terms are multiples of 2^-80, so no product term is subnormal in either mode.
 constexpr CsgReal InputScale = CsgReal(0x1p-80);
+static_assert(2 * Urho3D::CsgProductDifferenceInputBits - 80 < std::numeric_limits<Urho3D::CsgReal>::max_exponent,
+    "The scaled product must fit in the range of CsgReal.");
 
 /// Exact sum when |a| >= |b|.
 inline CsgReal FastTwoSum(CsgReal a, CsgReal b, CsgReal& error)

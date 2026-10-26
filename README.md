@@ -35,9 +35,11 @@ The engine uses corefinement:
 - A face BVH (binned SAH) finds the face pairs that overlap.
 - A symbolic perturbation (a displacement of the second operand) resolves the degenerate cases, such as a vertex on a face.
 - A SIMD filter (`CsgFloat4`: SSE2, NEON, WASM or scalar) decides most tests. A lane that it cannot decide goes to the exact expansion path.
-- The exact tests work on an integer grid with a scale of 2^-10 (1/1024) units. Grid coordinates are at most 2^23, so differences are at most 2^24 and exact in float.
+- The exact tests work on an integer grid with a scale of 2^-10 (1/1024) units. Grid coordinates are below 2^23, so differences are below 2^24 and exact in float.
 - The coordinate limit is 2^13 (8192) units. The engine logs a warning for an operand coordinate outside this limit. It clamps the coordinate to 8191 units and sets the `outOfRange` flag. The result is not valid in this case.
 - The CMake option `CSG_EXACT_USE_DOUBLE` (default OFF) makes `CsgReal` a double. The library builds with strict float flags: `-ffp-contract=off -fno-fast-math` (GCC, Clang) or `/fp:strict` (MSVC).
+- With `CSG_EXACT_USE_DOUBLE`, the grid step is 2^-26 units. Grid coordinates are 64 bit integers below 2^39, so differences are below 2^40 and exact in double. The coordinate limit stays 8192 units. The grid keeps each float coordinate with an absolute value of 2^-3 or more without a change.
+- The bounds of the exact values follow from the grid (`CsgExact.h`): minors below 2^50 and determinants below 2^75 in float mode, minors below 2^82 and determinants below 2^123 in double mode. The SIMD filter stays on float in both modes. In double mode the conversion of a difference to float can round, and the filter bound covers this error.
 - The result keeps whole faces from the operands and builds new faces only along the curve.
 
 `epsilon` is used for the weld of vertices, for the bounds and for the point queries. An epsilon that is not positive gives the default epsilon.
@@ -47,8 +49,10 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 
 ## Known limits
 
-- The predicates see positions that are snapped to the 1/1024 grid. The output keeps the unsnapped float positions.
+- The predicates see positions that are snapped to the grid (1/1024 units in float mode). The output keeps the unsnapped float positions.
 - Rotated coplanar brushes can lose the coplanar contact. A union of such brushes can be wrong.
+- `CSG_EXACT_USE_DOUBLE` makes this problem smaller. In a sweep of 1028 rotations, 126 samples fail in float mode (31 wrong unions). In double mode 27 samples fail (4 wrong unions).
+- In both modes a union of rotated brushes can keep zero-width spikes in its faces. The next boolean can then leave a hole.
 
 ## Components
 

@@ -379,6 +379,7 @@ void CheckRotatedAssociativity(float angle)
 // Rotation rounds the positions, so the vertices of a coplanar face are on a shared edge only within rounding.
 // The grid step is 2^-10 units. The exact tests snap the corners of rotated brushes one by one.
 // The snapped corners do not stay coplanar. This gives wrong unions, for example at the angle 4.5.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units and the test passes. The float mode still fails.
 TEST_CASE("known limit: rotated result with coplanar faces is associative", "[boolean][!mayfail]")
 {
     for (const float angle : {30.0f, 12.5f, 4.5f, 14.3f})
@@ -464,6 +465,8 @@ void RunSweep(float step, unsigned maxFailures)
 // In the others, the next boolean fails because of zero-width spikes in the faces of the union.
 // The failed samples are about the axis (1, 1, 1) (76), the z axis (25), the y axis (18) and the x axis (7).
 // The test fails if more than 48 samples fail. It is a known limit, so the failure is expected.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units. Then 27 samples fail and 4 unions are wrong.
+// The test passes in double mode.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
 {

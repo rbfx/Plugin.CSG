@@ -14,8 +14,13 @@ namespace Urho3D
 namespace
 {
 
-/// Relative error bound of the floating point filter, with e as the float epsilon.
-/// The published error bound is (7 + 56e) * e times the permanent. The value 8e covers it.
+/// Relative error bound of the floating point filter, with u as the float unit roundoff (half the float epsilon).
+/// The published error bound is (7 + 56u) * u times the permanent, for exact inputs.
+/// In float mode the differences are exact in float. In double mode a difference can be above 2^24.
+/// Then the conversion to float rounds it once, with a relative error of at most u.
+/// The determinant of the rounded inputs then differs by at most about 3u times the permanent.
+/// The sum of both errors is about 10u. The value 8e = 16u covers it.
+/// The float range holds the permanent: it is below 2^123 in double mode.
 constexpr float FilterBound = 8.0f * std::numeric_limits<float>::epsilon();
 
 int SignOfFloat(float value)
@@ -80,8 +85,8 @@ int CsgExact::Orient(
     const int64_t wx = static_cast<int64_t>(d.x_) - a.x_, wy = static_cast<int64_t>(d.y_) - a.y_,
                   wz = static_cast<int64_t>(d.z_) - a.z_;
 
-    // Coordinates up to 2^23 make every difference at most 2^24. Such a difference is exact in float.
-    // Only the products and the sums round in the filter. The filter bound covers these errors.
+    // In float mode every difference is below 2^24 and exact in float. In double mode the conversion can round.
+    // The filter bound covers this rounding and the rounding of the products and the sums.
     const float fux = static_cast<float>(ux), fuy = static_cast<float>(uy), fuz = static_cast<float>(uz);
     const float fvx = static_cast<float>(vx), fvy = static_cast<float>(vy), fvz = static_cast<float>(vz);
     const float fwx = static_cast<float>(wx), fwy = static_cast<float>(wy), fwz = static_cast<float>(wz);

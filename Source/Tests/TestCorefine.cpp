@@ -423,7 +423,8 @@ TEST_CASE("Corefine survives a NaN corner", "[corefine]")
 namespace
 {
 
-/// Convert a 128 bit test number to an expansion that is safe to sum. The number must be below 2^75 for N = 24.
+/// Convert a 128 bit test number to an expansion that is safe to sum.
+/// The number must be below 2^CsgExactVolumeBits for N = 24.
 template <int N> CsgExactValue<N> MakeValue(const CsgTest::Int128& value)
 {
     const ea::vector<float> terms = CsgTest::FromInt128(value);
@@ -532,7 +533,9 @@ TEST_CASE("Crossing order matches the int128 oracle", "[corefine]")
         std::uniform_int_distribution<int64_t> distribution(-(int64_t{1} << bits), int64_t{1} << bits);
         return distribution(random);
     };
-    // Random value below 2^75: the product of two numbers up to 2^37.
+    // Random value below the volume bound: the product of two random numbers.
+    constexpr int VolumeFactorBits = (CsgExactVolumeBits - 1) / 2;
+    constexpr int MinorFactorBits = (CsgExactMinorBits - 2) / 2;
     const auto bigValue = [&uniform](int bits) { return CsgTest::Mul64<Int128>(uniform(bits), uniform(bits)); };
 
     int zeros = 0;
@@ -546,14 +549,14 @@ TEST_CASE("Crossing order matches the int128 oracle", "[corefine]")
         {
         case 0:
             // Random values at full range.
-            lowX = bigValue(37);
-            highX = bigValue(37);
-            lowY = bigValue(37);
-            highY = bigValue(37);
+            lowX = bigValue(VolumeFactorBits);
+            highX = bigValue(VolumeFactorBits);
+            lowY = bigValue(VolumeFactorBits);
+            highY = bigValue(VolumeFactorBits);
             for (int k = 0; k < 3; ++k)
             {
-                normalX[k] = CsgTest::Mul64<Int128>(uniform(24), uniform(24));
-                normalY[k] = CsgTest::Mul64<Int128>(uniform(24), uniform(24));
+                normalX[k] = CsgTest::Mul64<Int128>(uniform(MinorFactorBits), uniform(MinorFactorBits));
+                normalY[k] = CsgTest::Mul64<Int128>(uniform(MinorFactorBits), uniform(MinorFactorBits));
             }
             break;
         case 1:

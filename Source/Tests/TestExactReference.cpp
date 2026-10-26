@@ -4,6 +4,9 @@
 
 #include "TestExactReference.h"
 
+// The oracle keeps volumes and the difference of two volumes in Int128, which holds values below 2^127.
+static_assert(Urho3D::CsgExactVolumeBits + 1 <= 127, "The grid is too fine for the 128 bit oracle.");
+
 namespace CsgTest
 {
 
