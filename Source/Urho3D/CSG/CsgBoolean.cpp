@@ -574,81 +574,6 @@ bool IsReverse(const int* x, const int* y, int n)
     return true;
 }
 
-/// Remove pairs of kept faces that visit the same vertices in opposite directions.
-///
-/// Where a closed curve passes through collinear crossings, both operands keep a zero-area island with the same
-/// vertices. The two cancel. The faces around them then meet along the same edges.
-/// Faces are bucketed by an order-independent hash of their vertex ids and then compared exactly.
-/// The pairs depend only on the order of the faces, not on the order of the buckets.
-void CancelOpposites(CsgBooleanScratch& s)
-{
-    auto& candidates = s.candidates_;
-    candidates.clear();
-    for (unsigned i = 0; i < s.kept_.size(); ++i)
-    {
-        // Unsplit faces of the two operands never share vertex ids, so only regions can cancel.
-        const CsgKeptFace& face = s.kept_[i];
-        if (face.sourceFace_ >= 0)
-            continue;
-        uint64_t hash = 0;
-        for (int k = 0; k < face.idCount_; ++k)
-            hash += (static_cast<uint64_t>(static_cast<uint32_t>(s.keptIds_[face.idStart_ + k])) + 0x9E3779B97F4A7C15ULL)
-                * 0xBF58476D1CE4E5B9ULL;
-        candidates.push_back({face.idCount_, hash, static_cast<int>(i)});
-    }
-    if (candidates.size() < 2)
-        return;
-    ea::sort(candidates.begin(), candidates.end(), [](const CsgOppositeCandidate& x, const CsgOppositeCandidate& y)
-    {
-        if (x.count_ != y.count_)
-            return x.count_ < y.count_;
-        if (x.hash_ != y.hash_)
-            return x.hash_ < y.hash_;
-        return x.index_ < y.index_;
-    });
-
-    s.removed_.assign(s.kept_.size(), 0);
-    bool any = false;
-    unsigned begin = 0;
-    while (begin < candidates.size())
-    {
-        unsigned end = begin + 1;
-        while (end < candidates.size() && candidates[end].count_ == candidates[begin].count_
-            && candidates[end].hash_ == candidates[begin].hash_)
-            ++end;
-        for (unsigned a = begin; a < end; ++a)
-        {
-            const int indexA = candidates[a].index_;
-            if (s.removed_[indexA])
-                continue;
-            const CsgKeptFace& faceA = s.kept_[indexA];
-            for (unsigned b = a + 1; b < end; ++b)
-            {
-                const int indexB = candidates[b].index_;
-                if (s.removed_[indexB])
-                    continue;
-                const CsgKeptFace& faceB = s.kept_[indexB];
-                if (!IsReverse(s.keptIds_.data() + faceA.idStart_, s.keptIds_.data() + faceB.idStart_, faceA.idCount_))
-                    continue;
-                s.removed_[indexA] = s.removed_[indexB] = 1;
-                any = true;
-                break;
-            }
-        }
-        begin = end;
-    }
-    if (!any)
-        return;
-
-    unsigned out = 0;
-    for (unsigned i = 0; i < s.kept_.size(); ++i)
-    {
-        if (!s.removed_[i])
-            s.kept_[out++] = ea::move(s.kept_[i]);
-    }
-    s.kept_.resize(out);
-}
-
 /// A corner of a cleaned loop. An original corner has the index of its polygon vertex in from_, and to_ is -1.
 /// A corner that a T-junction split adds lies on the polygon edge from the vertex from_ to the vertex to_.
 struct LoopCorner
@@ -1249,7 +1174,6 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
     BuildKeptSet(operation, s);
     if (s.kept_.empty())
         return;
-    CancelOpposites(s);
 
     // The exact clean-up of the region solid gives the result: a weld by grid point, a cancel of twin faces
     // and a closed test on the grid. This holds for operands in the grid range.

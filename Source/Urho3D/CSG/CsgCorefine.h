@@ -360,14 +360,6 @@ struct CsgKeptFace
     bool flip_{};
 };
 
-/// One entry for the sort in CancelOpposites.
-struct CsgOppositeCandidate
-{
-    int count_{};
-    uint64_t hash_{};
-    int index_{};
-};
-
 /// The label of an element in a patch with zero exact area, or in a zero sum patch with no exact classification.
 constexpr uint8_t CSG_ELEMENT_REMOVED = 2;
 
@@ -393,8 +385,6 @@ struct CsgBooleanScratch
     ea::vector<uint8_t> frontier_;
     ea::vector<CsgKeptFace> kept_;
     ea::vector<int> keptIds_;
-    ea::vector<CsgOppositeCandidate> candidates_;
-    ea::vector<uint8_t> removed_;
     /// Classification.
     ea::vector<int> edgeStart_;
     ea::vector<int> loops_;
