@@ -333,7 +333,8 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
     s.frontier_.assign(solid.FaceCount(), 0);
     for (unsigned t = 0; t < mesh.triangleFace_.size(); ++t)
     {
-        if (segments.Count(static_cast<int>(t)) == 0)
+        // A triangle with a crossing on its boundary and no segment is split too.
+        if (segments.Count(static_cast<int>(t)) == 0 && split.GetState(static_cast<int>(t)) != CsgSplitResult::State::Split)
             continue;
         const int face = mesh.triangleFace_[t];
         s.frontier_[face] = 1;

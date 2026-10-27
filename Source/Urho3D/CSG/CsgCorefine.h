@@ -29,7 +29,8 @@ namespace CsgInternal
 constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 
 /// Whether crossings that round to one grid point share one id. The merge is off now.
-/// The merge needs every position on the grid. The solids now store their grid points, and a later step turns it on.
+/// With the merge on, the splitter closes all its traces, but more sweep samples fail than with the merge off.
+/// The open results have coplanar regions that stay twice, because the two operands split them differently.
 constexpr bool MergeCrossingsOnGrid = false;
 
 /// Crossing of an edge of one operand through a triangle of the other.
@@ -221,6 +222,8 @@ struct CsgSplitScratch
     ea::vector<int> boundary_;
     ea::vector<int> edgePoints_;
     CsgAdjacency boundaryOut_;
+    /// Passes of the boundary chain through each id. A pass is the chain index of a visit of the id.
+    CsgAdjacency passes_;
     CsgAdjacency curve_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> boundaryEdges_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> visited_;
@@ -407,9 +410,19 @@ public:
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
     /// Return the first record of the crossing that satisfies the predicate, or null.
     /// The records are the crossing and the aliases of the keys that merged into it. Each one has its own key.
+    /// A vertex id has the records of the crossings that round to the grid point of the vertex.
     template <class Predicate> const Crossing* FindRecord(int globalId, const Predicate& predicate) const
     {
-        const Crossing* record = &CrossingAt(globalId);
+        const Crossing* record = nullptr;
+        if (globalId >= CrossingBase())
+            record = &CrossingAt(globalId);
+        else
+        {
+            const int* first = vertexAliases_.Find(static_cast<uint64_t>(globalId));
+            if (!first)
+                return nullptr;
+            record = &aliases_[*first];
+        }
         while (!predicate(*record))
         {
             if (record->alias_ < 0)
@@ -442,6 +455,9 @@ public:
     /// Curve segments on each triangle of the first and the second operand. The lists are by triangle index.
     CsgSegmentLists segmentsA_;
     CsgSegmentLists segmentsB_;
+    /// One byte for each triangle of the first and the second operand. Not zero if a crossing is on the triangle.
+    ea::vector<uint8_t> touchedA_;
+    ea::vector<uint8_t> touchedB_;
     /// Regions of the split triangles of the first and the second operand. SplitFaces fills them.
     CsgSplitResult splitA_;
     CsgSplitResult splitB_;
@@ -478,12 +494,16 @@ private:
     int RecordId(int record) const { return record >= 0 ? CrossingBase() + record : aliasIds_[-record - 1]; }
 
     CsgFlatMap<CsgCrossingKey, int, CsgCrossingKeyHash> crossingIds_;
-    /// Crossing id by grid point. Crossings that round to one grid point share one id.
+    /// Id by grid point. Crossings that round to one grid point share one id.
+    /// A crossing can be at the grid point of an end of its edge or a corner of its triangle.
+    /// Then the crossing has the id of that vertex.
     CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> gridIds_;
     /// Order data of the keys that merged into an existing crossing. The data belongs to the key and its edge.
     ea::vector<Crossing> aliases_;
     /// Global id of each alias.
     ea::vector<int> aliasIds_;
+    /// First alias of each vertex id that a crossing rounds to. The alias chain holds the others.
+    CsgFlatMap<uint64_t, int, CsgPackedKeyHash> vertexAliases_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;
@@ -514,9 +534,10 @@ struct CsgCorefineTestResult
 {
     /// All the segments in the order of their creation. The ends are oriented as in curveEdges_.
     ea::vector<CsgCorefineTestSegment> segments_;
-    /// Positions of the crossings in the order of their ids.
+    /// Positions of the crossings in the order of their ids. The vertices that crossings round to follow them.
+    /// The segment ends index this vector.
     ea::vector<Vector3> positions_;
-    /// Keys of the crossings in the order of their ids.
+    /// Keys of the crossings in the order of their ids. A vertex has the key of its first crossing.
     ea::vector<CsgCrossingKey> keys_;
     /// Number of curve segments on each triangle of the operands.
     ea::vector<int> segmentCountsA_;
@@ -572,6 +593,21 @@ struct CsgSplitTestResult
 
 /// Compute the crossings of two solids and split the triangles along the curve. Both solids must have faces.
 CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b);
+
+/// Result of a trace test.
+struct CsgTraceTestResult
+{
+    /// True if every trace closes and the cycles hold every directed edge.
+    bool closed_{};
+    /// The cycles in the order of the trace. The cycles that touch the boundary come first.
+    ea::vector<ea::vector<int>> cycles_;
+};
+
+/// Trace the regions of a plane graph as the split of a triangle does. The ids are indices of the points.
+/// The chain is the boundary of the triangle in the counterclockwise order. It can visit an id more than once.
+/// The curves are undirected edges.
+CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
+    const ea::vector<ea::pair<int, int>>& curves);
 
 } // namespace CsgInternal
 

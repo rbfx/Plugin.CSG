@@ -21,6 +21,7 @@ namespace Urho3D
 namespace CsgInternal
 {
 
+
 namespace
 {
 
@@ -213,6 +214,8 @@ Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
     }
     segmentsA_.Reset(static_cast<unsigned>(a_.triangleFace_.size()));
     segmentsB_.Reset(static_cast<unsigned>(b_.triangleFace_.size()));
+    touchedA_.assign(a_.triangleFace_.size(), 0);
+    touchedB_.assign(b_.triangleFace_.size(), 0);
 }
 
 void Corefinement::CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel)
@@ -297,7 +300,12 @@ void Corefinement::IntersectFaces(int faceA, int faceB)
             count = EdgesThrough(b_, static_cast<int>(tb), a_, static_cast<int>(ta), sidesB, found, entering, count);
             if (count == 0)
                 continue;
-            // Exact decisions give two ends. Anything else comes from a degenerate triangle.
+            // A crossing of an edge of tb is at a point inside ta. Both triangles are split, also without a segment.
+            // Else a triangle next to the crossing is whole and misses the crossing on its edge.
+            touchedA_[ta] = 1;
+            touchedB_[tb] = 1;
+            // Exact decisions give two ends. Anything else comes from a degenerate triangle. Two ends at one grid
+            // point have one id, so the segment has no length.
             if (count != 2 || found[0] == found[1])
                 continue;
             ea::pair<int, int> segment = entering[1] && !entering[0] ? ea::make_pair(found[1], found[0])
@@ -401,23 +409,67 @@ int Corefinement::CrossingId(
         gridKey.x_ = static_cast<uint32_t>(grid.x_);
         gridKey.y_ = static_cast<uint32_t>(grid.y_);
         gridKey.z_ = static_cast<uint32_t>(grid.z_);
+        // A crossing can round to the grid point of an end of its edge or a corner of its triangle.
+        // Then the crossing is that vertex.
+        // The vertices of the first operand come first, so one grid point gets one id.
+        const Mesh& other = edges.isSecond_ ? a_ : b_;
+        int vertex = -1;
+        const auto match = [&](const Mesh& mesh, int local)
+        {
+            if (vertex < 0 && local >= 0 && mesh.grid_[local] == grid)
+                vertex = Global(mesh, local);
+        };
+        const auto matchEdge = [&]()
+        {
+            match(edges, key.low_);
+            match(edges, key.high_);
+        };
+        const auto matchTriangle = [&]()
+        {
+            for (int corner = 0; corner < 3; ++corner)
+                match(other, other.triangleIds_[key.triangle_ * 3 + corner]);
+        };
+        if (edges.isSecond_)
+        {
+            matchTriangle();
+            matchEdge();
+        }
+        else
+        {
+            matchEdge();
+            matchTriangle();
+        }
         bool gridExisted = false;
         int& gridIdRef = gridIds_.FindOrAdd(gridKey, gridExisted);
-        if (gridExisted)
+        if (vertex < 0 && gridExisted)
+            vertex = gridIdRef;
+        else if (!gridExisted)
+            gridIdRef = vertex >= 0 ? vertex : id;
+        if (vertex >= 0)
         {
-            id = gridIdRef;
+            id = vertex;
             const int alias = static_cast<int>(aliases_.size());
             record = -alias - 1;
             aliases_.push_back(data);
             aliasIds_.push_back(id);
-            Crossing* tail = &crossings_[id - CrossingBase()];
-            while (tail->alias_ >= 0)
+            Crossing* tail = nullptr;
+            if (id >= CrossingBase())
+                tail = &crossings_[id - CrossingBase()];
+            else
+            {
+                bool vertexExisted = false;
+                int& first = vertexAliases_.FindOrAdd(static_cast<uint64_t>(id), vertexExisted);
+                if (!vertexExisted)
+                    first = alias;
+                else
+                    tail = &aliases_[first];
+            }
+            while (tail && tail->alias_ >= 0)
                 tail = &aliases_[tail->alias_];
-            tail->alias_ = alias;
+            if (tail)
+                tail->alias_ = alias;
             merged = true;
         }
-        else
-            gridIdRef = id;
     }
     if (!merged)
         crossings_.push_back(data);
@@ -579,8 +631,70 @@ public:
     /// The regions are in the scratch: regions_ holds the loops of the pool and regionBridged_ the flags.
     bool Split(int face, int triangle, const CsgSegmentLists& segments)
     {
+        Clear();
+        triangle_ = triangle;
+        for (int i = 0; i < 3; ++i)
+        {
+            const int from = mesh_.triangleIds_[triangle * 3 + i];
+            const int to = mesh_.triangleIds_[triangle * 3 + (i + 1) % 3];
+            AddChainId(core_.Global(mesh_, from));
+            core_.EdgeCrossings(mesh_, from, to, scratch_, s_.edgePoints_);
+            for (const int id : s_.edgePoints_)
+                AddChainId(id);
+        }
+        if (!LinkChain())
+        {
+            return false;
+        }
+        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+            AddCurve(segments.At(node).p_, segments.At(node).q_);
+        ChooseProjection(face, triangle);
+        if (!TraceAll())
+        {
+            return false;
+        }
+
+        ClassifyClosedCycles();
+        s_.regions_ = s_.cycles_;
+        s_.regionBridged_.assign(s_.regions_.size(), 0);
+        if (!s_.holes_.empty())
+        {
+            holeCount_ = static_cast<int>(s_.holes_.size());
+            if (!PlaceHoles())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Trace the cycles of a plane graph for the tests. The ids are indices of the points.
+    /// The chain is the boundary in the counterclockwise order. Return false if a trace does not close.
+    /// The cycles are in the scratch: cycles_ touch the boundary and closedCycles_ do not.
+    bool TraceForTest(const CsgGridPoint2* points, const int* chain, int chainCount, const int* curveEnds, int curveCount)
+    {
+        Clear();
+        testPoints_ = points;
+        for (int i = 0; i < chainCount; ++i)
+            AddChainId(chain[i]);
+        if (!LinkChain())
+            return false;
+        for (int i = 0; i < curveCount; ++i)
+            AddCurve(curveEnds[2 * i], curveEnds[2 * i + 1]);
+        return TraceAll();
+    }
+
+    /// Number of holes joined by bridges in the last split.
+    int HoleCount() const { return holeCount_; }
+
+private:
+    using List = CsgAdjacency::List;
+
+    void Clear()
+    {
         s_.boundary_.clear();
         s_.boundaryOut_.Clear();
+        s_.passes_.Clear();
         s_.curve_.Clear();
         s_.boundaryEdges_.Clear();
         s_.visited_.Clear();
@@ -590,48 +704,62 @@ public:
         s_.holes_.clear();
         s_.regions_.clear();
         s_.regionBridged_.clear();
+        s_.curveKeys_.Clear();
+        s_.curveEnds_.clear();
         failed_ = false;
         holeCount_ = 0;
-        triangle_ = triangle;
+    }
 
-        for (int i = 0; i < 3; ++i)
-        {
-            const int from = mesh_.triangleIds_[triangle * 3 + i];
-            const int to = mesh_.triangleIds_[triangle * 3 + (i + 1) % 3];
-            s_.boundary_.push_back(core_.Global(mesh_, from));
-            core_.EdgeCrossings(mesh_, from, to, scratch_, s_.edgePoints_);
-            s_.boundary_.insert(s_.boundary_.end(), s_.edgePoints_.begin(), s_.edgePoints_.end());
-        }
+    /// Append an id to the boundary chain. The chain has no two equal ids next to each other.
+    void AddChainId(int id)
+    {
+        if (s_.boundary_.empty() || s_.boundary_.back() != id)
+            s_.boundary_.push_back(id);
+    }
+
+    /// Link the boundary chain: its directed edges and the passes of the chain through each id.
+    /// Return false if the chain has fewer than three ids or the same directed edge twice.
+    bool LinkChain()
+    {
+        while (s_.boundary_.size() > 1 && s_.boundary_.back() == s_.boundary_.front())
+            s_.boundary_.pop_back();
         const int boundaryCount = static_cast<int>(s_.boundary_.size());
-        // A face may visit a vertex twice, so a vertex can have more than one boundary edge leaving it.
+        if (boundaryCount < 3)
+            return false;
+        // The chain can visit an id more than once. Each visit is a pass of the chain through the id.
+        // A pass has its own sector of the triangle at the id, from the previous id clockwise to the next id.
         for (int i = 0; i < boundaryCount; ++i)
         {
             const int from = s_.boundary_[i];
             const int to = s_.boundary_[(i + 1) % boundaryCount];
             s_.boundaryOut_.Add(from, to);
-            s_.boundaryEdges_.Insert(DirectedEdgeKey(from, to));
+            s_.passes_.Add(from, i);
+            // The same directed edge twice makes two passes with one incoming edge. Such a chain has no plane map.
+            if (!s_.boundaryEdges_.Insert(DirectedEdgeKey(from, to)))
+                return false;
         }
-        // The planar map is a simple graph. Two triangle pairs can give the same segment. A segment can be
-        // a piece of the boundary. Such a segment adds no edge. Without this, the trace visits fewer edges than counted.
-        s_.curveKeys_.Clear();
-        s_.curveEnds_.clear();
-        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
-        {
-            const CsgSegment& segment = segments.At(node);
-            const int p = segment.p_;
-            const int q = segment.q_;
-            if (p == q || s_.boundaryEdges_.Contains(DirectedEdgeKey(p, q))
-                || s_.boundaryEdges_.Contains(DirectedEdgeKey(q, p)))
-                continue;
-            if (!s_.curveKeys_.Insert(DirectedEdgeKey(ea::min(p, q), ea::max(p, q))))
-                continue;
-            s_.curve_.Add(p, q);
-            s_.curve_.Add(q, p);
-            s_.curveEnds_.push_back(p);
-            s_.curveEnds_.push_back(q);
-        }
+        return true;
+    }
 
-        ChooseProjection(face, triangle);
+    /// Add a curve segment. The plane map is a simple graph. Two triangle pairs can give the same segment.
+    /// A segment can be a piece of the boundary. Such a segment adds no edge. Without this, the trace visits
+    /// fewer edges than counted.
+    void AddCurve(int p, int q)
+    {
+        if (p == q || s_.boundaryEdges_.Contains(DirectedEdgeKey(p, q)) || s_.boundaryEdges_.Contains(DirectedEdgeKey(q, p)))
+            return;
+        if (!s_.curveKeys_.Insert(DirectedEdgeKey(ea::min(p, q), ea::max(p, q))))
+            return;
+        s_.curve_.Add(p, q);
+        s_.curve_.Add(q, p);
+        s_.curveEnds_.push_back(p);
+        s_.curveEnds_.push_back(q);
+    }
+
+    /// Trace the cycles of all the directed edges. Return false if a trace does not close or an edge is left.
+    bool TraceAll()
+    {
+        const int boundaryCount = static_cast<int>(s_.boundary_.size());
         edgeCount_ = static_cast<int>(s_.boundaryEdges_.Size() + s_.curveEnds_.size());
         for (int i = 0; i < boundaryCount; ++i)
             Trace(s_.boundary_[i], s_.boundary_[(i + 1) % boundaryCount]);
@@ -640,26 +768,8 @@ public:
             Trace(s_.curveEnds_[i], s_.curveEnds_[i + 1]);
             Trace(s_.curveEnds_[i + 1], s_.curveEnds_[i]);
         }
-        if (failed_ || static_cast<int>(s_.visited_.Size()) != edgeCount_)
-            return false;
-
-        ClassifyClosedCycles();
-        s_.regions_ = s_.cycles_;
-        s_.regionBridged_.assign(s_.regions_.size(), 0);
-        if (!s_.holes_.empty())
-        {
-            holeCount_ = static_cast<int>(s_.holes_.size());
-            if (!PlaceHoles())
-                return false;
-        }
-        return true;
+        return !failed_ && static_cast<int>(s_.visited_.Size()) == edgeCount_;
     }
-
-    /// Number of holes joined by bridges in the last split.
-    int HoleCount() const { return holeCount_; }
-
-private:
-    using List = CsgAdjacency::List;
 
     /// Grid point of a global id: a vertex of an operand or a crossing.
     const CsgGridPoint& GridOf(int id) const
@@ -670,23 +780,20 @@ private:
     }
 
     /// Point of a global id in the plane of the projection.
-    CsgGridPoint2 Point(int id) const { return CsgExact::Project(GridOf(id), dropAxis_, flip_); }
+    CsgGridPoint2 Point(int id) const
+    {
+        if (testPoints_)
+            return testPoints_[id];
+        return CsgExact::Project(GridOf(id), dropAxis_, flip_);
+    }
 
     /// Coordinate of a global id on the dropped axis.
     CsgGridInt Dropped(int id) const
     {
+        if (testPoints_)
+            return 0;
         const CsgGridPoint& p = GridOf(id);
         return dropAxis_ == 0 ? p.x_ : (dropAxis_ == 1 ? p.y_ : p.z_);
-    }
-
-    /// Project the components of a 3D vector as CsgExact::Project does.
-    void ProjectVector(double x, double y, double z, double& u, double& v) const
-    {
-        const double c[3] = {x, y, z};
-        u = c[(dropAxis_ + 1) % 3];
-        v = c[(dropAxis_ + 2) % 3];
-        if (flip_)
-            ea::swap(u, v);
     }
 
     /// Choose the projection of the triangle to a coordinate plane. Drop the axis of the largest exact normal
@@ -776,69 +883,6 @@ private:
         return std::fabs(area);
     }
 
-    /// Twice the signed area of a closed cycle whose points are crossings at one vertex of the other operand.
-    /// The vertex lies on the plane of the triangle. The positions of such crossings are equal on the grid.
-    /// The perturbation moves the crossing of the edge low-high to the vertex plus k * (high - low) / D.
-    /// D is the exact difference of the crossing, and k is one factor for all the crossings of the triangle.
-    /// The area of the offsets (high - low) / D has the sign of the perturbed area.
-    /// Return false if a point of the cycle is not such a crossing.
-    ///
-    /// The area is in double, so its sign is not exact. The exact area is S / P, with P the product of all D and
-    /// S the sum over the edges i of Cross(g_i, g_i+1) times the product of the D_j with j not i and not i + 1.
-    /// The g are the grid differences high - low.
-    /// For n crossings, each term multiplies n - 2 volumes of up to 2^93 and a minor of 2^62. The expansion length
-    /// grows with n, and CsgExact has no helper for such sums. So the exact sign is not cheap. The double area is
-    /// a tie break of a curve of zero size only. The exact AreaSign decides all the other cases.
-    bool PerturbedArea(int loop, double& area) const
-    {
-        const int* cycle = s_.pool_.Data(loop);
-        const int count = s_.pool_.Count(loop);
-        const CsgGridPoint& t0 = mesh_.grid_[mesh_.triangleIds_[triangle_ * 3]];
-        const Mesh& edges = mesh_.isSecond_ ? core_.a_ : core_.b_;
-        int vertex = -1;
-        const auto offset = [&](int id, double& u, double& v)
-        {
-            if (id < core_.CrossingBase())
-                return false;
-            // A merged crossing has one record for each key. Use the record of an edge through this triangle.
-            const Crossing* found = core_.FindRecord(id,
-                [this](const Crossing& c) { return c.key_.triangle_ == triangle_ && c.key_.edgeInSecond_ != mesh_.isSecond_; });
-            if (!found)
-                return false;
-            const Crossing& crossing = *found;
-            const CsgCrossingKey& key = crossing.key_;
-            const double difference = crossing.difference_.Approximate();
-            if (difference == 0.0)
-                return false;
-            const int onPlane = crossing.lowVolume_.Sign() == 0 ? key.low_
-                : CsgExact::Dot(crossing.normal_, t0, edges.grid_[key.high_]).Sign() == 0 ? key.high_ : -1;
-            if (onPlane < 0 || (vertex >= 0 && onPlane != vertex))
-                return false;
-            vertex = onPlane;
-            const CsgGridPoint& low = edges.grid_[key.low_];
-            const CsgGridPoint& high = edges.grid_[key.high_];
-            ProjectVector((static_cast<double>(high.x_) - low.x_) / difference,
-                (static_cast<double>(high.y_) - low.y_) / difference, (static_cast<double>(high.z_) - low.z_) / difference,
-                u, v);
-            return true;
-        };
-        area = 0.0;
-        double u0 = 0.0, v0 = 0.0;
-        if (!offset(cycle[0], u0, v0))
-            return false;
-        double pu = u0, pv = v0;
-        for (int i = 1; i <= count; ++i)
-        {
-            double qu = u0, qv = v0;
-            if (i < count && !offset(cycle[i], qu, qv))
-                return false;
-            area += pu * qv - qu * pv;
-            pu = qu;
-            pv = qv;
-        }
-        return true;
-    }
-
     void Trace(int from, int to)
     {
         if (s_.visited_.Contains(DirectedEdgeKey(from, to)))
@@ -862,27 +906,112 @@ private:
             if (static_cast<int>(s_.cycle_.size()) > edgeCount_)
                 break;
         }
+        // Next is a bijection, so a trace comes back to its first edge. Anything else is an error in the order.
+        if (!failed_ && (u != from || v != to))
+        {
+            failed_ = true;
+        }
+        RemoveSpurs(s_.cycle_);
         if (s_.cycle_.size() < 3)
             return;
-        const int loop = s_.pool_.Add(s_.cycle_.data(), static_cast<int>(s_.cycle_.size()));
+        AddCycle(s_.cycle_.data(), static_cast<int>(s_.cycle_.size()), touchesBoundary);
+    }
+
+    /// Add a traced cycle to the loops. A cycle that passes twice through one id can be two lobes side by side.
+    /// Such a cycle splits at the id when no lobe has a negative area. Each lobe can then lie in a different
+    /// patch of the classification. A lobe with a negative area is a hole that touches the cycle, so that
+    /// cycle stays one loop. The test of the area sign is exact.
+    void AddCycle(const int* ids, int count, bool touchesBoundary)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            for (int j = i + 1; j < count; ++j)
+            {
+                if (ids[i] != ids[j])
+                    continue;
+                // The lobes are ids [i, j) and ids [j, count) + [0, i).
+                ea::vector<int> first(ids + i, ids + j);
+                ea::vector<int> second(ids + j, ids + count);
+                second.insert(second.end(), ids, ids + i);
+                if (first.size() < 3 || second.size() < 3 || AreaSignOf(first.data(), static_cast<int>(first.size())) < 0
+                    || AreaSignOf(second.data(), static_cast<int>(second.size())) < 0)
+                    continue;
+                AddCycle(first.data(), static_cast<int>(first.size()), touchesBoundary);
+                AddCycle(second.data(), static_cast<int>(second.size()), touchesBoundary);
+                return;
+            }
+        }
+        const int loop = s_.pool_.Add(ids, count);
         (touchesBoundary ? s_.cycles_ : s_.closedCycles_).push_back(loop);
+    }
+
+    /// Exact sign of the area of a loop of ids.
+    int AreaSignOf(const int* ids, int count)
+    {
+        s_.points_.resize(count);
+        for (int i = 0; i < count; ++i)
+            s_.points_[i] = Point(ids[i]);
+        return CsgExact::LoopAreaSign(s_.points_.data(), count);
+    }
+
+    /// Remove the spurs of a closed cycle. A spur is a walk x -> y -> x. It has no area, and its two directed edges
+    /// cancel. A chain that goes to an id and back, or a curve with a free end, gives a spur. The removal is
+    /// combinatorial and exact. The cycle can become shorter than three ids. Then it has no area.
+    static void RemoveSpurs(ea::vector<int>& cycle)
+    {
+        int size = 0;
+        for (const int id : cycle)
+        {
+            if (size >= 2 && cycle[size - 2] == id)
+                --size;
+            else
+                cycle[size++] = id;
+        }
+        // The cycle closes, so a spur can go over the end of the vector.
+        int start = 0;
+        bool changed = true;
+        while (changed && size - start >= 3)
+        {
+            changed = false;
+            if (cycle[size - 1] == cycle[start])
+            {
+                --size;
+                changed = true;
+            }
+            else if (cycle[size - 2] == cycle[start])
+            {
+                size -= 2;
+                changed = true;
+            }
+            else if (cycle[size - 1] == cycle[start + 1])
+            {
+                start += 1;
+                --size;
+                changed = true;
+            }
+        }
+        if (start > 0)
+            ea::copy(cycle.begin() + start, cycle.begin() + size, cycle.begin());
+        cycle.resize(size - start);
     }
 
     /// The edge that follows u -> v around the region on its left. Return -1 if there is none.
     int Next(int u, int v)
     {
         const List* branches = s_.curve_.Find(v);
-        const List* outs = s_.boundaryOut_.Find(v);
-        if (outs)
+        const List* passes = s_.passes_.Find(v);
+        if (passes)
         {
-            if (outs->count_ == 1 && !branches)
-                return s_.boundaryOut_.At(outs->head_).to_;
-            if (outs->count_ == 1 && branches->count_ == 1)
+            if (passes->count_ == 1)
             {
-                return s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)) ? s_.curve_.At(branches->head_).to_
-                                                                         : s_.boundaryOut_.At(outs->head_).to_;
+                const int out = ChainNext(s_.passes_.At(passes->head_).to_);
+                // One pass and at most one curve: the curve lies between the incoming and the outgoing boundary edge.
+                if (!branches)
+                    return out;
+                if (branches->count_ == 1)
+                    return s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)) ? s_.curve_.At(branches->head_).to_ : out;
             }
-            return Turn(u, v, outs, branches);
+            return SectorTurn(u, v, passes, branches);
         }
         if (!branches)
             return -1;
@@ -891,66 +1020,234 @@ private:
             const int first = s_.curve_.At(branches->head_).to_;
             return first == u ? s_.curve_.At(s_.curve_.At(branches->head_).next_).to_ : first;
         }
-        return Turn(u, v, nullptr, branches);
+        return Turn(u, v, branches);
     }
 
-    /// Among the outgoing directions at v, the first one clockwise from the way back to u.
-    /// The outgoing directions are the boundary targets, then the curve targets.
-    ///
-    /// The directions around v have a cyclic order: the clockwise angle, then the rank for equal directions.
-    /// The result is the next direction after v -> u in this order. So a direction equal to v -> u comes first
-    /// if its rank is higher than the rank of u, and last if its rank is lower. The order is exact.
-    ///
-    /// The rank of a curve neighbor is its global id. Clockwise from the incoming boundary edge, the order is the
-    /// inside of the triangle and then the outgoing boundary edge. So in a block of equal directions, the incoming
-    /// boundary vertex has the lowest rank and an outgoing boundary target has the highest rank. Then each
-    /// incoming edge gets a different outgoing edge, and Next is a bijection.
-    int Turn(int u, int v, const List* outs, const List* branches)
+    /// Id before the chain index in the boundary chain.
+    int ChainPrevious(int index) const
     {
-        constexpr int64_t boundaryRank = int64_t{1} << 40;
+        const int count = static_cast<int>(s_.boundary_.size());
+        return s_.boundary_[(index + count - 1) % count];
+    }
+
+    /// Id after the chain index in the boundary chain.
+    int ChainNext(int index) const
+    {
+        const int count = static_cast<int>(s_.boundary_.size());
+        return s_.boundary_[(index + 1) % count];
+    }
+
+    /// Among the curve directions at an inner vertex v, the first one clockwise from the way back to u.
+    ///
+    /// The directions around v have a cyclic order: the clockwise angle, then the global id for equal directions.
+    /// The result is the next direction after v -> u in this order. The order is exact, so Next is a bijection.
+    int Turn(int u, int v, const List* branches)
+    {
         const CsgGridPoint2 zero;
         const CsgGridPoint2 back = Direction(v, u);
-        const int64_t backRank = s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)) ? u - boundaryRank : u;
-        const int total = (outs ? outs->count_ : 0) + (branches ? branches->count_ : 0);
         int best = -1;
-        int64_t bestRank = 0;
         int bestGroup = 0;
         CsgGridPoint2 bestDirection;
-        int firstOutgoing = -1;
-        const auto visit = [&](const CsgAdjacency& adjacency, const List* list, int64_t rankOffset)
+        for (int node = branches->head_; node >= 0; node = s_.curve_.At(node).next_)
         {
-            if (!list)
-                return;
-            for (int node = list->head_; node >= 0; node = adjacency.At(node).next_)
+            const int w = s_.curve_.At(node).to_;
+            if (w == u && branches->count_ > 1)
+                continue;
+            const CsgGridPoint2 direction = Direction(v, w);
+            // Group 0: the direction of v -> u with a higher id. Group 2: the same with a lower id.
+            const bool alongBack = CsgExact::Cross2(back, direction) == 0 && CsgExact::Dot2(back, direction) > 0;
+            const int group = alongBack ? (w > u ? 0 : 2) : 1;
+            bool better = best < 0 || group < bestGroup;
+            if (best >= 0 && group == bestGroup)
             {
-                const int w = adjacency.At(node).to_;
-                if (firstOutgoing < 0)
-                    firstOutgoing = w;
-                if (w == u && total > 1)
-                    continue;
-                const int64_t rank = w + rankOffset;
-                const CsgGridPoint2 direction = Direction(v, w);
-                // Group 0: the direction of v -> u with a higher rank. Group 2: the same with a lower rank.
-                const bool alongBack = CsgExact::Cross2(back, direction) == 0 && CsgExact::Dot2(back, direction) > 0;
-                const int group = alongBack ? (rank > backRank ? 0 : 2) : 1;
-                bool better = best < 0 || group < bestGroup;
-                if (best >= 0 && group == bestGroup)
-                {
-                    const int order = group == 1 ? CsgExact::DirectionCompare(zero, back, direction, bestDirection) : 0;
-                    better = order < 0 || (order == 0 && rank < bestRank);
-                }
-                if (better)
-                {
-                    best = w;
-                    bestRank = rank;
-                    bestGroup = group;
-                    bestDirection = direction;
-                }
+                const int order = group == 1 ? CsgExact::DirectionCompare(zero, back, direction, bestDirection) : 0;
+                better = order < 0 || (order == 0 && w < best);
+            }
+            if (better)
+            {
+                best = w;
+                bestGroup = group;
+                bestDirection = direction;
+            }
+        }
+        return best;
+    }
+
+    /// Place of a directed edge from a boundary vertex in the cyclic order of the edges around the vertex.
+    ///
+    /// The order goes through the passes of the chain in the chain order. The order in a pass k has five parts.
+    /// First comes the back edge to the previous id (phase 0), and then the curves on that ray.
+    /// Then come the curves inside the sector (phase 1), by the clockwise angle from the back edge.
+    /// Then come the curves on the ray of the next id (phase 2). The outgoing edge is last.
+    /// A gap curve goes into phase 0 or phase 2 of a pass. Equal places in a phase compare by the rank.
+    /// The rank of a curve is its global id.
+    struct Slot
+    {
+        int pass_{};
+        int phase_{};
+        int64_t rank_{};
+        CsgGridPoint2 back_;
+        CsgGridPoint2 direction_;
+    };
+
+    /// Return -1, 0 or 1 as a comes before b, at the same place or after b.
+    /// The cyclic order starts at the first pass.
+    static int CompareSlots(const Slot& a, const Slot& b)
+    {
+        if (a.pass_ != b.pass_)
+            return a.pass_ < b.pass_ ? -1 : 1;
+        if (a.phase_ != b.phase_)
+            return a.phase_ < b.phase_ ? -1 : 1;
+        if (a.phase_ == 1)
+        {
+            const int order = CsgExact::DirectionCompare(CsgGridPoint2{}, a.back_, a.direction_, b.direction_);
+            if (order != 0)
+                return order;
+        }
+        return a.rank_ < b.rank_ ? -1 : (a.rank_ > b.rank_ ? 1 : 0);
+    }
+
+    /// Back edge and outgoing edge of a pass at v, as directions from v.
+    void PassRays(int v, int index, CsgGridPoint2& back, CsgGridPoint2& out) const
+    {
+        back = Direction(v, ChainPrevious(index));
+        out = Direction(v, ChainNext(index));
+    }
+
+    /// Place of the curve v -> w at the boundary vertex v.
+    ///
+    /// The curve goes to the first pass whose sector holds its direction.
+    /// A rounded crossing can move the curve out of all the sectors.
+    /// The curve is then in a gap after the outgoing edge of a pass k and before the back edge of the next pass j.
+    /// The curve goes to the end of pass k if it lies beyond the outgoing edge only.
+    /// Else it goes to the start of pass j.
+    /// All tests are exact, so each curve has one place, and Next is a bijection.
+    Slot CurveSlot(int v, int w, const List* passes) const
+    {
+        const CsgGridPoint2 zero;
+        Slot slot;
+        slot.rank_ = w;
+        slot.direction_ = Direction(v, w);
+        const CsgGridPoint2& d = slot.direction_;
+        int pass = 0;
+        for (int node = passes->head_; node >= 0; node = s_.passes_.At(node).next_, ++pass)
+        {
+            const int index = s_.passes_.At(node).to_;
+            CsgGridPoint2 back, out;
+            PassRays(v, index, back, out);
+            slot.pass_ = pass;
+            slot.back_ = back;
+            // A pass that comes back to the id it came from has the full turn as its sector.
+            if (ChainPrevious(index) == ChainNext(index))
+            {
+                slot.phase_ = 1;
+                return slot;
+            }
+            if (CsgExact::DirectionCompare(zero, back, d, out) <= 0)
+            {
+                slot.phase_ = OnRay(back, d) ? 0 : (OnRay(out, d) ? 2 : 1);
+                return slot;
+            }
+        }
+        // The curve is in a gap. Find the pass k with the gap clockwise from its outgoing edge.
+        const int count = passes->count_;
+        pass = 0;
+        for (int node = passes->head_; node >= 0; node = s_.passes_.At(node).next_, ++pass)
+        {
+            const int index = s_.passes_.At(node).to_;
+            const int nextNode = s_.passes_.At(node).next_ >= 0 ? s_.passes_.At(node).next_ : passes->head_;
+            const int nextIndex = s_.passes_.At(nextNode).to_;
+            CsgGridPoint2 back, out, nextBack, nextOut;
+            PassRays(v, index, back, out);
+            PassRays(v, nextIndex, nextBack, nextOut);
+            if (count > 1 && CsgExact::DirectionCompare(zero, out, d, nextBack) >= 0)
+                continue;
+            // Beyond the outgoing edge: w is on the right of v -> next. Beyond the back edge: w is on the right of
+            // previous -> v. A curve beyond the outgoing edge only stays with pass k.
+            const bool outBeyond = CsgExact::Cross2(out, d) < 0;
+            const bool inBeyond = CsgExact::Cross2(nextBack, d) > 0;
+            if (outBeyond && !inBeyond)
+            {
+                slot.pass_ = pass;
+                slot.phase_ = 2;
+                slot.back_ = back;
+            }
+            else
+            {
+                slot.pass_ = (pass + 1) % count;
+                slot.phase_ = 0;
+                slot.back_ = nextBack;
+            }
+            return slot;
+        }
+        // The passes do not split the turn in order. Put the curve at the start of the first pass.
+        slot.pass_ = 0;
+        slot.phase_ = 0;
+        return slot;
+    }
+
+    /// Whether the direction d is on the ray of the direction r.
+    static bool OnRay(const CsgGridPoint2& r, const CsgGridPoint2& d)
+    {
+        return CsgExact::Cross2(r, d) == 0 && CsgExact::Dot2(r, d) > 0;
+    }
+
+    /// The edge that follows u -> v at a boundary vertex v is the outgoing slot after the slot of v -> u.
+    /// The cyclic order gives the slot. The back edges are the only slots that are not outgoing.
+    /// No back edge follows a slot of an incoming edge. So each incoming edge gets a different outgoing edge.
+    int SectorTurn(int u, int v, const List* passes, const List* branches)
+    {
+        Slot from;
+        if (s_.boundaryEdges_.Contains(DirectedEdgeKey(u, v)))
+        {
+            int pass = 0;
+            for (int node = passes->head_; node >= 0; node = s_.passes_.At(node).next_, ++pass)
+            {
+                if (ChainPrevious(s_.passes_.At(node).to_) == u)
+                    break;
+            }
+            from.pass_ = pass;
+            from.phase_ = 0;
+            from.rank_ = std::numeric_limits<int64_t>::min();
+        }
+        else
+            from = CurveSlot(v, u, passes);
+
+        int best = -1;
+        int first = -1;
+        Slot bestSlot;
+        Slot firstSlot;
+        const auto consider = [&](int w, const Slot& slot)
+        {
+            if (first < 0 || CompareSlots(slot, firstSlot) < 0)
+            {
+                first = w;
+                firstSlot = slot;
+            }
+            if (CompareSlots(from, slot) < 0 && (best < 0 || CompareSlots(slot, bestSlot) < 0))
+            {
+                best = w;
+                bestSlot = slot;
             }
         };
-        visit(s_.boundaryOut_, outs, boundaryRank);
-        visit(s_.curve_, branches, 0);
-        return best >= 0 ? best : firstOutgoing;
+        int pass = 0;
+        for (int node = passes->head_; node >= 0; node = s_.passes_.At(node).next_, ++pass)
+        {
+            Slot slot;
+            slot.pass_ = pass;
+            slot.phase_ = 2;
+            slot.rank_ = std::numeric_limits<int64_t>::max();
+            consider(ChainNext(s_.passes_.At(node).to_), slot);
+        }
+        if (branches)
+        {
+            for (int node = branches->head_; node >= 0; node = s_.curve_.At(node).next_)
+            {
+                const int w = s_.curve_.At(node).to_;
+                consider(w, CurveSlot(v, w, passes));
+            }
+        }
+        return best >= 0 ? best : first;
     }
 
     /// A closed curve inside the triangle is traced once in each direction. The turn that encloses more area is the
@@ -996,7 +1293,7 @@ private:
         }
     }
 
-    /// The two turns of a curve of zero size have the same exact sign 0. Then PerturbedArea decides in double.
+    /// The two turns of a curve of zero size have the same exact sign 0. Then the first turn is the outer cycle.
     void ClassifyClosedCycles()
     {
         if (s_.closedCycles_.empty())
@@ -1066,19 +1363,9 @@ private:
             {
                 const int m0 = s_.closedCycles_[head];
                 const int m1 = s_.closedCycles_[second];
-                // The exact signs decide. Equal signs mean a curve of zero size: the perturbation decides.
-                double area0 = AreaSign(m0);
-                double area1 = AreaSign(m1);
-                if (area0 == area1)
-                {
-                    double perturbed0 = 0.0;
-                    double perturbed1 = 0.0;
-                    if (PerturbedArea(m0, perturbed0) && PerturbedArea(m1, perturbed1))
-                    {
-                        area0 = perturbed0;
-                        area1 = perturbed1;
-                    }
-                }
+                // The exact signs decide. Equal signs mean a curve of zero size: the first member is the outer cycle.
+                const int area0 = AreaSign(m0);
+                const int area1 = AreaSign(m1);
                 if (area0 >= area1)
                 {
                     s_.cycles_.push_back(m0);
@@ -1517,6 +1804,8 @@ private:
     int triangle_{};
     bool failed_{};
     int holeCount_{};
+    /// Points of the ids in a test of the trace, or null. Then the ids index the points.
+    const CsgGridPoint2* testPoints_{};
     int pendingFrom_{};
 };
 
@@ -1585,10 +1874,12 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
         if (id < core.CrossingBase())
         {
             const int local = localVertex(id - mesh.offset_);
-            if (local < 0)
-                return false;
-            vertices.push_back(source.vertices_[local]);
-            continue;
+            if (local >= 0)
+            {
+                vertices.push_back(source.vertices_[local]);
+                continue;
+            }
+            // A vertex of the other operand, or of another face, is a crossing that rounds to the vertex.
         }
         // A merged crossing has one record for each key. Use the record that belongs to this face.
         const Crossing* found = core.FindRecord(id,
@@ -1625,7 +1916,7 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
                 return false;
             vertex = Barycentric(source.vertices_[a], source.vertices_[b], source.vertices_[c], crossing.position_);
         }
-        vertex.SetPosition(crossing.position_);
+        vertex.SetPosition(id < core.CrossingBase() ? PointPosition(core, id) : crossing.position_);
         vertices.push_back(vertex);
     }
     output = CsgPolygon(ea::move(vertices), source.shared_);
@@ -1649,8 +1940,9 @@ void Corefinement::SplitOperand(
     for (int triangle = 0; triangle < triangleCount; ++triangle)
     {
         result.triangleRegionStart_[triangle] = result.RegionCount();
-        // A collapsed triangle has no segments. A triangle without segments stays whole.
-        if (segments.Count(triangle) == 0 || mesh.IsCollapsed(triangle))
+        // A collapsed triangle has no segments. A triangle without segments and crossings stays whole.
+        const ea::vector<uint8_t>& touched = mesh.isSecond_ ? touchedB_ : touchedA_;
+        if ((segments.Count(triangle) == 0 && !touched[triangle]) || mesh.IsCollapsed(triangle))
             continue;
         if (!splitter.Split(mesh.triangleFace_[triangle], triangle, segments))
         {
@@ -1691,6 +1983,21 @@ CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSo
         result.positions_.push_back(crossing.position_);
         result.keys_.push_back(crossing.key_);
     }
+    // A crossing at the grid point of a vertex has the vertex id. Such vertices get the indices after the crossings.
+    ea::vector<int> vertexIndex(core.CrossingBase(), -1);
+    const auto index = [&](int id)
+    {
+        if (id >= core.CrossingBase())
+            return id - core.CrossingBase();
+        if (vertexIndex[id] < 0)
+        {
+            vertexIndex[id] = static_cast<int>(result.positions_.size());
+            result.positions_.push_back(PointPosition(core, id));
+            const Crossing* record = core.FindRecord(id, [](const Crossing&) { return true; });
+            result.keys_.push_back(record ? record->key_ : CsgCrossingKey{});
+        }
+        return vertexIndex[id];
+    };
     result.segmentCountsA_.resize(core.segmentsA_.ListCount());
     for (unsigned i = 0; i < result.segmentCountsA_.size(); ++i)
         result.segmentCountsA_[i] = core.segmentsA_.Count(static_cast<int>(i));
@@ -1704,8 +2011,8 @@ CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSo
         for (int i = core.segmentsA_.Head(static_cast<int>(list)); i >= 0; i = core.segmentsA_.At(i).next_)
         {
             result.segments_[i].triangleA_ = static_cast<int>(list);
-            result.segments_[i].p_ = core.segmentsA_.At(i).p_ - core.CrossingBase();
-            result.segments_[i].q_ = core.segmentsA_.At(i).q_ - core.CrossingBase();
+            result.segments_[i].p_ = index(core.segmentsA_.At(i).p_);
+            result.segments_[i].q_ = index(core.segmentsA_.At(i).q_);
         }
     }
     for (unsigned list = 0; list < core.segmentsB_.ListCount(); ++list)
@@ -1715,10 +2022,7 @@ CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSo
     }
     result.curveEdges_.reserve(core.curveEdges_.Size());
     for (const auto& entry : core.curveEdges_)
-    {
-        result.curveEdges_.push_back(ea::make_pair(
-            entry.value_.first - core.CrossingBase(), entry.value_.second - core.CrossingBase()));
-    }
+        result.curveEdges_.push_back(ea::make_pair(index(entry.value_.first), index(entry.value_.second)));
     return result;
 }
 
@@ -1774,6 +2078,31 @@ CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
         result.curveEdges_.push_back(entry.value_);
     FillSplitOperand(core, core.a_, core.splitA_, result.a_);
     FillSplitOperand(core, core.b_, core.splitB_, result.b_);
+    return result;
+}
+
+CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
+    const ea::vector<ea::pair<int, int>>& curves)
+{
+    const CsgSolid empty{ea::span<const CsgPolygon>{}};
+    const Corefinement core(empty, empty, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    TriangleSplitter splitter(core, core.a_, scratch);
+    ea::vector<int> ends;
+    for (const auto& curve : curves)
+    {
+        ends.push_back(curve.first);
+        ends.push_back(curve.second);
+    }
+    CsgTraceTestResult result;
+    result.closed_ = splitter.TraceForTest(points.data(), chain.data(), static_cast<int>(chain.size()), ends.data(),
+        static_cast<int>(curves.size()));
+    const CsgSplitScratch& s = scratch.split_;
+    for (const ea::vector<int>* list : {&s.cycles_, &s.closedCycles_})
+    {
+        for (const int loop : *list)
+            result.cycles_.emplace_back(s.pool_.Data(loop), s.pool_.Data(loop) + s.pool_.Count(loop));
+    }
     return result;
 }
 

@@ -493,7 +493,7 @@ void RunSweep(float step, unsigned maxFailures)
 // A closed result must have the exact volume of the union. The test checks this in all samples.
 // The [!mayfail] tag means that a failed check reports but does not fail the run.
 // The test fails if more than 16 samples fail. It is a known limit, so the failure is expected.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 12 samples fail: the axis (1, 1, 1) (9), the x axis (2)
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 11 samples fail: the axis (1, 1, 1) (8), the x axis (2)
 // and the z axis (1). The union of A and B is right in all of them. The test also fails in double mode.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
@@ -503,8 +503,9 @@ TEST_CASE("known limit: union of boxes with coplanar contact is associative over
 
 // A rotation about the axis (1, 1, 1) keeps the corner (1, 1, 1) of A. The corner lies at the middle of an edge of B.
 // The snapped corner is often exactly on the snapped edge. The edges of A at the corner then cross a face of B
-// at the corner, and the crossings make a closed curve of zero size. The perturbation gives the orientation of
-// the curve. The angles are samples of the sweep that gave wrong unions in float mode or in double mode.
+// at the corner, and the crossings make a closed curve of zero size. The exact areas of the two sides are equal.
+// Then the first turn of the trace is the outer cycle.
+// The angles are samples of the sweep that gave wrong unions in float mode or in double mode.
 TEST_CASE("Union of rotated boxes with a corner on an edge of the other box is right", "[boolean]")
 {
     for (const int step : {9, 24, 37, 50, 109, 116})

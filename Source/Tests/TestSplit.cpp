@@ -650,3 +650,109 @@ TEST_CASE("Split places the hole of a curve with two inner faces in the region a
         CheckHandSplit(SplitWithSegments(triangle, points, false, segments), 32.0, 4);
     }
 }
+
+namespace
+{
+
+CsgGridPoint2 Point2(CsgGridInt u, CsgGridInt v)
+{
+    CsgGridPoint2 p;
+    p.u_ = u;
+    p.v_ = v;
+    return p;
+}
+
+/// Trace a plane graph and check the cycles. Every trace closes. Each boundary edge of the chain is in one cycle.
+/// Each curve edge is in one cycle in each direction. A cycle has no walk x -> y -> x.
+CsgTraceTestResult CheckTrace(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
+    const ea::vector<ea::pair<int, int>>& curves)
+{
+    const CsgTraceTestResult result = CsgTraceRegionsForTest(points, chain, curves);
+    CHECK(result.closed_);
+    std::vector<uint64_t> edges;
+    for (const ea::vector<int>& cycle : result.cycles_)
+    {
+        const int size = static_cast<int>(cycle.size());
+        CHECK(size >= 3);
+        for (int i = 0; i < size; ++i)
+        {
+            edges.push_back(EdgeKey(cycle[i], cycle[(i + 1) % size]));
+            CHECK(cycle[i] != cycle[(i + 2) % size]);
+        }
+    }
+    std::sort(edges.begin(), edges.end());
+    CHECK(std::adjacent_find(edges.begin(), edges.end()) == edges.end());
+    // A walk x -> y -> x of the chain has no area. Its two edges cancel, so they are in no cycle.
+    const int count = static_cast<int>(chain.size());
+    for (int i = 0; i < count; ++i)
+    {
+        const int from = chain[i];
+        const int to = chain[(i + 1) % count];
+        const bool spur = chain[(i + 2) % count] == from || chain[(i + count - 1) % count] == to;
+        CHECK(CountKey(edges, EdgeKey(from, to)) == (spur ? 0 : 1));
+    }
+    for (const auto& curve : curves)
+    {
+        CHECK(CountKey(edges, EdgeKey(curve.first, curve.second)) == 1);
+        CHECK(CountKey(edges, EdgeKey(curve.second, curve.first)) == 1);
+    }
+    return result;
+}
+
+/// Points of the triangle (0, 0), (100, 0), (0, 100) with the ids 0, 1 and 2, and more points after them.
+ea::vector<CsgGridPoint2> TracePoints(std::initializer_list<CsgGridPoint2> more)
+{
+    ea::vector<CsgGridPoint2> points = {Point2(0, 0), Point2(100, 0), Point2(0, 100)};
+    points.insert(points.end(), more.begin(), more.end());
+    return points;
+}
+
+} // namespace
+
+TEST_CASE("Trace closes with a curve at a corner beyond the incoming edge", "[split]")
+{
+    // The curve 1 - 3 - 4 starts at the corner 1. The point 3 is below the edge 0 - 1, outside the triangle.
+    // The curve 1 - 5 - 4 starts at the same corner and goes into the triangle. So the sector rule runs.
+    const auto points = TracePoints({Point2(60, -1), Point2(0, 50), Point2(50, 20)});
+    const auto result = CheckTrace(points, {0, 1, 2, 4}, {{1, 3}, {3, 4}, {1, 5}, {5, 4}});
+    CHECK(result.cycles_.size() == 3);
+}
+
+TEST_CASE("Trace closes with a curve at a corner beyond the outgoing edge", "[split]")
+{
+    // The point 3 is beyond the edge 1 - 2. The curve 1 - 5 - 4 goes into the triangle.
+    const auto points = TracePoints({Point2(70, 40), Point2(0, 50), Point2(50, 20)});
+    const auto result = CheckTrace(points, {0, 1, 2, 4}, {{1, 3}, {3, 4}, {1, 5}, {5, 4}});
+    CHECK(result.cycles_.size() == 3);
+}
+
+TEST_CASE("Trace closes with a curve at a corner behind the corner", "[split]")
+{
+    // The point 3 is beyond both edges at the corner 1. The curve 1 - 5 - 4 goes into the triangle.
+    const auto points = TracePoints({Point2(120, -10), Point2(0, 50), Point2(50, 20)});
+    const auto result = CheckTrace(points, {0, 1, 2, 4}, {{1, 3}, {3, 4}, {1, 5}, {5, 4}});
+    CHECK(result.cycles_.size() == 3);
+}
+
+TEST_CASE("Trace closes with a crossing id on two edges of the triangle", "[split]")
+{
+    // The id 3 is on the edge 0 - 1 and on the edge 1 - 2. It is at the point of the corner 1.
+    const auto points = TracePoints({Point2(100, 0), Point2(50, 20), Point2(0, 50)});
+    CheckTrace(points, {0, 3, 1, 3, 2, 5}, {{3, 4}, {4, 5}});
+}
+
+TEST_CASE("Trace closes with two curves at one corner and one of them outside", "[split]")
+{
+    // At the corner 1, the curve to 3 is inside the triangle and the curve to 4 is below the edge 0 - 1.
+    const auto points = TracePoints({Point2(50, 20), Point2(60, -1), Point2(0, 50)});
+    const auto result = CheckTrace(points, {0, 1, 2, 5}, {{1, 3}, {3, 5}, {1, 4}, {4, 5}});
+    CHECK(result.cycles_.size() == 3);
+}
+
+TEST_CASE("Trace closes with curves at a crossing beyond its edge", "[split]")
+{
+    // The crossing 3 is on the edge 0 - 1. The curves go to 4 below the edge and to 5 inside the triangle.
+    const auto points = TracePoints({Point2(50, 0), Point2(40, -2), Point2(30, 30), Point2(0, 50)});
+    const auto result = CheckTrace(points, {0, 3, 1, 2, 6}, {{3, 4}, {4, 6}, {3, 5}, {5, 6}});
+    CHECK(result.cycles_.size() == 3);
+}
