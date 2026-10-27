@@ -1245,3 +1245,136 @@ TEST_CASE("ClassifyGridPoint of a box on top of a box", "[boolean][classify]")
     }
     CHECK(onFace == 4);
 }
+
+namespace
+{
+
+/// A closed tetrahedron with outward faces. The corner order does not matter.
+SolidPtr MakeTetrahedron(const Vector3 (&corners)[4], unsigned shared)
+{
+    static const int faces[4][3] = {{0, 2, 1}, {0, 1, 3}, {1, 2, 3}, {0, 3, 2}};
+    const Vector3 center = (corners[0] + corners[1] + corners[2] + corners[3]) * 0.25f;
+    ea::vector<CsgPolygon> polygons;
+    for (const auto& face : faces)
+    {
+        Vector3 p[3] = {corners[face[0]], corners[face[1]], corners[face[2]]};
+        if ((p[1] - p[0]).CrossProduct(p[2] - p[0]).DotProduct(center - p[0]) > 0.0f)
+            ea::swap(p[1], p[2]);
+        ea::vector<ModelVertex> vertices(3);
+        for (int i = 0; i < 3; ++i)
+            vertices[i].SetPosition(p[i]);
+        polygons.push_back(CsgPolygon(ea::move(vertices), shared));
+    }
+    return MakeSolid(ea::move(polygons));
+}
+
+} // namespace
+
+TEST_CASE("Boolean of a tetrahedron with an apex on a box face", "[boolean][zerosum]")
+{
+    // The apex lies exactly on the top face of the box, on the grid. The curve is only the apex.
+    const auto box = MakeBox(Vector3::ZERO, 1);
+    const double volumeBox = Volume(box);
+    const Vector3 apex(0.25f, 1.0f, 0.5f);
+    // The tetrahedron A is above the face, or inside the box under the face.
+    for (const float side : {1.0f, -1.0f})
+    {
+        const Vector3 corners[4] = {apex, Vector3(-0.5f, 1.0f + side, -0.5f), Vector3(1.0f, 1.0f + side, -0.25f),
+            Vector3(0.0f, 1.0f + side, 0.75f)};
+        const auto tetrahedron = MakeTetrahedron(corners, 2);
+        const double volumeTetrahedron = Volume(tetrahedron);
+        REQUIRE(volumeTetrahedron > 0.1);
+        CAPTURE(side);
+
+        for (const bool swapped : {false, true})
+        {
+            CAPTURE(swapped);
+            const SolidPtr& a = swapped ? box : tetrahedron;
+            const SolidPtr& b = swapped ? tetrahedron : box;
+            const auto unionAB = Run(a, b, CsgOperation::Union);
+            const auto intersectionAB = Run(a, b, CsgOperation::Intersection);
+            const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+            CheckClosed(unionAB);
+            if (side > 0.0f)
+            {
+                // The tetrahedron is outside the box and touches it.
+                CHECK(Volume(unionAB) == Catch::Approx(volumeBox + volumeTetrahedron).margin(VOLUME_TOLERANCE));
+                CHECK(Volume(intersectionAB) == Catch::Approx(0.0).margin(VOLUME_TOLERANCE));
+                CHECK(Volume(differenceAB) == Catch::Approx(swapped ? volumeBox : volumeTetrahedron).margin(VOLUME_TOLERANCE));
+            }
+            else
+            {
+                // The tetrahedron is inside the box.
+                CHECK(Volume(unionAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
+                CHECK(Volume(intersectionAB) == Catch::Approx(volumeTetrahedron).margin(VOLUME_TOLERANCE));
+                CHECK(Volume(differenceAB)
+                    == Catch::Approx(swapped ? volumeBox - volumeTetrahedron : 0.0).margin(VOLUME_TOLERANCE));
+            }
+        }
+    }
+}
+
+TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean][zerosum]")
+{
+    // The width of the needle is below a fifth of a grid step. The two crossings on the top face of the box
+    // round to the same grid point, so the chord between them collapses.
+    const auto box = MakeBox(Vector3::ZERO, 1);
+    const double volumeBox = Volume(box);
+    const float w = 0.2f / CsgGridScale;
+    const Vector3 corners[4] = {Vector3(0.25f, 0.0f, 0.5f), Vector3(0.25f + w, 0.0f, 0.5f),
+        Vector3(0.25f, 0.0f, 0.5f + w), Vector3(0.25f, 2.0f, 0.5f)};
+    const auto needle = MakeTetrahedron(corners, 2);
+    for (const bool swapped : {false, true})
+    {
+        CAPTURE(swapped);
+        const SolidPtr& a = swapped ? needle : box;
+        const SolidPtr& b = swapped ? box : needle;
+        const auto unionAB = Run(a, b, CsgOperation::Union);
+        const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+        CheckClosed(unionAB);
+        CHECK(Volume(unionAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
+        if (!swapped)
+        {
+            CheckClosed(differenceAB);
+            CHECK(Volume(differenceAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
+        }
+    }
+}
+
+TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boolean][zerosum]")
+{
+    // The plate crosses the face x = 1 of the box. The two sheets of the plate cross the face on lines that
+    // round to the same grid line. The two segments have opposite sides and cancel each other.
+    const auto box = MakeBox(Vector3::ZERO, 1);
+    const double volumeBox = Volume(box);
+    const float h = 0.2f / CsgGridScale;
+    const auto plate = MakeSolid(MakeBoxPolygons(Vector3(1.0f, 0.0f, 0.0f), Vector3(1.0f, h, 0.75f), 2));
+    const double volumePlate = Volume(plate);
+    for (const bool swapped : {false, true})
+    {
+        CAPTURE(swapped);
+        const SolidPtr& a = swapped ? plate : box;
+        const SolidPtr& b = swapped ? box : plate;
+        const auto unionAB = Run(a, b, CsgOperation::Union);
+        CheckClosed(unionAB);
+        CHECK(Volume(unionAB) == Catch::Approx(volumeBox + 0.5 * volumePlate).margin(VOLUME_TOLERANCE));
+        if (!swapped)
+        {
+            const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+            CheckClosed(differenceAB);
+            CHECK(Volume(differenceAB) == Catch::Approx(volumeBox - 0.5 * volumePlate).margin(VOLUME_TOLERANCE));
+        }
+    }
+}
+
+TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[boolean][zerosum]")
+{
+    // A sample of the benchmark sweep: B shares a plane with A. The coplanar contact makes thin patches with no net vote.
+    const Quaternion world(18.5f, Vector3::ONE.Normalized());
+    const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
+    const auto a = MakeBox(Vector3::ZERO, 1, worldTransform);
+    const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, worldTransform);
+    const auto unionAB = Run(a, b, CsgOperation::Union);
+    CheckClosed(unionAB);
+    CHECK(Volume(unionAB) == Catch::Approx(Volume(a) + Volume(b) - 4.0).margin(GridVolumeTolerance(2 * BOX_AREA)));
+}
