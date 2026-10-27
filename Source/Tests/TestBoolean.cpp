@@ -23,6 +23,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace Urho3D;
@@ -605,7 +606,15 @@ struct SweepStats
 
 /// Run the union of A, B and C for one rotation. A is the cube [-1, 1]^3 and B is [0, 2] x [-1, 1]^2.
 /// B shares the plane x = 1 with A, so the union has coplanar contact. Count a failed sample in the statistics.
-void SweepSample(const Vector3& axis, float angle, SweepStats& stats)
+/// The unions of one sweep sample: ab = A + B, left = (A + B) + C and right = A + (B + C).
+struct SweepUnions
+{
+    SolidPtr ab_;
+    SolidPtr left_;
+    SolidPtr right_;
+};
+
+SweepUnions MakeSweepUnions(const Vector3& axis, float angle)
 {
     const Quaternion world(angle, axis.Normalized());
     const Quaternion own(37.0f, Vector3(1.0f, 1.0f, 0.0f).Normalized());
@@ -614,11 +623,49 @@ void SweepSample(const Vector3& axis, float angle, SweepStats& stats)
     const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, worldTransform);
     const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
 
-    const auto ab = Run(a, b, CsgOperation::Union);
+    SweepUnions unions;
+    unions.ab_ = Run(a, b, CsgOperation::Union);
+    unions.left_ = Run(unions.ab_, c, CsgOperation::Union);
+    unions.right_ = Run(a, Run(b, c, CsgOperation::Union), CsgOperation::Union);
+    return unions;
+}
+
+/// Count the directed edges of the exact loops of the solid that have no opposite edge. The ids are welded by the
+/// exact grid point, so a T-junction or a gap counts. A closed solid has zero.
+unsigned CountUnmatchedExactEdges(const SolidPtr& solid)
+{
+    const CsgExactLoops loops = solid->GetExactLoops();
+    std::vector<std::pair<int, int>> edges;
+    for (unsigned face = 0; face < solid->FaceCount(); ++face)
+    {
+        const int length = loops.loopLength_[face];
+        const int* ids = loops.vertexIds_.data() + loops.vertexStart_[face];
+        for (int i = 0; i < length; ++i)
+        {
+            const int from = ids[i];
+            const int to = ids[(i + 1) % length];
+            if (from != to)
+                edges.emplace_back(from, to);
+        }
+    }
+    std::sort(edges.begin(), edges.end());
+    unsigned unmatched = 0;
+    for (const auto& edge : edges)
+    {
+        if (!std::binary_search(edges.begin(), edges.end(), std::make_pair(edge.second, edge.first)))
+            ++unmatched;
+    }
+    return unmatched;
+}
+
+void SweepSample(const Vector3& axis, float angle, SweepStats& stats)
+{
+    const SweepUnions unions = MakeSweepUnions(axis, angle);
+    const SolidPtr& ab = unions.ab_;
+    const SolidPtr& left = unions.left_;
+    const SolidPtr& right = unions.right_;
     // The rotated boxes snap to the grid. The tolerances are the bounds of the snap for two and for three boxes.
     const bool unionRight = std::abs(Volume(ab) - 12.0) <= GridVolumeTolerance(2.0 * BOX_AREA) && IsClosed(ab);
-    const auto left = Run(ab, c, CsgOperation::Union);
-    const auto right = Run(a, Run(b, c, CsgOperation::Union), CsgOperation::Union);
     const bool associative = std::abs(Volume(left) - Volume(right)) <= GridVolumeTolerance(3.0 * BOX_AREA)
         && IsClosed(left) && IsClosed(right);
 
@@ -680,7 +727,8 @@ void RunSweep(float step, unsigned maxFailures)
 // The measured count of failed samples is 0 of 1028 in float mode. Without the pass it is 9.
 // A closed result must have the exact volume of the union. The test checks this in all samples.
 // With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 1 sample fails (11 without the pass): the axis
-// (1, 1, 1) at 5.9 degrees. The union of A and B is right. Some crossings of the next boolean have no valid corner.
+// (1, 1, 1) at 5.9 degrees. The union of A and B is right. In the next boolean three sheets of one operand lie in one
+// grid cell and give a T-junction.
 // The test fails if more samples fail than the measured count plus one, or if a closed result has a wrong volume.
 TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep]")
@@ -690,6 +738,42 @@ TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of r
 #else
     RunSweep(0.7f, 1);
 #endif
+}
+
+// Three samples of the sweep must stay exactly closed:
+// the axis (1, 1, 1) at 87.8 degrees for the left union, at 5.2 degrees for the right union, and in double mode
+// at 138.9 degrees for the left union.
+// Without the weld of the splitter, the float build fails the test. Without the cluster pass, the double build fails it.
+// The result must have no unmatched directed edge in the exact loops.
+// The result must also have the volume of the union.
+TEST_CASE("Union of boxes with coplanar contact is exactly closed in the samples of the sweep", "[boolean][sweep]")
+{
+    // The index is the step of the sweep of 0.7 degrees from 0.3 degrees: 87.8, 5.2 and 138.9 degrees.
+    struct Sample
+    {
+        unsigned index_;
+        bool left_;
+    };
+    const Sample samples[] = {
+        {125, true},
+        {7, false},
+#if defined(CSG_EXACT_USE_DOUBLE)
+        {198, true},
+#endif
+    };
+    constexpr double unionVolume = 16.051433;
+    for (const Sample& sample : samples)
+    {
+        const float angle = 0.3f + 0.7f * static_cast<float>(sample.index_);
+        INFO("angle " << angle << (sample.left_ ? " left" : " right"));
+        const SweepUnions unions = MakeSweepUnions(Vector3::ONE, angle);
+        const SolidPtr& result = sample.left_ ? unions.left_ : unions.right_;
+        CHECK(CountUnmatchedExactEdges(unions.ab_) == 0);
+        CHECK(CountUnmatchedExactEdges(result) == 0);
+        CHECK(result->IsClosed());
+        CHECK(IsClosed(result));
+        CHECK(std::abs(Volume(result) - unionVolume) <= GridVolumeTolerance(3.0 * BOX_AREA));
+    }
 }
 
 #ifdef CSG_DIAGNOSTICS

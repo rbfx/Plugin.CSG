@@ -248,6 +248,8 @@ struct CsgSplitScratch
     CsgAdjacency curve_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> boundaryEdges_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> visited_;
+    /// First curve id that is not a chain id, for each grid point in the plane map of one triangle.
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> weld_;
     /// Undirected keys of the curve edges of one triangle. Each edge of the curve graph is in it once.
     CsgFlatSet<uint64_t, CsgPackedKeyHash> curveKeys_;
     /// Ends of the curve edges of one triangle, two entries for each edge.
@@ -447,6 +449,16 @@ struct CsgValidityScratch
     ea::vector<int> cycleIds_;
     ea::vector<int> cycleStart_;
     ea::vector<int8_t> cycleSign_;
+    /// ConstrainClusters uses these vectors. They hold one entry for each crossing of one edge.
+    /// The records of the crossings, in the order of the sort.
+    ea::vector<int> clusterRecords_;
+    /// The lower and the upper corner of the grid cell that holds the exact position.
+    ea::vector<CsgGridPoint> clusterLower_;
+    ea::vector<CsgGridPoint> clusterUpper_;
+    /// The nearest rounding of the exact position.
+    ea::vector<CsgGridPoint> clusterNearest_;
+    /// The grid point before a move.
+    ea::vector<CsgGridPoint> clusterSaved_;
 };
 
 /// Reusable vectors. A boolean makes one scratch and passes it to every step.
@@ -590,6 +602,15 @@ private:
     /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
     int CompareRecords(int x, int y) const;
 
+    /// Move the crossings of one edge whose cells intersect to one common corner of the intersection.
+    /// The crossings are next to each other in the order of the sort.
+    /// A common corner gives them one position. So the two sides of a thin slab get the same chain of grid points.
+    /// The corner is the nearest one where no crossing breaks a rule of CrossingInvalidRules.
+    /// If no corner is valid, the crossings keep their positions.
+    /// Call this at the end of ConstrainCrossings. The inexact flags are the flags of ConstrainCrossings.
+    /// If state is not null, it gets 1 for a moved crossing. It gets 2 for a crossing that has no valid corner.
+    void ConstrainClusters(CsgScratch& scratch, const ea::vector<uint8_t>& inexact, ea::vector<uint8_t>* state);
+
     /// Order data of an edge list record: a crossing.
     const Crossing& Record(int record) const { return crossings_[record]; }
     /// Global id of an edge list record.
@@ -677,6 +698,8 @@ struct CsgSplitTestResult
     int crossingBase_{};
     /// Position of each global id.
     ea::vector<Vector3> positions_;
+    /// First global id at the grid point of each global id. The regions of a triangle use one id for each grid point.
+    ea::vector<int> gridFirst_;
     /// Curve segments oriented as in curveEdges_, as global ids.
     ea::vector<ea::pair<int, int>> curveEdges_;
 };
@@ -695,9 +718,10 @@ struct CsgTraceTestResult
 
 /// Trace the regions of a plane graph as the split of a triangle does. The ids are indices of the points.
 /// The chain is the boundary of the triangle in the counterclockwise order. It can visit an id more than once.
-/// The curves are undirected edges.
+/// The curves are undirected edges. If grid is not null, it holds the grid point of each id. The ids at one grid
+/// point then weld as in the split of a triangle.
 CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
-    const ea::vector<ea::pair<int, int>>& curves);
+    const ea::vector<ea::pair<int, int>>& curves, const ea::vector<CsgGridPoint>* grid = nullptr);
 
 /// Whether a grid point is inside a solid. The answer is the parity of the exact crossings of a ray along +x.
 /// The solid triangles move by the displacement 0b0111 of CsgExact::AxisRayCrossesTriangle, so a point on the surface

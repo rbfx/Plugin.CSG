@@ -612,8 +612,9 @@ public:
         {
             return false;
         }
+        SeedWeld();
         for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
-            AddCurve(segments.At(node).p_, segments.At(node).q_);
+            AddCurve(Weld(segments.At(node).p_), Weld(segments.At(node).q_));
         ChooseProjection(face, triangle);
         if (!TraceAll())
         {
@@ -637,16 +638,25 @@ public:
     /// Trace the cycles of a plane graph for the tests. The ids are indices of the points.
     /// The chain is the boundary in the counterclockwise order. Return false if a trace does not close.
     /// The cycles are in the scratch: cycles_ touch the boundary and closedCycles_ do not.
-    bool TraceForTest(const CsgGridPoint2* points, const int* chain, int chainCount, const int* curveEnds, int curveCount)
+    /// If grid is not null, the ids at one grid point weld as in Split.
+    bool TraceForTest(const CsgGridPoint2* points, const CsgGridPoint* grid, const int* chain, int chainCount,
+        const int* curveEnds, int curveCount)
     {
         Clear();
         testPoints_ = points;
+        testGrid_ = grid;
         for (int i = 0; i < chainCount; ++i)
             AddChainId(chain[i]);
         if (!LinkChain())
             return false;
+        if (grid)
+            SeedWeld();
         for (int i = 0; i < curveCount; ++i)
-            AddCurve(curveEnds[2 * i], curveEnds[2 * i + 1]);
+        {
+            const int p = curveEnds[2 * i];
+            const int q = curveEnds[2 * i + 1];
+            AddCurve(grid ? Weld(p) : p, grid ? Weld(q) : q);
+        }
         return TraceAll();
     }
 
@@ -664,6 +674,7 @@ private:
         s_.curve_.Clear();
         s_.boundaryEdges_.Clear();
         s_.visited_.Clear();
+        s_.weld_.Clear();
         s_.pool_.Clear();
         s_.loopAreas_.clear();
         s_.areaTerms_.clear();
@@ -676,6 +687,48 @@ private:
         s_.curveEnds_.clear();
         failed_ = false;
         holeCount_ = 0;
+    }
+
+    /// Give each grid point of the chain the slot of its first chain id. A curve id at a chain point then welds to
+    /// the chain id. Without this, a segment from a chain id to a curve id at one grid point stays in the plane map.
+    void SeedWeld()
+    {
+        for (const int id : s_.boundary_)
+        {
+            const CsgGridPoint& point = GridOf(id);
+            CsgVec3Key key;
+            key.x_ = static_cast<uint32_t>(point.x_);
+            key.y_ = static_cast<uint32_t>(point.y_);
+            key.z_ = static_cast<uint32_t>(point.z_);
+            bool existed = false;
+            int& slot = s_.weld_.FindOrAdd(key, existed);
+            if (!existed)
+                slot = id;
+        }
+    }
+
+    /// Return the node of the plane map for an id of a curve segment end. A chain id stays as it is.
+    /// Two ids at one grid point with other edges give no consistent order of the edges around the point.
+    /// The tie rules of Direction and Turn then trace wrong cycles. One id removes the tie.
+    /// A curve id welds to the chain id at its grid point, or to the first curve id seen there.
+    /// Two chain ids at one grid point do not weld: the chain keeps its structure.
+    int Weld(int id)
+    {
+        if (ea::find(s_.boundary_.begin(), s_.boundary_.end(), id) != s_.boundary_.end())
+            return id;
+        const CsgGridPoint& point = GridOf(id);
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        bool existed = false;
+        int& slot = s_.weld_.FindOrAdd(key, existed);
+        if (!existed)
+            slot = id;
+        // The key keeps 32 bits of each coordinate. A hit with another point keeps its own id.
+        else if (!(GridOf(slot) == point))
+            return id;
+        return slot;
     }
 
     /// Append an id to the boundary chain. The chain has no two equal ids next to each other.
@@ -742,6 +795,8 @@ private:
     /// Grid point of a global id: a vertex of an operand or a crossing.
     const CsgGridPoint& GridOf(int id) const
     {
+        if (testGrid_)
+            return testGrid_[id];
         if (id >= core_.CrossingBase())
             return core_.CrossingAt(id).grid_;
         return id >= core_.b_.offset_ ? core_.b_.grid_[id - core_.b_.offset_] : core_.a_.grid_[id];
@@ -1806,6 +1861,8 @@ private:
     int holeCount_{};
     /// Points of the ids in a test of the trace, or null. Then the ids index the points.
     const CsgGridPoint2* testPoints_{};
+    /// Grid points of the ids in a test of the trace with the weld, or null.
+    const CsgGridPoint* testGrid_{};
     int pendingFrom_{};
 };
 
@@ -2809,6 +2866,15 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
 #endif
     }
 
+    // The crossings of one edge with intersecting cells move to one common corner.
+#ifdef CSG_DIAGNOSTICS
+    if (state.empty())
+        state.resize(crossings_.size(), 0);
+    ConstrainClusters(scratch, inexact, &state);
+#else
+    ConstrainClusters(scratch, inexact, nullptr);
+#endif
+
     cache.projection_[0].clear();
     cache.projection_[1].clear();
     cache.cycleOf_.clear();
@@ -2831,6 +2897,183 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
     g_csgDiagnostics.constrainedCrossings_.fetch_add(moved, std::memory_order_relaxed);
     g_csgDiagnostics.unconstrainableCrossings_.fetch_add(stuck, std::memory_order_relaxed);
 #endif
+}
+
+void Corefinement::ConstrainClusters(
+    CsgScratch& scratch, const ea::vector<uint8_t>& inexact, ea::vector<uint8_t>* state)
+{
+    // Masks of the axes that take the upper end of the cell: none, one axis, two axes, three axes.
+    static constexpr int CornerMasks[8] = {0, 1, 2, 4, 3, 5, 6, 7};
+
+    CsgValidityScratch& v = scratch.validity_;
+    for (int side = 0; side < 2; ++side)
+    {
+        for (const auto& entry : edgeCrossings_[side])
+        {
+            // A cluster needs two crossings and at least one inexact crossing.
+            int count = 0;
+            bool anyInexact = false;
+            for (int node = entry.value_.head_; node >= 0; node = edgeNodes_[node].next_)
+            {
+                ++count;
+                anyInexact = anyInexact || inexact[edgeNodes_[node].record_] != 0;
+            }
+            if (count < 2 || !anyInexact)
+                continue;
+
+            ea::vector<int>& records = v.clusterRecords_;
+            records.clear();
+            for (int node = entry.value_.head_; node >= 0; node = edgeNodes_[node].next_)
+                records.push_back(edgeNodes_[node].record_);
+            SortIds(records, scratch.merge_, [this](int x, int y) { return CompareRecords(x, y); });
+
+            // The cell of each crossing: the exact position is inside it.
+            v.clusterLower_.resize(count);
+            v.clusterUpper_.resize(count);
+            v.clusterNearest_.resize(count);
+            for (int i = 0; i < count; ++i)
+            {
+                const Crossing& crossing = crossings_[records[i]];
+                if (!inexact[records[i]])
+                {
+                    v.clusterNearest_[i] = v.clusterLower_[i] = v.clusterUpper_[i] = crossing.grid_;
+                    continue;
+                }
+                const Mesh& edges = crossing.key_.edgeInSecond_ ? b_ : a_;
+                const CsgGridPoint& low = edges.grid_[crossing.key_.low_];
+                const CsgGridPoint& high = edges.grid_[crossing.key_.high_];
+                v.clusterNearest_[i] = CsgExact::RoundCrossing(low, high, crossing.lowVolume_, crossing.difference_);
+                CsgExact::CrossingCell(low, high, crossing.lowVolume_, crossing.difference_, v.clusterNearest_[i],
+                    v.clusterLower_[i], v.clusterUpper_[i]);
+            }
+
+            const auto constrain = [&](int begin, int end, const CsgGridPoint& lower, const CsgGridPoint& upper)
+            {
+                if (end - begin < 2)
+                    return;
+                // The cluster is fine if all crossings are at one valid position already.
+                const CsgGridPoint current = crossings_[records[begin]].grid_;
+                bool same = true;
+                for (int i = begin + 1; i < end; ++i)
+                    same = same && crossings_[records[i]].grid_ == current;
+                const auto allValid = [&](const CsgGridPoint& point)
+                {
+                    for (int i = begin; i < end; ++i)
+                    {
+                        if (CrossingInvalidRules(crossings_[records[i]], point, scratch, true, false, true) != 0)
+                            return false;
+                    }
+                    return true;
+                };
+                if (same && allValid(current))
+                    return;
+
+                // The corners of the intersection, the nearest to the roundings first. The order of the masks decides a tie.
+                CsgGridPoint corners[8];
+                int64_t costs[8];
+                int cornerCount = 0;
+                for (const int mask : CornerMasks)
+                {
+                    if (((mask & 1) && lower.x_ == upper.x_) || ((mask & 2) && lower.y_ == upper.y_)
+                        || ((mask & 4) && lower.z_ == upper.z_))
+                        continue;
+                    CsgGridPoint corner;
+                    corner.x_ = (mask & 1) ? upper.x_ : lower.x_;
+                    corner.y_ = (mask & 2) ? upper.y_ : lower.y_;
+                    corner.z_ = (mask & 4) ? upper.z_ : lower.z_;
+                    int64_t cost = 0;
+                    for (int i = begin; i < end; ++i)
+                    {
+                        const CsgGridPoint& nearest = v.clusterNearest_[i];
+                        cost += std::abs(static_cast<int64_t>(corner.x_) - nearest.x_)
+                            + std::abs(static_cast<int64_t>(corner.y_) - nearest.y_)
+                            + std::abs(static_cast<int64_t>(corner.z_) - nearest.z_);
+                    }
+                    // An insertion keeps the order of the masks for equal costs.
+                    int slot = cornerCount++;
+                    while (slot > 0 && costs[slot - 1] > cost)
+                    {
+                        costs[slot] = costs[slot - 1];
+                        corners[slot] = corners[slot - 1];
+                        --slot;
+                    }
+                    costs[slot] = cost;
+                    corners[slot] = corner;
+                }
+
+                v.clusterSaved_.clear();
+                for (int i = begin; i < end; ++i)
+                    v.clusterSaved_.push_back(crossings_[records[i]].grid_);
+                const auto place = [&](const CsgGridPoint& point)
+                {
+                    for (int i = begin; i < end; ++i)
+                    {
+                        crossings_[records[i]].grid_ = point;
+                        crossings_[records[i]].position_ = point.ToPosition();
+                    }
+                };
+                for (int k = 0; k < cornerCount; ++k)
+                {
+                    if (!InGridRange(corners[k]))
+                        continue;
+                    place(corners[k]);
+                    if (!allValid(corners[k]))
+                        continue;
+                    if (state)
+                    {
+                        for (int i = begin; i < end; ++i)
+                        {
+                            if (v.clusterSaved_[i - begin] != corners[k])
+                                (*state)[records[i]] = 1;
+                        }
+                    }
+                    return;
+                }
+                // No corner is valid. The crossings keep their positions.
+                for (int i = begin; i < end; ++i)
+                {
+                    crossings_[records[i]].grid_ = v.clusterSaved_[i - begin];
+                    crossings_[records[i]].position_ = v.clusterSaved_[i - begin].ToPosition();
+                    if (state && (*state)[records[i]] == 0)
+                        (*state)[records[i]] = 2;
+                }
+            };
+
+            // A cluster is a run of crossings in the order of the sort. The intersection of all cells of a run is not empty.
+            int begin = 0;
+            CsgGridPoint lower = v.clusterLower_[0];
+            CsgGridPoint upper = v.clusterUpper_[0];
+            for (int i = 1; i <= count; ++i)
+            {
+                if (i < count)
+                {
+                    const CsgGridPoint& cellLower = v.clusterLower_[i];
+                    const CsgGridPoint& cellUpper = v.clusterUpper_[i];
+                    CsgGridPoint nextLower;
+                    CsgGridPoint nextUpper;
+                    nextLower.x_ = ea::max(lower.x_, cellLower.x_);
+                    nextLower.y_ = ea::max(lower.y_, cellLower.y_);
+                    nextLower.z_ = ea::max(lower.z_, cellLower.z_);
+                    nextUpper.x_ = ea::min(upper.x_, cellUpper.x_);
+                    nextUpper.y_ = ea::min(upper.y_, cellUpper.y_);
+                    nextUpper.z_ = ea::min(upper.z_, cellUpper.z_);
+                    if (nextLower.x_ <= nextUpper.x_ && nextLower.y_ <= nextUpper.y_ && nextLower.z_ <= nextUpper.z_)
+                    {
+                        lower = nextLower;
+                        upper = nextUpper;
+                        continue;
+                    }
+                }
+                constrain(begin, i, lower, upper);
+                if (i < count)
+                {
+                    begin = i;
+                    lower = v.clusterLower_[i];
+                    upper = v.clusterUpper_[i];
+                }
+            }
+        }
+    }
 }
 
 void Corefinement::SplitFaces(CsgScratch& scratch)
@@ -3002,8 +3245,22 @@ CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
     result.crossingBase_ = core.CrossingBase();
     const int total = core.CrossingBase() + static_cast<int>(core.crossings_.size());
     result.positions_.reserve(total);
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> firstId;
     for (int id = 0; id < total; ++id)
+    {
         result.positions_.push_back(PointPosition(core, id));
+        const CsgGridPoint& point = id >= core.CrossingBase() ? core.CrossingAt(id).grid_
+            : id >= core.b_.offset_ ? core.b_.grid_[id - core.b_.offset_] : core.a_.grid_[id];
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        bool existed = false;
+        int& slot = firstId.FindOrAdd(key, existed);
+        if (!existed)
+            slot = id;
+        result.gridFirst_.push_back(slot);
+    }
     for (const auto& entry : core.curveEdges_)
         result.curveEdges_.push_back(entry.value_);
     FillSplitOperand(core, core.a_, core.splitA_, result.a_);
@@ -3012,7 +3269,7 @@ CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
 }
 
 CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
-    const ea::vector<ea::pair<int, int>>& curves)
+    const ea::vector<ea::pair<int, int>>& curves, const ea::vector<CsgGridPoint>* grid)
 {
     const CsgSolid empty{ea::span<const CsgPolygon>{}};
     const Corefinement core(empty, empty, CSG_DEFAULT_EPSILON);
@@ -3025,7 +3282,7 @@ CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& point
         ends.push_back(curve.second);
     }
     CsgTraceTestResult result;
-    result.closed_ = splitter.TraceForTest(points.data(), chain.data(), static_cast<int>(chain.size()), ends.data(),
+    result.closed_ = splitter.TraceForTest(points.data(), grid ? grid->data() : nullptr, chain.data(), static_cast<int>(chain.size()), ends.data(),
         static_cast<int>(curves.size()));
     const CsgSplitScratch& s = scratch.split_;
     for (const ea::vector<int>* list : {&s.cycles_, &s.closedCycles_})

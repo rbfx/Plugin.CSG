@@ -133,7 +133,7 @@ void CheckOperand(const CsgSolid& solid, const CsgSplitTestOperand& operand, con
             REQUIRE(from < idCount);
             CHECK(from != to);
             edgesOfTriangle[region.triangle_].push_back(EdgeKey(from, to));
-            allEdges.push_back(EdgeKey(from, to));
+            allEdges.push_back(EdgeKey(result.gridFirst_[from], result.gridFirst_[to]));
         }
         // The polygon has one vertex for each id, at the position of the id.
         REQUIRE(static_cast<int>(region.polygonPositions_.size()) == size);
@@ -177,8 +177,14 @@ void CheckOperand(const CsgSolid& solid, const CsgSplitTestOperand& operand, con
     std::sort(allEdges.begin(), allEdges.end());
     for (const auto& edge : result.curveEdges_)
     {
-        CHECK(CountKey(allEdges, EdgeKey(edge.first, edge.second)) == 1);
-        CHECK(CountKey(allEdges, EdgeKey(edge.second, edge.first)) == 1);
+        // The regions of a triangle use one id for each grid point, so the ends are compared by grid point.
+        const int first = result.gridFirst_[edge.first];
+        const int second = result.gridFirst_[edge.second];
+        // A segment between two ids of one grid point has no edge in the plane map.
+        if (first == second)
+            continue;
+        CHECK(CountKey(allEdges, EdgeKey(first, second)) == 1);
+        CHECK(CountKey(allEdges, EdgeKey(second, first)) == 1);
     }
 }
 
@@ -789,4 +795,93 @@ TEST_CASE("Trace of a folded closed curve gives one cycle in each direction", "[
     CHECK(CycleWithEdge(result, 0, 1) == std::vector<int>{0, 1, 2});
     CHECK(CycleWithEdge(result, 3, 4) == std::vector<int>{3, 4, 5, 6});
     CHECK(CycleWithEdge(result, 4, 3) == std::vector<int>{3, 4, 5, 6});
+}
+
+namespace
+{
+
+/// True if the cycle has the same ids as the expected ids in the same cyclic order, from any start.
+bool SameCycle(const std::vector<int>& cycle, const std::vector<int>& expected)
+{
+    if (cycle.size() != expected.size())
+        return false;
+    const std::size_t size = cycle.size();
+    for (std::size_t start = 0; start < size; ++start)
+    {
+        bool same = true;
+        for (std::size_t i = 0; i < size && same; ++i)
+            same = cycle[(start + i) % size] == expected[i];
+        if (same)
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE("Trace welds the ids of a knot at one grid point and keeps three regions", "[split]")
+{
+    // The numbers are the labels of the ids in the failed split of a triangle of a sweep sample (xyz, 87.8 degrees).
+    // The chain is 40 37 77 53 36 54 69. The id 80 has the grid point of the id 78.
+    // The curves 78 - 79 - 80 - 78 make a knot at the point 78. The knot has no area.
+    // The weld replaces 80 by 78, so the knot becomes the walk 78 - 79 - 78 and the regions are right.
+    struct Labeled
+    {
+        int label_;
+        CsgGridInt x_;
+        CsgGridInt y_;
+        CsgGridInt z_;
+    };
+    const Labeled table[] = {{36, -832, 1445, -303}, {37, -448, 2068, 1609}, {40, -274, 118, 2209},
+        {53, -743, 1589, 140}, {54, -767, 1291, -12}, {69, -640, 987, 563}, {70, -668, 1237, 455},
+        {77, -714, 1636, 283}, {78, -701, 1517, 334}, {79, -701, 1516, 334}, {80, -701, 1517, 334}};
+    const int count = sizeof(table) / sizeof(table[0]);
+    const auto indexOf = [&](int label)
+    {
+        for (int i = 0; i < count; ++i)
+        {
+            if (table[i].label_ == label)
+                return i;
+        }
+        return -1;
+    };
+
+    // The projection drops the x axis and flips: the normal of the triangle 40 37 36 points to -x.
+    ea::vector<CsgGridPoint> grid;
+    ea::vector<CsgGridPoint2> points;
+    for (const Labeled& entry : table)
+    {
+        CsgGridPoint point;
+        point.x_ = entry.x_;
+        point.y_ = entry.y_;
+        point.z_ = entry.z_;
+        grid.push_back(point);
+        points.push_back(CsgExact::Project(point, 0, true));
+    }
+    ea::vector<int> chain;
+    for (const int label : {40, 37, 77, 53, 36, 54, 69})
+        chain.push_back(indexOf(label));
+    ea::vector<ea::pair<int, int>> curves;
+    for (const auto& curve : {std::pair<int, int>{54, 53}, {70, 69}, {77, 78}, {78, 79}, {79, 80}, {80, 78}, {78, 70}})
+        curves.push_back(ea::make_pair(indexOf(curve.first), indexOf(curve.second)));
+
+    const CsgTraceTestResult result = CsgTraceRegionsForTest(points, chain, curves, &grid);
+    CHECK(result.closed_);
+    REQUIRE(result.cycles_.size() == 3);
+    std::vector<std::vector<int>> labeled;
+    for (const ea::vector<int>& cycle : result.cycles_)
+    {
+        std::vector<int> labels;
+        for (const int id : cycle)
+            labels.push_back(table[id].label_);
+        labeled.push_back(labels);
+    }
+    for (const std::vector<int>& expected :
+        {std::vector<int>{40, 37, 77, 78, 70, 69}, {77, 53, 54, 69, 70, 78}, {53, 36, 54}})
+    {
+        int found = 0;
+        for (const std::vector<int>& cycle : labeled)
+            found += SameCycle(cycle, expected) ? 1 : 0;
+        CHECK(found == 1);
+    }
 }

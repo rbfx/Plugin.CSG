@@ -699,6 +699,66 @@ TEST_CASE("Corefine handles crossings of one edge that round to one grid point",
     CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
 }
 
+TEST_CASE("Corefine moves the crossings of one edge with intersecting cells to one grid point", "[corefine]")
+{
+    // The wedge B has a flat bottom at z = 0 and a top that rises 3 steps in each unit along x.
+    // At x = -0.75 the top is 3/4 step above the bottom. A vertical edge of A crosses both faces there.
+    // The bottom crossing is on the grid at z = 0. The top crossing rounds to z = 1 step, but its cell holds z = 0.
+    // The two cells intersect in the corner z = 0, so ConstrainCrossings puts both crossings at this corner.
+    const float step = static_cast<float>(1.0 / CsgGridScale);
+    const auto polygon = [](std::initializer_list<Vector3> corners)
+    {
+        ea::vector<ModelVertex> vertices;
+        for (const Vector3& corner : corners)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(corner);
+            vertices.push_back(vertex);
+        }
+        return CsgPolygon(ea::move(vertices), 2);
+    };
+    ea::vector<CsgPolygon> wedge;
+    wedge.push_back(polygon({{-1, -1, 0}, {-1, 1, 0}, {1, 1, 0}, {1, -1, 0}}));
+    wedge.push_back(polygon({{1, -1, 0}, {1, 1, 0}, {1, 1, 6 * step}, {1, -1, 6 * step}}));
+    wedge.push_back(polygon({{-1, -1, 0}, {1, -1, 6 * step}, {1, 1, 6 * step}, {-1, 1, 0}}));
+    wedge.push_back(polygon({{-1, -1, 0}, {1, -1, 0}, {1, -1, 6 * step}}));
+    wedge.push_back(polygon({{-1, 1, 0}, {1, 1, 6 * step}, {1, 1, 0}}));
+    const CsgSolid b(wedge);
+    const CsgSolid a(MakeBoxPolygons(Vector3(-0.125f, 0.0f, 0.0f), Vector3(0.625f, 0.25f, 1.0f), 1));
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    core.ConstrainCrossings(scratch);
+
+    unsigned verticalEdges = 0;
+    ea::vector<int> forward;
+    for (int low = 0; low < core.a_.VertexCount(); ++low)
+    {
+        for (int high = low + 1; high < core.a_.VertexCount(); ++high)
+        {
+            const Vector3& p = core.a_.loops_.positions_[low];
+            const Vector3& q = core.a_.loops_.positions_[high];
+            if (p.x_ != -0.75f || q.x_ != -0.75f || p.y_ != q.y_ || std::fabs(p.y_) != 0.25f || p.z_ == q.z_)
+                continue;
+            core.EdgeCrossings(core.a_, low, high, scratch, forward);
+            REQUIRE(forward.size() == 2);
+            CHECK(forward[0] != forward[1]);
+            CHECK(core.CrossingAt(forward[0]).grid_ == core.CrossingAt(forward[1]).grid_);
+            // The common point is the corner at the bottom of the wedge.
+            CHECK(core.CrossingAt(forward[0]).grid_.z_ == 0);
+            ++verticalEdges;
+        }
+    }
+    CHECK(verticalEdges == 2);
+
+    // No curve segment has the same id at both ends.
+    const CsgCorefineTestResult result = CsgCorefineCrossingsForTest(a, b);
+    for (const CsgCorefineTestSegment& segment : result.segments_)
+        CHECK(segment.p_ != segment.q_);
+    CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
+}
+
 namespace
 {
 
