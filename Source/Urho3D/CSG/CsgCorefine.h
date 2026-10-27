@@ -195,6 +195,18 @@ struct CsgLoopPool
     ea::vector<Span> spans_;
 };
 
+/// Cached area of one loop of CsgLoopPool. The cache is lazy. A loop never changes after the Add.
+struct CsgLoopArea
+{
+    /// Magnitude of the doubled area in double. The true magnitude differs from it by at most error_.
+    double magnitude_{};
+    double error_{};
+    /// Exact expansion of the doubled area in CsgSplitScratch::areaTerms_. The start is -1 until the first use.
+    int termStart_{-1};
+    int termCount_{};
+    bool approximate_{};
+};
+
 /// Directed links between ids. The targets of one id keep the order of the appends.
 class CsgAdjacency
 {
@@ -281,8 +293,10 @@ struct CsgSplitScratch
     /// Sorted ids of the curve network that is connected to the triangle boundary.
     ea::vector<int> attachedIds_;
     ea::vector<int> attachedNew_;
+    /// Cached areas of the loops of pool_. An entry exists when it is first used. The terms are the exact expansions.
+    ea::vector<CsgLoopArea> loopAreas_;
+    ea::vector<CsgReal> areaTerms_;
     /// Sort buffers.
-    ea::vector<double> keys_;
     ea::vector<int> order_;
     ea::vector<int> merge_;
     /// Projected grid points of a loop for the exact tests.

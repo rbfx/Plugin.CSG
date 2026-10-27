@@ -576,20 +576,6 @@ void Corefinement::EdgeCrossings(
 namespace
 {
 
-/// Compare as double.CompareTo does in the C# reference: a NaN is smaller than any number and equal to a NaN.
-int CompareDouble(double a, double b)
-{
-    if (a < b)
-        return -1;
-    if (a > b)
-        return 1;
-    if (a == b)
-        return 0;
-    if (std::isnan(a))
-        return std::isnan(b) ? 0 : -1;
-    return 1;
-}
-
 /// Compare the magnitudes of two exact minors: the sign of |a| - |b|.
 /// The double values select the result when they differ clearly. Otherwise the expansions decide.
 int CompareMagnitude(const CsgExactMinor& a, const CsgExactMinor& b)
@@ -783,6 +769,8 @@ private:
         s_.boundaryEdges_.Clear();
         s_.visited_.Clear();
         s_.pool_.Clear();
+        s_.loopAreas_.clear();
+        s_.areaTerms_.clear();
         s_.cycles_.clear();
         s_.closedCycles_.clear();
         s_.holes_.clear();
@@ -917,20 +905,81 @@ private:
     /// Exact sign of the area of a loop. It is positive for the counterclockwise order of the face.
     int AreaSign(int loop) { return CsgExact::LoopAreaSign(LoopPoints(loop), s_.pool_.Count(loop)); }
 
-    /// Magnitude of the area of a loop in double. It orders loops by size only.
-    /// The choice of the smallest region that contains a hole uses it, so it can change the topology.
-    double AreaMagnitude(int loop)
+    /// Return the cache entry of a loop with the magnitude in double. The reference is valid until the next call.
+    const CsgLoopArea& ApproximateArea(int loop)
     {
+        if (static_cast<int>(s_.loopAreas_.size()) <= loop)
+            s_.loopAreas_.resize(s_.pool_.spans_.size());
+        if (s_.loopAreas_[loop].approximate_)
+            return s_.loopAreas_[loop];
+
         const CsgGridPoint2* points = LoopPoints(loop);
         const int count = s_.pool_.Count(loop);
         double area = 0.0;
+        // The sum of the magnitudes of all the products.
+        double magnitude = 0.0;
         for (int i = 1; i + 1 < count; ++i)
         {
             const CsgGridPoint2 p = CsgExact::Difference(points[i], points[0]);
             const CsgGridPoint2 q = CsgExact::Difference(points[i + 1], points[0]);
-            area += static_cast<double>(p.u_) * q.v_ - static_cast<double>(p.v_) * q.u_;
+            const double pq = static_cast<double>(p.u_) * q.v_;
+            const double qp = static_cast<double>(p.v_) * q.u_;
+            area += pq - qp;
+            magnitude += std::fabs(pq) + std::fabs(qp);
         }
-        return std::fabs(area);
+        CsgLoopArea& entry = s_.loopAreas_[loop];
+        entry.magnitude_ = std::fabs(area);
+        // Each product is exact if it has at most 53 bits. If the sum of all magnitudes is below 2^53, each partial
+        // sum is an exact integer and the error is zero. Otherwise, the products and the sums round with a relative
+        // error of at most 2^-53 of the magnitudes. The terms n + 4 and the unit 2^-52 are a safe upper bound.
+        if (CsgPlanarExactInDouble && magnitude < 9007199254740992.0)
+            entry.error_ = 0.0;
+        else
+            entry.error_ = (count + 4) * 2.220446049250313e-16 * magnitude;
+        entry.approximate_ = true;
+        return entry;
+    }
+
+    /// Return the sign of |area of loop a| - |area of loop b|. The result is exact and does not depend on the rounding.
+    /// The caches hold the double areas and the exact expansions. They live as long as the pool.
+    /// The choice of the smallest region that contains a hole and the order of the holes use it, so it can change
+    /// the topology.
+    int CompareAreaMagnitude(int a, int b)
+    {
+        if (a == b)
+            return 0;
+        // Copy the values. The next call can move the cache.
+        const CsgLoopArea entryA = ApproximateArea(a);
+        const CsgLoopArea entryB = ApproximateArea(b);
+        const double limit = entryA.error_ + entryB.error_;
+        // The differences of the values are exact if the errors are zero.
+        if (entryA.magnitude_ > entryB.magnitude_ + limit)
+            return 1;
+        if (entryB.magnitude_ > entryA.magnitude_ + limit)
+            return -1;
+        if (limit == 0.0)
+            return 0;
+
+        const int startA = ExactArea(a);
+        const int startB = ExactArea(b);
+        return CsgExact::CompareLoopAreaMagnitude(
+            s_.loopAreas_[a].termCount_, s_.areaTerms_.data() + startA, s_.loopAreas_[b].termCount_,
+            s_.areaTerms_.data() + startB);
+    }
+
+    /// Compute the exact expansion of the area of a loop if the cache has none. Return the start of its terms.
+    int ExactArea(int loop)
+    {
+        if (s_.loopAreas_[loop].termStart_ >= 0)
+            return s_.loopAreas_[loop].termStart_;
+        const CsgGridPoint2* points = LoopPoints(loop);
+        CsgReal terms[CsgLoopAreaMaxTerms];
+        const int termCount = CsgExact::LoopAreaExact(points, s_.pool_.Count(loop), terms);
+        const int start = static_cast<int>(s_.areaTerms_.size());
+        s_.areaTerms_.insert(s_.areaTerms_.end(), terms, terms + termCount);
+        s_.loopAreas_[loop].termStart_ = start;
+        s_.loopAreas_[loop].termCount_ = termCount;
+        return start;
     }
 
     void Trace(int from, int to)
@@ -1767,19 +1816,16 @@ private:
             return false;
 
         // Outer holes first, so a hole inside an island is placed after the island exists. The sort is stable.
+        // It orders the holes by the exact area. The larger area comes first.
         const int holeTotal = static_cast<int>(s_.holes_.size());
-        s_.keys_.resize(holeTotal);
         s_.order_.resize(holeTotal);
         for (int i = 0; i < holeTotal; ++i)
-        {
-            s_.keys_[i] = AreaMagnitude(s_.holes_[i]);
             s_.order_[i] = i;
-        }
         {
-            const ea::vector<double>& keys = s_.keys_;
+            const ea::vector<int>& holes = s_.holes_;
             s_.merge_.resize(holeTotal);
             ea::merge_sort_buffer(s_.order_.begin(), s_.order_.end(), s_.merge_.data(),
-                [&keys](int x, int y) { return CompareDouble(keys[y], keys[x]) < 0; });
+                [this, &holes](int x, int y) { return CompareAreaMagnitude(holes[y], holes[x]) < 0; });
         }
         s_.temp1_.resize(holeTotal);
         for (int i = 0; i < holeTotal; ++i)
@@ -1801,7 +1847,7 @@ private:
             // contains the hole is the nearest one around it.
             int index = -1;
             int fallback = -1;
-            double smallest = std::numeric_limits<double>::infinity();
+            int smallestRegion = -1;
             for (int r = 0; r < static_cast<int>(s_.regions_.size()); ++r)
             {
                 const int region = s_.regions_[r];
@@ -1811,10 +1857,9 @@ private:
                     fallback = r;
                 if (!HoleInside(region, hole))
                     continue;
-                const double area = AreaMagnitude(region);
-                if (area < smallest)
+                if (smallestRegion < 0 || CompareAreaMagnitude(region, smallestRegion) < 0)
                 {
-                    smallest = area;
+                    smallestRegion = region;
                     index = r;
                 }
             }

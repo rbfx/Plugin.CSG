@@ -1779,7 +1779,7 @@ bool RefSegmentsCross(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgG
         && std::max(std::min(a.v_, b.v_), std::min(c.v_, d.v_)) <= std::min(std::max(a.v_, b.v_), std::max(c.v_, d.v_));
 }
 
-int RefLoopAreaSign(const CsgGridPoint2* points, int count)
+RefInt RefLoopArea(const CsgGridPoint2* points, int count)
 {
     RefInt sum = RefInt(0);
     for (int i = 1; i + 1 < count; ++i)
@@ -1787,7 +1787,42 @@ int RefLoopAreaSign(const CsgGridPoint2* points, int count)
         const CsgGridPoint2 d0 = Diff(points[i], points[0]), d1 = Diff(points[i + 1], points[0]);
         sum = sum + (CsgTest::Mul64<RefInt>(d0.u_, d1.v_) - CsgTest::Mul64<RefInt>(d0.v_, d1.u_));
     }
-    return RefSign(sum);
+    return sum;
+}
+
+int RefLoopAreaSign(const CsgGridPoint2* points, int count)
+{
+    return RefSign(RefLoopArea(points, count));
+}
+
+/// Sign of |area of a| - |area of b| in the oracle.
+int RefCompareLoopAreaMagnitude(const std::vector<CsgGridPoint2>& a, const std::vector<CsgGridPoint2>& b)
+{
+    const RefInt areaA = RefLoopArea(a.data(), static_cast<int>(a.size()));
+    const RefInt areaB = RefLoopArea(b.data(), static_cast<int>(b.size()));
+    return RefSign((RefSign(areaA) < 0 ? -areaA : areaA) - (RefSign(areaB) < 0 ? -areaB : areaB));
+}
+
+/// The sum of the doubles that the hole sort used before the exact comparison.
+double DoubleLoopAreaMagnitude(const std::vector<CsgGridPoint2>& loop)
+{
+    double area = 0.0;
+    for (size_t i = 1; i + 1 < loop.size(); ++i)
+    {
+        const CsgGridPoint2 p = Diff(loop[i], loop[0]);
+        const CsgGridPoint2 q = Diff(loop[i + 1], loop[0]);
+        area += static_cast<double>(p.u_) * q.v_ - static_cast<double>(p.v_) * q.u_;
+    }
+    return std::fabs(area);
+}
+
+int CompareLoopAreaExact(const std::vector<CsgGridPoint2>& a, const std::vector<CsgGridPoint2>& b)
+{
+    CsgReal termsA[CsgLoopAreaMaxTerms];
+    CsgReal termsB[CsgLoopAreaMaxTerms];
+    const int countA = CsgExact::LoopAreaExact(a.data(), static_cast<int>(a.size()), termsA);
+    const int countB = CsgExact::LoopAreaExact(b.data(), static_cast<int>(b.size()), termsB);
+    return CsgExact::CompareLoopAreaMagnitude(countA, termsA, countB, termsB);
 }
 
 /// Random grid coordinate. The distributions cover the full range, the extremes, and small values.
@@ -2526,6 +2561,122 @@ TEST_CASE("LoopAreaSign of a collapsed loop is zero", "[exact][planar]")
     // A thin sliver of area 1/2 unit square stays nonzero.
     const CsgGridPoint2 sliver[3] = {Pt(-(GridLimit - 1), -(GridLimit - 1)), Pt(GridLimit - 1, GridLimit - 1), Pt(GridLimit - 1, GridLimit - 2)};
     REQUIRE(CsgExact::LoopAreaSign(sliver, 3) == -1);
+}
+
+TEST_CASE("LoopAreaExact has the sign of the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1020);
+    std::vector<CsgGridPoint2> loop;
+    for (int i = 0; i < 2000; ++i)
+    {
+        const int count = (i % 5 == 0) ? 250 + static_cast<int>(random() % 60) : 3 + static_cast<int>(random() % 12);
+        loop.clear();
+        for (int j = 0; j < count; ++j)
+            loop.push_back(RandomPoint(random));
+        CsgReal terms[CsgLoopAreaMaxTerms];
+        const int termCount = CsgExact::LoopAreaExact(loop.data(), count, terms);
+        REQUIRE(CsgExpansionSign(termCount, terms) == RefLoopAreaSign(loop.data(), count));
+    }
+    CsgReal terms[CsgLoopAreaMaxTerms];
+    REQUIRE(CsgExact::LoopAreaExact(loop.data(), 2, terms) == 0);
+    REQUIRE(CsgExact::LoopAreaExact(nullptr, 0, terms) == 0);
+}
+
+TEST_CASE("CompareLoopAreaMagnitude matches the int128 oracle", "[exact][planar]")
+{
+    std::mt19937_64 random(1021);
+    std::vector<CsgGridPoint2> a;
+    std::vector<CsgGridPoint2> b;
+    int counts[3] = {};
+    for (int i = 0; i < 3000; ++i)
+    {
+        a.clear();
+        const int count = 3 + static_cast<int>(random() % 20);
+        for (int j = 0; j < count; ++j)
+            a.push_back(RandomPoint(random));
+        b.clear();
+        switch (i % 4)
+        {
+        case 0: // A random loop.
+            for (int j = 0, n = 3 + static_cast<int>(random() % 20); j < n; ++j)
+                b.push_back(RandomPoint(random));
+            break;
+        case 1: // The reverse loop has the same magnitude.
+            b.assign(a.rbegin(), a.rend());
+            break;
+        case 2: // One vertex moves by at most 2 grid units: the areas are close.
+            b = a;
+            b[1 + random() % (count - 1)].v_ += (random() & 1) ? 1 : -1;
+            break;
+        default: // A loop with a repeated start and a zero area.
+            b.assign(a.size(), a[0]);
+            break;
+        }
+        const int expected = RefCompareLoopAreaMagnitude(a, b);
+        REQUIRE(CompareLoopAreaExact(a, b) == expected);
+        REQUIRE(CompareLoopAreaExact(b, a) == -expected);
+        REQUIRE(CompareLoopAreaExact(a, a) == 0);
+        ++counts[expected + 1];
+    }
+    REQUIRE(counts[0] > 100);
+    REQUIRE(counts[1] > 100);
+    REQUIRE(counts[2] > 100);
+}
+
+TEST_CASE("CompareLoopAreaMagnitude separates areas that differ by 1", "[exact][planar]")
+{
+    // A star polygon winds around its center many times. The doubled area and the partial sums of the fan are large.
+    // The larger loop has the exact area D + 1 and the smaller one has D. D needs many terms of the double sum.
+    // Float mode needs a star with many vertices: the terms are below 2^49 and the partial sums reach 2^53 slowly.
+    // Double mode has terms of 2^58 and more, so 20 vertices are enough.
+    constexpr int VertexCount = CsgGridBits <= 24 ? 301 : 20;
+    constexpr int Step = CsgGridBits <= 24 ? 75 : 3;
+    constexpr double Pi = 3.14159265358979323846;
+    std::mt19937_64 random(1022);
+    int doubleWrong = 0;
+    int maxTerms = 0;
+    constexpr int Trials = 200;
+    for (int trial = 0; trial < Trials; ++trial)
+    {
+        const double radius = static_cast<double>(GridLimit - 16 - static_cast<int64_t>(random() % 8));
+        const double phase = static_cast<double>(random() % 1000) * 0.001;
+        std::vector<CsgGridPoint2> smaller;
+        for (int i = 0; i < VertexCount; ++i)
+        {
+            const double angle = phase + 2.0 * Pi * (static_cast<double>(i) * Step / VertexCount);
+            smaller.push_back(Pt(std::llround(radius * std::cos(angle)), std::llround(radius * std::sin(angle))));
+        }
+        // The neighbors of the vertex j have the u coordinates a and a - 1. A step of 1 in v of the vertex j
+        // changes the doubled area by exactly 1.
+        const int j = 2 + static_cast<int>(random() % (VertexCount - 4));
+        smaller[j + 1].u_ = smaller[j - 1].u_ - 1;
+        std::vector<CsgGridPoint2> larger = smaller;
+        const RefInt before = RefLoopArea(smaller.data(), VertexCount);
+        for (const int delta : {1, -1})
+        {
+            larger[j].v_ = smaller[j].v_ + delta;
+            const RefInt after = RefLoopArea(larger.data(), VertexCount);
+            REQUIRE(RefSign(after - before) != 0);
+            // The loops have one orientation. The order of the magnitudes is the order of the signed areas.
+            REQUIRE(RefSign(RefLoopArea(smaller.data(), VertexCount)) != 0);
+            const int expected = RefCompareLoopAreaMagnitude(larger, smaller);
+            REQUIRE(expected != 0);
+            REQUIRE(CompareLoopAreaExact(larger, smaller) == expected);
+            REQUIRE(CompareLoopAreaExact(smaller, larger) == -expected);
+
+            const double doubleLarger = DoubleLoopAreaMagnitude(larger);
+            const double doubleSmaller = DoubleLoopAreaMagnitude(smaller);
+            const int doubleSign = doubleLarger > doubleSmaller ? 1 : (doubleLarger < doubleSmaller ? -1 : 0);
+            doubleWrong += doubleSign != expected;
+
+            CsgReal terms[CsgLoopAreaMaxTerms];
+            maxTerms = std::max(maxTerms, CsgExact::LoopAreaExact(larger.data(), VertexCount, terms));
+        }
+    }
+    WARN("The double sum gave the wrong order in " << doubleWrong << " of " << 2 * Trials << " pairs. Maximum terms: "
+                                                   << maxTerms);
+    // The old double method must fail on these loops, so the test shows the value of the exact comparison.
+    REQUIRE(doubleWrong > 0);
 }
 
 TEST_CASE("Orient2 cost", "[.orient2cost][exact]")

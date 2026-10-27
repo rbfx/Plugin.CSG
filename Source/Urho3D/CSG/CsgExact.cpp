@@ -550,11 +550,16 @@ int CsgExact::LoopAreaSign(const CsgGridPoint2* points, int count)
 
 int CsgExact::LoopAreaSignExact(const CsgGridPoint2* points, int count)
 {
+    CsgReal area[CsgLoopAreaMaxTerms];
+    const int areaCount = LoopAreaExact(points, count, area);
+    return CsgExpansionSign(areaCount, area);
+}
+
+int CsgExact::LoopAreaExact(const CsgGridPoint2* points, int count, CsgReal* out)
+{
     if (count < 3)
         return 0;
-    // The sum has a magnitude below 2^CsgExactPlanarBits times the number of terms.
-    // A compressed expansion of such an integer has fewer than 64 terms.
-    constexpr int Capacity = 64;
+    constexpr int Capacity = CsgLoopAreaMaxTerms;
     CsgReal bufferA[Capacity + 4];
     CsgReal bufferB[Capacity + 4];
     CsgReal* current = bufferA;
@@ -571,7 +576,30 @@ int CsgExact::LoopAreaSignExact(const CsgGridPoint2* points, int count)
         std::swap(current, next);
         currentCount = nextCount;
     }
-    return CsgExpansionSign(currentCount, current);
+    for (int i = 0; i < currentCount; ++i)
+        out[i] = current[i];
+    return currentCount;
+}
+
+int CsgExact::CompareLoopAreaMagnitude(int countA, const CsgReal* a, int countB, const CsgReal* b)
+{
+    URHO3D_ASSERT(countA <= CsgLoopAreaMaxTerms && countB <= CsgLoopAreaMaxTerms);
+    const int signA = CsgExpansionSign(countA, a);
+    const int signB = CsgExpansionSign(countB, b);
+    if (signA == 0 || signB == 0)
+        return (signA != 0) - (signB != 0);
+
+    // |A| - |B| = sA * A - sB * B. A negation is exact and keeps the order of the terms.
+    // The exact sum has no limit on the size of the inputs, so it needs no bit or term limit.
+    CsgReal positiveA[CsgLoopAreaMaxTerms];
+    CsgReal negativeB[CsgLoopAreaMaxTerms];
+    for (int i = 0; i < countA; ++i)
+        positiveA[i] = signA < 0 ? -a[i] : a[i];
+    for (int i = 0; i < countB; ++i)
+        negativeB[i] = signB < 0 ? b[i] : -b[i];
+    CsgReal difference[2 * CsgLoopAreaMaxTerms];
+    const int count = CsgExpansionSum(countA, positiveA, countB, negativeB, difference);
+    return CsgExpansionSign(count, difference);
 }
 
 } // namespace Urho3D
