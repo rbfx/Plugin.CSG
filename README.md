@@ -49,6 +49,7 @@ All exact decisions use an integer grid:
 - One rounding rule makes a grid coordinate: floor(x + 1/2). A tie goes toward plus infinity.
 - An operand snaps once. `CsgSolid::FromOperand` welds the corners within `epsilon`, repairs the T-junctions, and snaps each welded position to the grid. The fast entry (`PresnappedFaces`) does the weld and the snap in one pass. It is enough if the snapped faces close up exactly. A constructor without grid points (the polygon list entry) also welds within `epsilon`. No later step snaps a position again.
 - A crossing of an edge through a triangle rounds once with the same rule. `CsgExact::RoundOnEdge` and `CsgExact::RoundCrossing` apply the rule exactly to a point on an edge.
+- A rounded crossing can fold: it leaves its triangle, it crosses a segment or a chain edge of a triangle map, or it breaks the order of the crossings on its edge. `Corefinement::ConstrainCrossings` runs after the crossings are collected. It tests each crossing that is not exactly on the grid. If the crossing folds, it tries the other corners of the grid cell of the exact crossing, and keeps the first corner that does not fold. A crossing with no valid corner keeps its nearest rounding. The switch `ConstrainCrossingsOnGrid` (in `CsgCorefine.h`) turns the pass off.
 - The bounds of the exact values follow from the grid (`CsgExact.h`): minors below 2^50 and determinants below 2^75 in float mode, minors below 2^62 and determinants below 2^93 in double mode.
 - The SIMD filter stays on float in both modes. Its error bounds are `CsgPlanarFilterBound` (planar determinants and dot products) and `CsgDistanceFilterBound` (distances). In double mode the conversion of a difference to float can round, and the bounds cover this error. A value inside the bound goes to the exact path.
 
@@ -66,8 +67,9 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 ## Known limits
 
 - Rounding changes the shape. A vertex moves by up to half a grid step on each axis (1/2048 units in float mode, 1/131072 units in double mode).
-- In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, 9 samples fail in float mode and 11 samples fail in double mode. Rounding turns thin slivers over, and the surface does not close.
-- `MergeCrossingsOnGrid` (in `CsgCorefine.h`) is a compile-time switch. It is off. With the switch on, crossings that round to one grid point share one id and the splitter closes all its traces. But more samples fail: 21 in float mode and 18 in double mode. The open results have coplanar regions that stay twice, because the two operands split them differently. A topology-preserving snap rounding is the next design step.
+- In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, 3 samples fail in float mode and 4 samples fail in double mode. The union is right in all of them, but the next boolean on the result fails. A rounded small cycle can turn over without a fold that the rules find, and a crossing can have no valid corner in its cell. In the sweep, no closed result has a wrong volume.
+- `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
+- `MergeCrossingsOnGrid` (in `CsgCorefine.h`) is a compile-time switch. It is off. With the switch on, crossings that round to one grid point share one id and the splitter closes all its traces. But more samples fail (21 in float mode and 18 in double mode before `ConstrainCrossings`). The open results have coplanar regions that stay twice, because the two operands split them differently. A topology-preserving snap rounding is the next design step.
 - A coordinate outside of +-8192 units gives a result that is not valid.
 
 ## Benchmark

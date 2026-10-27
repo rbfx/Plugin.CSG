@@ -492,18 +492,23 @@ void RunSweep(float step, unsigned maxFailures)
 
 // The sweep covers rotations of the coplanar contact: 4 axes and 257 angles from 0.3 to 179.5 degrees.
 // The grid step is 2^-10 units in float mode. The snapped corners do not stay coplanar.
-// The measured count of failed samples is 9 of 1028.
+// The pass ConstrainCrossings moves a folded crossing to a valid corner of its grid cell.
+// The measured count of failed samples is 3 of 1028 in float mode. Without the pass it is 9.
 // In all of them the union of A and B is right. The next boolean fails because the result has an open edge.
-// The failed samples are about the axis (1, 1, 1) (6), the z axis (2) and the x axis (1).
+// The failed samples are about the axis (1, 1, 1) (2) and the x axis (1).
 // A closed result must have the exact volume of the union. The test checks this in all samples.
-// The failed samples are a known limit: rounding turns a thin sliver over and the result stays open.
-// The test fails if more than 16 samples fail, or if a closed result has a wrong volume. It passes in both modes.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 11 samples fail: the axis (1, 1, 1) (8), the x axis (2)
-// and the z axis (1). The union of A and B is right in all of them.
+// The failed samples are a known limit: a small rounded cycle turns over, or a crossing has no valid corner.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 4 samples fail (11 without the pass): the x axis (3)
+// and the axis (1, 1, 1) (1). The union of A and B is right in all of them.
+// The test fails if more samples fail than the measured count plus one, or if a closed result has a wrong volume.
 TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep]")
 {
-    RunSweep(0.7f, 16);
+#if defined(CSG_EXACT_USE_DOUBLE)
+    RunSweep(0.7f, 5);
+#else
+    RunSweep(0.7f, 4);
+#endif
 }
 
 #ifdef CSG_DIAGNOSTICS
