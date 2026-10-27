@@ -88,6 +88,86 @@ int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
     return element.sourceFace_ >= 0 ? mesh.loops_.loopLength_[element.sourceFace_] : element.idCount_;
 }
 
+bool ClassifyGridCentroid(
+    const Mesh& other, const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int second);
+
+/// Tell if a triangle of grid points has a nonzero area. The cross product of the differences is exact in 64 bits.
+bool HasExactArea(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
+{
+    const int64_t abx = static_cast<int64_t>(b.x_) - a.x_, aby = static_cast<int64_t>(b.y_) - a.y_,
+                  abz = static_cast<int64_t>(b.z_) - a.z_;
+    const int64_t acx = static_cast<int64_t>(c.x_) - a.x_, acy = static_cast<int64_t>(c.y_) - a.y_,
+                  acz = static_cast<int64_t>(c.z_) - a.z_;
+    return aby * acz - abz * acy != 0 || abz * acx - abx * acz != 0 || abx * acy - aby * acx != 0;
+}
+
+/// The result of the exact classification of an element.
+enum class ExactResult
+{
+    /// The exact test gave the answer.
+    Done,
+    /// The operands are out of the range of the exact math.
+    OutOfRange,
+    /// Every triangle of the element has zero exact area.
+    ZeroArea,
+    /// The polygon does not match its loop, or the triangulation failed.
+    Mismatch
+};
+
+/// Classify the centroid of the largest triangle of an element with the exact ray test.
+/// The loop of the element in s.loops_ has the order of the vertices of its polygon. This holds for a region
+/// (RegionPolygon takes the vertex k from the id k), for a corner triangle, and for a face whose loop has no
+/// dropped id. The function takes only triangles with a nonzero exact area.
+/// If the exact test is not possible, the function leaves the result unchanged and tells the reason.
+ExactResult ClassifyElementExact(const Corefinement& core, CsgBooleanScratch& s, int element, const CsgPolygon& polygon,
+    const Mesh& otherMesh, bool second, bool& inside)
+{
+    const auto& vertices = polygon.vertices_;
+    const unsigned loopStart = static_cast<unsigned>(s.edgeStart_[element]);
+    const unsigned length = static_cast<unsigned>(s.edgeStart_[element + 1]) - loopStart;
+    if (vertices.size() != length || length < 3)
+        return ExactResult::Mismatch;
+    ea::vector<unsigned>& indices = s.indices_;
+    indices.clear();
+    if (length == 3)
+    {
+        indices = {0u, 1u, 2u};
+    }
+    else if (!CsgTriangulatePolygon(polygon, indices) || indices.size() < 3)
+    {
+        return ExactResult::Mismatch;
+    }
+    unsigned best = 0;
+    float bestArea = -1.0f;
+    for (unsigned t = 0; t + 2 < indices.size(); t += 3)
+    {
+        if (indices[t] >= length || indices[t + 1] >= length || indices[t + 2] >= length)
+            continue;
+        const CsgGridPoint& ga = PointGrid(core, s.loops_[loopStart + indices[t]]);
+        const CsgGridPoint& gb = PointGrid(core, s.loops_[loopStart + indices[t + 1]]);
+        const CsgGridPoint& gc = PointGrid(core, s.loops_[loopStart + indices[t + 2]]);
+        if (!HasExactArea(ga, gb, gc))
+            continue;
+        const Vector3 a = vertices[indices[t]].GetPosition();
+        const float area =
+            (vertices[indices[t + 1]].GetPosition() - a).CrossProduct(vertices[indices[t + 2]].GetPosition() - a)
+                .LengthSquared();
+        if (area > bestArea)
+        {
+            bestArea = area;
+            best = t;
+        }
+    }
+    if (bestArea < 0.0f)
+        return ExactResult::ZeroArea;
+    // The second operand moves. A triangle of the first operand uses the mask 0b0111, where the other mesh moves.
+    // A triangle of the second operand uses the mask 0b1000, where the triangle moves.
+    inside = ClassifyGridCentroid(otherMesh, PointGrid(core, s.loops_[loopStart + indices[best]]),
+        PointGrid(core, s.loops_[loopStart + indices[best + 1]]),
+        PointGrid(core, s.loops_[loopStart + indices[best + 2]]), second ? 0b1000 : 0b0111);
+    return ExactResult::Done;
+}
+
 /// Classify the elements of an operand against the other operand. The result is in the labels of the operand:
 /// not zero if inside.
 ///
@@ -95,11 +175,12 @@ int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
 /// the element on the left of an oriented segment is inside for the first operand, and on its right for the second.
 /// Elements joined by an edge off the curve form a patch. All elements of a patch get the same label:
 /// the sign of the sum of the votes of all curve edges of the patch.
-/// A patch with no net vote falls back to a point query.
+/// A patch with no net vote gets a point query on its largest element. If the operands are in the range of the
+/// exact math, the query is the exact ray test of the centroid of a triangle. Else it is the float query.
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
 void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElements& o, CsgBooleanScratch& s,
-    const CsgSolid& other, bool second, float epsilon)
+    const CsgSolid& other, const Mesh& otherMesh, bool second, float epsilon)
 {
     const int elementCount = static_cast<int>(o.elements_.size());
 
@@ -290,9 +371,21 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
     {
         if (s.patchBest_[root] < 0)
             continue;
-        bool reliable = true;
-        const bool inside = other.ClassifyPoint(
-            PolygonInteriorPoint(*o.elements_[s.patchBest_[root]].polygon_, s.indices_), epsilon, reliable);
+        const int best = s.patchBest_[root];
+        bool inside = false;
+        ExactResult result = ExactResult::OutOfRange;
+        if (!core.outOfRange_)
+            result = ClassifyElementExact(core, s, best, *o.elements_[best].polygon_, otherMesh, second, inside);
+        if (result != ExactResult::Done)
+        {
+            // An element with zero exact area, or a polygon that does not match its loop, has no exact test.
+            if (result == ExactResult::ZeroArea)
+                CSG_DIAG_COUNT(zeroSumDegeneratePatches_);
+            else if (result == ExactResult::Mismatch)
+                CSG_DIAG_COUNT(zeroSumFloatFallbacks_);
+            bool reliable = true;
+            inside = other.ClassifyPoint(PolygonInteriorPoint(*o.elements_[best].polygon_, s.indices_), epsilon, reliable);
+        }
         s.patchVotes_[root] = inside ? 1 : -1;
     }
     for (int e = 0; e < elementCount; ++e)
@@ -1193,7 +1286,7 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
                 result.AppendComponent(solid, component, flip);
         }
         if (!o.elements_.empty())
-            ClassifyElements(core, mesh, o, s, other, second, epsilon);
+            ClassifyElements(core, mesh, o, s, other, otherMesh, second, epsilon);
     }
 
     BuildKeptSet(operation, s);
@@ -1215,18 +1308,17 @@ bool AxisRayHitsBox(const Vector3& origin, const Vector3& min, const Vector3& ma
         && origin.z_ <= max.z_ + pad && origin.x_ <= max.x_ + pad;
 }
 
-/// Return true if a grid point is inside the solid of a mesh. The point and the mesh have the displacement
-/// mask second, as in CsgExact::AxisRayCrossesTriangle. It is 0b0111 if the mesh is the second operand.
-/// The result is the parity of the exact crossings of a ray along +x. No float test decides a crossing.
-/// The float boxes only skip triangles that the ray cannot hit.
-bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second)
+/// Count the exact crossings of a ray along +x with the triangles of a mesh and return their parity.
+/// The origin is a float position of the ray. It only selects the triangles with the float boxes.
+/// The callback crosses(a, b, c) gets the grid points of a triangle and returns the exact result.
+/// No float test decides a crossing. The float boxes only skip triangles that the ray cannot hit.
+template <class Crosses> bool ClassifyRay(const Mesh& other, const Vector3& origin, const Crosses& crosses)
 {
     constexpr float pad = 0.002f;
     const CsgSolid& solid = other.solid_;
     const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
     URHO3D_ASSERT(other.triangleIds_.size() == 3 * static_cast<size_t>(triangleStart.empty() ? 0 : triangleStart.back()));
 
-    const Vector3 origin = p.ToPosition();
     const CsgFaceBvh& components = solid.GetComponentTree();
     if (components.ItemCount() == 0)
         return false;
@@ -1236,8 +1328,8 @@ bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second)
     {
         for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
         {
-            parity ^= CsgExact::AxisRayCrossesTriangle(p, other.grid_[other.triangleIds_[t * 3]],
-                other.grid_[other.triangleIds_[t * 3 + 1]], other.grid_[other.triangleIds_[t * 3 + 2]], second);
+            parity ^= crosses(other.grid_[other.triangleIds_[t * 3]], other.grid_[other.triangleIds_[t * 3 + 1]],
+                other.grid_[other.triangleIds_[t * 3 + 2]]);
         }
     };
     const auto walk = [&](const CsgFaceBvh& tree, auto&& visitItem)
@@ -1271,6 +1363,31 @@ bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second)
                 walk(solid.GetFaceTree(component), addFaceTriangles);
         });
     return parity;
+}
+
+/// Return true if a grid point is inside the solid of a mesh. The point and the mesh have the displacement
+/// mask second, as in CsgExact::AxisRayCrossesTriangle. It is 0b0111 if the mesh is the second operand.
+/// The result is the parity of the exact crossings of a ray along +x.
+bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second)
+{
+    return ClassifyRay(other, p.ToPosition(),
+        [&](const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2)
+        { return CsgExact::AxisRayCrossesTriangle(p, t0, t1, t2, second); });
+}
+
+/// Return true if the centroid (a + b + c) / 3 of a grid triangle is inside the solid of a mesh.
+/// The mask second has the meaning of ClassifyGridPoint. The three points have the same operand.
+/// The float origin is the centroid in double, rounded to float.
+bool ClassifyGridCentroid(
+    const Mesh& other, const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int second)
+{
+    constexpr double step = 1.0 / CsgGridScale / 3.0;
+    const Vector3 origin(static_cast<float>((static_cast<double>(a.x_) + b.x_ + c.x_) * step),
+        static_cast<float>((static_cast<double>(a.y_) + b.y_ + c.y_) * step),
+        static_cast<float>((static_cast<double>(a.z_) + b.z_ + c.z_) * step));
+    return ClassifyRay(other, origin,
+        [&](const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2)
+        { return CsgExact::AxisRayCrossesTriangleCentroid(a, b, c, t0, t1, t2, second); });
 }
 
 } // namespace
@@ -1307,6 +1424,13 @@ bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, i
 {
     const Mesh mesh(other, second == 0b0111, 0);
     return ClassifyGridPoint(mesh, p, second);
+}
+
+bool CsgClassifyGridCentroidForTest(
+    const CsgSolid& other, const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int second)
+{
+    const Mesh mesh(other, second == 0b0111, 0);
+    return ClassifyGridCentroid(mesh, a, b, c, second);
 }
 
 } // namespace CsgInternal

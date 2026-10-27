@@ -2928,4 +2928,103 @@ TEST_CASE("AxisRayCrossesTriangle parity equals ContainsPoint on a sphere", "[ex
     CHECK(inside > 100);
 }
 
+TEST_CASE("AxisRayCrossesTriangleCentroid of equal points equals AxisRayCrossesTriangle", "[exact][axisray]")
+{
+    std::mt19937_64 random(4242);
+    // Small ranges give many ties: points on the plane, on a projected edge or on a projected vertex.
+    for (const int range : {2, 3, 6})
+    {
+        std::uniform_int_distribution<int> coordinate(-range, range);
+        std::uniform_int_distribution<int> weight(-2, 3);
+        const auto randomPoint = [&] { return GridP(coordinate(random), coordinate(random), coordinate(random)); };
+        for (int i = 0; i < 4000; ++i)
+        {
+            const CsgGridPoint t0 = randomPoint(), t1 = randomPoint(), t2 = randomPoint();
+            CsgGridPoint a = randomPoint();
+            if (i % 3 == 1)
+            {
+                // A point on the plane of the triangle, and on the edge t0 t1 if the weight j is zero.
+                const int u = weight(random), v = weight(random);
+                a = GridP(t0.x_ + u * (t1.x_ - t0.x_) + v * (t2.x_ - t0.x_),
+                    t0.y_ + u * (t1.y_ - t0.y_) + v * (t2.y_ - t0.y_), t0.z_ + u * (t1.z_ - t0.z_) + v * (t2.z_ - t0.z_));
+            }
+            else if (i % 3 == 2)
+            {
+                // A point on the projected edge or on the ray through a projected vertex, with any x.
+                const CsgGridPoint& e0 = i % 2 == 0 ? t0 : t1;
+                const CsgGridPoint& e1 = i % 2 == 0 ? t1 : t2;
+                const int u = weight(random);
+                a = GridP(coordinate(random), e0.y_ + u * (e1.y_ - e0.y_), e0.z_ + u * (e1.z_ - e0.z_));
+            }
+            for (const int second : RayMasks)
+            {
+                INFO("range " << range << " i " << i << " mask " << second);
+                REQUIRE(CsgExact::AxisRayCrossesTriangleCentroid(a, a, a, t0, t1, t2, second)
+                    == CsgExact::AxisRayCrossesTriangle(a, t0, t1, t2, second));
+            }
+        }
+    }
+}
+
+TEST_CASE("AxisRayCrossesTriangleCentroid equals AxisRayCrossesTriangle at an integer centroid", "[exact][axisray]")
+{
+    std::mt19937_64 random(99);
+    for (const int range : {2, 3, 6})
+    {
+        std::uniform_int_distribution<int> coordinate(-range, range);
+        std::uniform_int_distribution<int> weight(-2, 3);
+        const auto randomPoint = [&] { return GridP(coordinate(random), coordinate(random), coordinate(random)); };
+        for (int i = 0; i < 4000; ++i)
+        {
+            const CsgGridPoint t0 = randomPoint(), t1 = randomPoint(), t2 = randomPoint();
+            CsgGridPoint q = randomPoint();
+            if (i % 2 == 1)
+            {
+                // The centroid is on the plane of the triangle.
+                const int u = weight(random), v = weight(random);
+                q = GridP(t0.x_ + u * (t1.x_ - t0.x_) + v * (t2.x_ - t0.x_),
+                    t0.y_ + u * (t1.y_ - t0.y_) + v * (t2.y_ - t0.y_), t0.z_ + u * (t1.z_ - t0.z_) + v * (t2.z_ - t0.z_));
+            }
+            // The offsets sum to zero, so the sum a + b + c is 3 q.
+            const CsgGridPoint du = randomPoint(), dv = randomPoint();
+            const CsgGridPoint a = GridP(q.x_ + du.x_, q.y_ + du.y_, q.z_ + du.z_);
+            const CsgGridPoint b = GridP(q.x_ + dv.x_, q.y_ + dv.y_, q.z_ + dv.z_);
+            const CsgGridPoint c = GridP(q.x_ - du.x_ - dv.x_, q.y_ - du.y_ - dv.y_, q.z_ - du.z_ - dv.z_);
+            for (const int second : RayMasks)
+            {
+                INFO("range " << range << " i " << i << " mask " << second);
+                REQUIRE(CsgExact::AxisRayCrossesTriangleCentroid(a, b, c, t0, t1, t2, second)
+                    == CsgExact::AxisRayCrossesTriangle(q, t0, t1, t2, second));
+            }
+        }
+    }
+}
+
+TEST_CASE("AxisRayCrossesTriangleCentroid with a centroid on a shared projected edge", "[exact][axisray]")
+{
+    // The same triangle pairs as in the test of the shared projected edge. The centroid is (0, 5, 5).
+    const CsgGridPoint a = GridP(0, 2, 5), b = GridP(-3, 8, 6), c = GridP(4, 5, 4);
+    const CsgGridPoint collinearA = GridP(0, 2, 2), collinearB = GridP(1, 8, 8), collinearC = GridP(-1, 5, 5);
+    const std::vector<std::vector<CsgGridPoint>> cornerSets = {
+        {GridP(5, 0, 0), GridP(5, 10, 10), GridP(5, 10, 0), GridP(6, 0, 0), GridP(4, 10, 10), GridP(5, 0, 10)},
+        {GridP(5, 0, 5), GridP(5, 10, 5), GridP(5, 5, 10), GridP(5, 10, 5), GridP(5, 0, 5), GridP(5, 5, 0)},
+        {GridP(5, 5, 0), GridP(5, 5, 10), GridP(5, 10, 5), GridP(5, 5, 10), GridP(5, 5, 0), GridP(5, 0, 5)}};
+    for (const std::vector<CsgGridPoint>& corners : cornerSets)
+    {
+        for (const int second : RayMasks)
+        {
+            int count = 0;
+            int collinearCount = 0;
+            for (size_t i = 0; i < 6; i += 3)
+            {
+                count += CsgExact::AxisRayCrossesTriangleCentroid(a, b, c, corners[i], corners[i + 1], corners[i + 2], second);
+                collinearCount += CsgExact::AxisRayCrossesTriangleCentroid(
+                    collinearA, collinearB, collinearC, corners[i], corners[i + 1], corners[i + 2], second);
+            }
+            CHECK(count == 1);
+            CHECK(collinearCount == 1);
+        }
+    }
+}
+
 } // namespace Urho3D

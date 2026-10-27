@@ -264,6 +264,69 @@ bool CsgExact::AxisRayCrossesTriangle(const CsgGridPoint& p, const CsgGridPoint&
     return o3 * s < 0;
 }
 
+bool CsgExact::AxisRayCrossesTriangleCentroid(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c,
+    const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2, int second)
+{
+    URHO3D_ASSERT(second == 0b0111 || second == 0b1000, "The mask must move the triangle or the point");
+
+    // The sample is q = (a + b + c) / 3. Multiplying by 3 does not change a sign, so q needs no scaling:
+    // the sign of d x (q - e0) is the sign of d x ((a - e0) + (b - e0) + (c - e0)).
+    // Each cross is below 2^(2 * CsgGridBits + 3). The sum of three is below 2^(2 * CsgGridBits + 5).
+    static_assert(2 * CsgGridBits + 5 <= 63, "The sum of three planar crosses must fit in 64 bits.");
+    const CsgGridPoint2 samples[3] = {Project(a, 0, false), Project(b, 0, false), Project(c, 0, false)};
+    const CsgGridPoint2 corners[3] = {Project(t0, 0, false), Project(t1, 0, false), Project(t2, 0, false)};
+
+    const int s = Orient2(corners[0], corners[1], corners[2]);
+    if (s == 0)
+        return false;
+
+    // The displacement and the tie rule are the same as in AxisRayCrossesTriangle. All three points move together.
+    const int r = second == 0b1000 ? 1 : -1;
+    for (int i = 0; i < 3; ++i)
+    {
+        const CsgGridPoint2& e0 = corners[i];
+        const CsgGridPoint2& e1 = corners[(i + 1) % 3];
+        const CsgGridPoint2 d = Difference(e1, e0);
+        int64_t sum = 0;
+        for (const CsgGridPoint2& sample : samples)
+        {
+            const CsgGridPoint2 w = Difference(sample, e0);
+            sum += static_cast<int64_t>(d.u_) * w.v_ - static_cast<int64_t>(d.v_) * w.u_;
+        }
+        int o = sum > 0 ? 1 : (sum < 0 ? -1 : 0);
+        if (o == 0)
+        {
+            if (d.v_ != 0)
+                o = d.v_ > 0 ? -r : r;
+            else
+                o = d.u_ > 0 ? r : -r;
+        }
+        if (o * s < 0)
+            return false;
+    }
+
+    // The sign of N . (q - t0) is the sign of the sum of N . (a - t0), N . (b - t0) and N . (c - t0).
+    // Each term has up to 24 terms. The sums have up to 48 and 72 terms.
+    const CsgNormal n = Normal(t0, t1, t2);
+    const CsgGridPoint* points[3] = {&a, &b, &c};
+    CsgExactVolume dots[3];
+    for (int i = 0; i < 3; ++i)
+        dots[i] = Dot(n, t0, *points[i]);
+    CsgReal partial[48];
+    int partialCount = CsgExpansionSum(dots[0].count_, dots[0].terms_, dots[1].count_, dots[1].terms_, partial);
+    partialCount = CsgCompress(partialCount, partial);
+    CsgReal total[72];
+    int totalCount = CsgExpansionSum(partialCount, partial, dots[2].count_, dots[2].terms_, total);
+    totalCount = CsgCompress(totalCount, total);
+    int o3 = CsgExpansionSign(totalCount, total);
+
+    // On the plane the displacement decides. The first nonzero component of N is N.x, and its sign is s.
+    // The point moves by r * delta relative to the triangle, so the sign is r * s.
+    if (o3 == 0)
+        o3 = r * s;
+    return o3 * s < 0;
+}
+
 CsgNormal CsgExact::Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
 {
     const CsgReal ux = static_cast<CsgReal>(static_cast<int64_t>(b.x_) - a.x_);

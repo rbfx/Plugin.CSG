@@ -752,6 +752,11 @@ CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& point
 /// if the solid is the second operand and the point is in the first, or 0b1000 for the reverse.
 bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, int second);
 
+/// Whether the centroid (a + b + c) / 3 of a grid triangle is inside a solid. The mask second is as in
+/// CsgClassifyGridPointForTest. The three points are in the same operand.
+bool CsgClassifyGridCentroidForTest(
+    const CsgSolid& other, const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int second);
+
 #ifdef CSG_DIAGNOSTICS
 /// Counters of events inside the boolean. Only the diagnostic tests define CSG_DIAGNOSTICS.
 /// The counters are atomic with relaxed order, because a boolean can run on more than one thread.
@@ -763,6 +768,11 @@ struct CsgBooleanDiagnostics
     std::atomic<int> patches_{};
     std::atomic<int> mixedVotePatches_{};
     std::atomic<int> zeroSumPatches_{};
+    /// Zero sum patches in the exact range that use the float point query because the polygon does not match its loop.
+    std::atomic<int> zeroSumFloatFallbacks_{};
+    /// Zero sum patches in the exact range where every triangle of the best element has zero exact area.
+    /// These patches use the float point query too.
+    std::atomic<int> zeroSumDegeneratePatches_{};
     std::atomic<int> mergedCrossings_{};
     std::atomic<int> lobeSplits_{};
     std::atomic<int> lobeHoleKept_{};
@@ -791,7 +801,7 @@ struct CsgBooleanDiagnostics
                  &zeroSumPatches_, &mergedCrossings_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
-                 &unconstrainableCrossings_})
+                 &unconstrainableCrossings_, &zeroSumFloatFallbacks_, &zeroSumDegeneratePatches_})
             counter->store(0, std::memory_order_relaxed);
     }
 };

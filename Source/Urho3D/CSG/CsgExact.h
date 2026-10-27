@@ -211,6 +211,13 @@ public:
     static bool AxisRayCrossesTriangle(const CsgGridPoint& p, const CsgGridPoint& t0, const CsgGridPoint& t1,
         const CsgGridPoint& t2, int second);
 
+    /// Same as AxisRayCrossesTriangle for the sample point q = (a + b + c) / 3, the centroid of a grid triangle.
+    /// The three points a, b, c are all in the same operand, and second has the meaning of AxisRayCrossesTriangle.
+    /// The function does not scale q. It uses sums of the exact tests of a, b and c.
+    /// The planar sums are below 2^(2 * CsgGridBits + 5) and are computed in 64 bits.
+    static bool AxisRayCrossesTriangleCentroid(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c,
+        const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2, int second);
+
     /// Project a grid point to a plane. The axis dropAxis (0, 1 or 2) is dropped.
     /// The other two axes keep the cyclic order: drop x gives (y, z), drop y gives (z, x), drop z gives (x, y).
     /// If flip is true, the two coordinates swap. This reverses the orientation of the projection.

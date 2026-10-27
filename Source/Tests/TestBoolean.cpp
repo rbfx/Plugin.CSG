@@ -567,6 +567,9 @@ void RunSweep(float step, unsigned maxFailures)
 {
     const Vector3 axes[] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD, Vector3::ONE};
     SweepStats stats;
+#ifdef CSG_DIAGNOSTICS
+    g_csgDiagnostics.Reset();
+#endif
     for (const Vector3& axis : axes)
     {
         for (unsigned i = 0;; ++i)
@@ -581,6 +584,11 @@ void RunSweep(float step, unsigned maxFailures)
         UNSCOPED_INFO(line);
     INFO("samples " << stats.samples_ << ", failures " << stats.failures_ << ", wrong unions " << stats.unionWrong_
                     << ", closed with a wrong volume " << stats.volumeWrong_);
+#ifdef CSG_DIAGNOSTICS
+    INFO("zero sum patches " << g_csgDiagnostics.zeroSumPatches_.load() << ", with zero exact area "
+                             << g_csgDiagnostics.zeroSumDegeneratePatches_.load() << ", float fallbacks "
+                             << g_csgDiagnostics.zeroSumFloatFallbacks_.load());
+#endif
     CHECK(stats.volumeWrong_ == 0);
     CHECK(stats.failures_ <= maxFailures);
 }
@@ -1206,6 +1214,66 @@ TEST_CASE("ClassifyGridPoint of the vertices of boxes that share a face", "[bool
     }
 }
 
+TEST_CASE("ClassifyGridCentroid of triangles around a box", "[boolean][classify]")
+{
+    const Vector3 half(1.0f, 1.0f, 1.0f);
+    const CsgSolid box(MakeBoxPolygons(Vector3::ZERO, half, 1));
+    const auto grid = [](float x, float y, float z) { return CsgGridPoint::From(Vector3(x, y, z)); };
+    for (const int second : {0b0111, 0b1000})
+    {
+        INFO("mask " << second);
+        // A centroid inside, near (0.3, 0, -0.2), from three points around it.
+        const CsgGridPoint a = grid(0.5f, 0.25f, -0.25f), b = grid(0.25f, -0.25f, 0.0f), c = grid(0.125f, 0.3f, -0.35f);
+        CHECK(CsgClassifyGridCentroidForTest(box, a, a, a, second) == CsgClassifyGridPointForTest(box, a, second));
+        CHECK(CsgClassifyGridCentroidForTest(box, a, b, c, second));
+        // A centroid outside, on each side of the box.
+        CHECK_FALSE(CsgClassifyGridCentroidForTest(box, grid(2.0f, 0.0f, 0.0f), grid(3.0f, 0.5f, 0.0f), grid(3.0f, -0.5f, 0.5f), second));
+        CHECK_FALSE(CsgClassifyGridCentroidForTest(box, grid(-3.0f, 0.0f, 0.0f), grid(-2.0f, 0.5f, 0.0f), grid(-2.5f, -0.5f, 0.5f), second));
+        CHECK_FALSE(CsgClassifyGridCentroidForTest(box, grid(0.0f, 2.0f, 0.0f), grid(0.5f, 3.0f, 0.0f), grid(-0.5f, 2.5f, 0.5f), second));
+        // The corners are outside the box but the centroid is inside.
+        CHECK(CsgClassifyGridCentroidForTest(box, grid(-3.0f, 0.0f, 0.0f), grid(3.0f, 3.0f, 0.0f), grid(0.0f, -3.0f, 0.0f), second));
+    }
+}
+
+TEST_CASE("ClassifyGridCentroid of a centroid on a face equals ClassifyGridPoint", "[boolean][classify]")
+{
+    const Vector3 half(1.0f, 1.0f, 1.0f);
+    const CsgSolid box(MakeBoxPolygons(Vector3::ZERO, half, 1));
+    const auto grid = [](float x, float y, float z) { return CsgGridPoint::From(Vector3(x, y, z)); };
+    // Each triangle has the centroid on a face of the box. The offsets of the corners sum to zero.
+    struct FaceCase
+    {
+        CsgGridPoint q_;
+        CsgGridPoint du_;
+        CsgGridPoint dv_;
+    };
+    const FaceCase cases[] = {
+        {grid(1.0f, 0.25f, 0.5f), grid(0.5f, 0.25f, 0.0f), grid(-0.25f, 0.5f, 0.25f)},
+        {grid(-1.0f, -0.5f, 0.25f), grid(0.25f, 0.5f, 0.125f), grid(0.5f, -0.25f, 0.5f)},
+        {grid(0.5f, 1.0f, -0.25f), grid(0.25f, 0.5f, 0.25f), grid(0.5f, -0.5f, 0.5f)},
+        {grid(0.0f, -1.0f, 0.5f), grid(0.5f, 0.25f, 0.25f), grid(-0.25f, 0.25f, 0.5f)},
+        {grid(0.25f, 0.5f, 1.0f), grid(0.25f, 0.5f, 0.5f), grid(0.5f, 0.25f, -0.5f)},
+        {grid(0.25f, -0.25f, -1.0f), grid(0.5f, 0.5f, 0.25f), grid(0.5f, 0.25f, 0.5f)},
+        // On an edge and on a corner of the box.
+        {grid(1.0f, 1.0f, 0.25f), grid(0.5f, 0.25f, 0.5f), grid(0.25f, -0.5f, 0.25f)},
+        {grid(-1.0f, 1.0f, -1.0f), grid(0.5f, 0.25f, 0.5f), grid(-0.25f, 0.5f, 0.25f)}};
+    for (const FaceCase& faceCase : cases)
+    {
+        const CsgGridPoint& q = faceCase.q_;
+        const CsgGridPoint& du = faceCase.du_;
+        const CsgGridPoint& dv = faceCase.dv_;
+        CsgGridPoint a = q, b = q, c = q;
+        a.x_ += du.x_, a.y_ += du.y_, a.z_ += du.z_;
+        b.x_ += dv.x_, b.y_ += dv.y_, b.z_ += dv.z_;
+        c.x_ -= du.x_ + dv.x_, c.y_ -= du.y_ + dv.y_, c.z_ -= du.z_ + dv.z_;
+        for (const int second : {0b0111, 0b1000})
+        {
+            INFO("mask " << second << " q " << q.x_ << " " << q.y_ << " " << q.z_);
+            CHECK(CsgClassifyGridCentroidForTest(box, a, b, c, second) == CsgClassifyGridPointForTest(box, q, second));
+        }
+    }
+}
+
 TEST_CASE("ClassifyGridPoint of a box on top of a box", "[boolean][classify]")
 {
     // B sits on top of A. The shared face is y = 1. The displacement moves B up by eps^2, so the boxes separate.
@@ -1270,8 +1338,25 @@ SolidPtr MakeTetrahedron(const Vector3 (&corners)[4], unsigned shared)
 
 } // namespace
 
+namespace
+{
+
+/// Checks at the end of a test that no zero sum patch used the float point query because of a mismatch.
+/// The operands are in the exact range. A patch with zero exact area uses the float query too. Its answer does not
+/// change the volume. The counter zeroSumDegeneratePatches_ counts these patches. The test does not check it.
+struct NoZeroSumFloatFallback
+{
+#ifdef CSG_DIAGNOSTICS
+    NoZeroSumFloatFallback() { g_csgDiagnostics.Reset(); }
+    ~NoZeroSumFloatFallback() { CHECK(g_csgDiagnostics.zeroSumFloatFallbacks_.load() == 0); }
+#endif
+};
+
+} // namespace
+
 TEST_CASE("Boolean of a tetrahedron with an apex on a box face", "[boolean][zerosum]")
 {
+    const NoZeroSumFloatFallback noFallback;
     // The apex lies exactly on the top face of the box, on the grid. The curve is only the apex.
     const auto box = MakeBox(Vector3::ZERO, 1);
     const double volumeBox = Volume(box);
@@ -1316,6 +1401,7 @@ TEST_CASE("Boolean of a tetrahedron with an apex on a box face", "[boolean][zero
 
 TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean][zerosum]")
 {
+    const NoZeroSumFloatFallback noFallback;
     // The width of the needle is below a fifth of a grid step. The two crossings on the top face of the box
     // round to the same grid point, so the chord between them collapses.
     const auto box = MakeBox(Vector3::ZERO, 1);
@@ -1343,6 +1429,7 @@ TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean
 
 TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boolean][zerosum]")
 {
+    const NoZeroSumFloatFallback noFallback;
     // The plate crosses the face x = 1 of the box. The two sheets of the plate cross the face on lines that
     // round to the same grid line. The two segments have opposite sides and cancel each other.
     const auto box = MakeBox(Vector3::ZERO, 1);
@@ -1369,6 +1456,7 @@ TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boo
 
 TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[boolean][zerosum]")
 {
+    const NoZeroSumFloatFallback noFallback;
     // A sample of the benchmark sweep: B shares a plane with A. The coplanar contact makes thin patches with no net vote.
     const Quaternion world(18.5f, Vector3::ONE.Normalized());
     const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
