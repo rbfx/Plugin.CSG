@@ -931,13 +931,6 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         return;
     }
 
-    if (job->outOfRange_)
-    {
-        URHO3D_LOGWARNING("CsgRoot ({}:{}): an operand has a coordinate at or beyond 8192 units; "
-                          "the exact math is not reliable",
-            root->GetNode() ? root->GetNode()->GetName() : EMPTY_STRING, root->GetNode() ? root->GetNode()->GetID() : 0u);
-    }
-
     ResourceRefList materials;
     SharedPtr<Model> renderableModel;
     if (!triangulated)

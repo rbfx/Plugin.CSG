@@ -45,7 +45,7 @@ All exact decisions use an integer grid:
 - The grid scale is 2^-10 (1/1024) units in float mode. Grid coordinates are 32 bit integers below 2^23, so differences are below 2^24 and exact in float.
 - The CMake option `CSG_EXACT_USE_DOUBLE` (default OFF) makes `CsgReal` a double. The grid step is then 2^-16 units. Grid coordinates are below 2^29, so differences are below 2^30 and exact in double. A float coordinate snaps to this grid.
 - The library builds with strict float flags: `-ffp-contract=off -fno-fast-math` (GCC, Clang) or `/fp:strict` (MSVC).
-- The coordinate limit is 2^13 (8192) units in both modes. For an operand coordinate outside this limit, or not finite, the engine logs a warning and clamps the grid point to 8191 units. The solid sets the `outOfRange` flag, `IsOutOfRange()` returns true, and the result is not valid.
+- The coordinate limit is 2^13 (8192) units in both modes. For an operand coordinate outside this limit, or not finite, the solid sets the `outOfRange` flag and `IsOutOfRange()` returns true. A boolean with such an operand returns an empty solid with `IsOutOfRange()` true.
 - One rounding rule makes a grid coordinate: floor(x + 1/2). A tie goes toward plus infinity.
 - An operand snaps once. `CsgSolid::FromOperand` welds the corners within `epsilon`, repairs the T-junctions, and snaps each welded position to the grid. The fast entry (`PresnappedFaces`) does the weld and the snap in one pass. It is enough if the snapped faces close up exactly. A constructor without grid points (the polygon list entry) also welds within `epsilon`. No later step snaps a position again.
 - A crossing of an edge through a triangle rounds once with the same rule. `CsgExact::RoundOnEdge` and `CsgExact::RoundCrossing` apply the rule exactly to a point on an edge.
@@ -71,8 +71,8 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - Rounding changes the shape. A vertex moves by up to half a grid step on each axis (1/2048 units in float mode, 1/131072 units in double mode).
 - In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, no sample fails in float mode and 1 sample fails in double mode. In that sample the union is right, but the next boolean on the result fails. Some crossings have no valid corner in their cell: a group of crossings on one edge is near a segment, and only a joint move of the group removes the fold. In the sweep, no closed result has a wrong volume.
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
-- A coordinate outside of +-8192 units gives a result that is not valid.
-- A float point query remains for an operand outside the grid range and for a polygon that does not match its loop. The loop-mismatch case does not occur in the tests.
+- An operand with a coordinate outside of +-8192 units gives an empty solid with `IsOutOfRange()` true.
+- A float point query remains for a polygon that does not match its loop. The loop-mismatch case does not occur in the tests.
 
 ## Benchmark
 

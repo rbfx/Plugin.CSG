@@ -1438,6 +1438,10 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     if (!(epsilon > 0.0f))
         epsilon = CSG_DEFAULT_EPSILON;
 
+    // An operand that is out of range gives an empty result that is out of range.
+    if (a->IsOutOfRange() || b->IsOutOfRange())
+        return CsgSolid::OutOfRangeResult(epsilon);
+
     // Solids are immutable, so an unchanged operand is itself the result.
     if (a->FaceCount() == 0)
         return operation == CsgOperation::Union ? b : a;

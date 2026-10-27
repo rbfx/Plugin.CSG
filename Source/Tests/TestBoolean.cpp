@@ -440,6 +440,37 @@ TEST_CASE("Boolean with a corner that is not finite does not crash", "[boolean]"
     }
 }
 
+TEST_CASE("Boolean with an operand out of range returns an empty solid that is out of range", "[boolean]")
+{
+    const auto farBox = MakeBox(Vector3(10001.0f, 0.0f, 0.0f), 1);
+    const auto nearBox = MakeBox(Vector3::ZERO, 2);
+    const auto empty = MakeSolid(ea::vector<CsgPolygon>{});
+    REQUIRE(farBox->IsOutOfRange());
+    REQUIRE_FALSE(nearBox->IsOutOfRange());
+    for (const CsgOperation operation :
+        {CsgOperation::Union, CsgOperation::DifferenceAB, CsgOperation::Intersection})
+    {
+        for (const auto& result : {Run(farBox, nearBox, operation), Run(nearBox, farBox, operation), Run(farBox, farBox, operation),
+                 Run(farBox, empty, operation), Run(empty, farBox, operation)})
+        {
+            CHECK(result->FaceCount() == 0);
+            CHECK(result->IsOutOfRange());
+            CHECK(result->IsClosed());
+            CHECK_FALSE(result->HasOpenEdges());
+        }
+    }
+
+    // The flag stays in a chain of booleans.
+    const auto chained = Run(Run(farBox, nearBox, CsgOperation::Union), nearBox, CsgOperation::Union);
+    CHECK(chained->FaceCount() == 0);
+    CHECK(chained->IsOutOfRange());
+
+    // Two operands in range give a result in range.
+    const auto inRange = Run(nearBox, MakeBox(Vector3(1.0f, 0.0f, 0.0f), 3), CsgOperation::Union);
+    CHECK(inRange->FaceCount() != 0);
+    CHECK_FALSE(inRange->IsOutOfRange());
+}
+
 TEST_CASE("Boolean takes the default epsilon for an epsilon that is not positive", "[boolean]")
 {
     const auto a = MakeBox(Vector3::ZERO, 1);

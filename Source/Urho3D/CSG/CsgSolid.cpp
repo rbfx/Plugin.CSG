@@ -1368,6 +1368,13 @@ SharedPtr<CsgSolid> CsgSolid::Builder::Finish()
 
 CsgSolid::~CsgSolid() = default;
 
+SharedPtr<CsgSolid> CsgSolid::OutOfRangeResult(float epsilon)
+{
+    Builder builder(0, 0, epsilon);
+    builder.outOfRange_ = true;
+    return builder.Finish();
+}
+
 SharedPtr<CsgSolid> CsgSolid::FromOperand(ea::vector<CsgPolygon>&& polygons, float epsilon)
 {
     URHO3D_PROFILE("CsgSolid::FromOperand");

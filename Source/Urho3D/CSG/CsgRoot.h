@@ -48,7 +48,7 @@ class WorkQueue;
 /// - An axis with a scale that is not finite or not greater than 1e-6 uses the scale 1.
 /// - The result returns to node space. The output model has the same frame as the node of the root.
 /// - The build uses exact math on solids. An operand coordinate at or beyond 8192 units
-///   makes the root log a warning.
+///   gives an empty result with `IsOutOfRange()` true. The root does not log a message.
 ///
 /// Brush registration:
 /// - Brushes register/unregister themselves with the nearest root (see `CsgBrush`).

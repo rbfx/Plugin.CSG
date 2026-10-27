@@ -44,6 +44,7 @@ static const char* CsgOperationNames[] = {
 /// The solids must be closed. The operation uses exact math for the intersection curve.
 /// `epsilon` is used for the bounds, for the weld of the result and for the point queries.
 /// An epsilon that is not positive gives the default epsilon.
+/// An operand with IsOutOfRange true gives an empty solid with IsOutOfRange true.
 /// The result can be one of the operands if the other operand is empty. A null operand gives a null result.
 /// A work queue lets large operands find the overlapping faces in parallel. The result does not change.
 /// Pass the work queue only from a caller outside of all work queue tasks. A caller inside any task must pass null.

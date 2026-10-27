@@ -146,6 +146,9 @@ public:
     /// If the polygons need no repair, the result is the first solid. Otherwise it is a second solid over the repaired faces.
     static SharedPtr<CsgSolid> FromOperand(ea::vector<CsgPolygon>&& polygons, float epsilon = CSG_DEFAULT_EPSILON);
 
+    /// Return an empty solid with IsOutOfRange true. A boolean returns it for an operand that is out of range.
+    static SharedPtr<CsgSolid> OutOfRangeResult(float epsilon = CSG_DEFAULT_EPSILON);
+
     /// Return the solid if its faces share their edge vertices. Otherwise build a solid over the repaired faces.
     /// The new solid has no face origins and no exact ids.
     static SharedPtr<CsgSolid> Repaired(const SharedPtr<CsgSolid>& solid);
@@ -191,7 +194,7 @@ public:
     /// Open edges up to the crack budget do not make a solid open. An empty solid is closed.
     bool IsClosed() const { return closed_; }
     /// Return true if a position is not finite or has a coordinate outside the range of the grid.
-    /// The grid point of such a position is clamped, so a boolean with the solid is not valid.
+    /// A boolean with such a solid returns an empty solid with IsOutOfRange true.
     bool IsOutOfRange() const { return outOfRange_; }
     /// Return true if any edge has no partner, also a hairline crack that IsClosed tolerates.
     bool HasOpenEdges() const { return !openEdges_.empty(); }
