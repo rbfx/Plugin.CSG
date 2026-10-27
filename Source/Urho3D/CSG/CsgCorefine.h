@@ -17,6 +17,7 @@
 #include <EASTL/utility.h>
 #include <EASTL/vector.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace Urho3D
@@ -608,6 +609,35 @@ struct CsgTraceTestResult
 /// The curves are undirected edges.
 CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
     const ea::vector<ea::pair<int, int>>& curves);
+
+#ifdef CSG_DIAGNOSTICS
+/// Counters of events inside the boolean. Only the diagnostic tests define CSG_DIAGNOSTICS.
+/// The counters are atomic with relaxed order, because a boolean can run on more than one thread.
+struct CsgBooleanDiagnostics
+{
+    std::atomic<int> failedSplits_{};
+    std::atomic<int> failedRegionFits_{};
+    std::atomic<int> splitTriangles_{};
+    std::atomic<int> patches_{};
+    std::atomic<int> mixedVotePatches_{};
+    std::atomic<int> zeroSumPatches_{};
+    std::atomic<int> mergedCrossings_{};
+    std::atomic<int> lobeSplits_{};
+    std::atomic<int> lobeHoleKept_{};
+
+    void Reset()
+    {
+        for (auto* counter : {&failedSplits_, &failedRegionFits_, &splitTriangles_, &patches_, &mixedVotePatches_,
+                 &zeroSumPatches_, &mergedCrossings_, &lobeSplits_, &lobeHoleKept_})
+            counter->store(0, std::memory_order_relaxed);
+    }
+};
+
+inline CsgBooleanDiagnostics g_csgDiagnostics;
+#define CSG_DIAG_COUNT(name) (::Urho3D::CsgInternal::g_csgDiagnostics.name.fetch_add(1, std::memory_order_relaxed))
+#else
+#define CSG_DIAG_COUNT(name) ((void)0)
+#endif
 
 } // namespace CsgInternal
 

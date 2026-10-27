@@ -471,6 +471,8 @@ int Corefinement::CrossingId(
             merged = true;
         }
     }
+    if (merged)
+        CSG_DIAG_COUNT(mergedCrossings_);
     if (!merged)
         crossings_.push_back(data);
     idRef = id;
@@ -935,7 +937,11 @@ private:
                 second.insert(second.end(), ids, ids + i);
                 if (first.size() < 3 || second.size() < 3 || AreaSignOf(first.data(), static_cast<int>(first.size())) < 0
                     || AreaSignOf(second.data(), static_cast<int>(second.size())) < 0)
+                {
+                    CSG_DIAG_COUNT(lobeHoleKept_);
                     continue;
+                }
+                CSG_DIAG_COUNT(lobeSplits_);
                 AddCycle(first.data(), static_cast<int>(first.size()), touchesBoundary);
                 AddCycle(second.data(), static_cast<int>(second.size()), touchesBoundary);
                 return;
@@ -1947,8 +1953,10 @@ void Corefinement::SplitOperand(
         if (!splitter.Split(mesh.triangleFace_[triangle], triangle, segments))
         {
             result.state_[triangle] = static_cast<uint8_t>(CsgSplitResult::State::Failed);
+            CSG_DIAG_COUNT(failedSplits_);
             continue;
         }
+        CSG_DIAG_COUNT(splitTriangles_);
         result.state_[triangle] = static_cast<uint8_t>(CsgSplitResult::State::Split);
         result.holeCount_[triangle] = splitter.HoleCount();
         for (unsigned r = 0; r < s.regions_.size(); ++r)

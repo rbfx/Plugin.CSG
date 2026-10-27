@@ -50,6 +50,8 @@ add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES})
 target_link_libraries (${TARGET_NAME} PRIVATE Urho3D catch2)
 target_compile_features (${TARGET_NAME} PRIVATE cxx_std_17)
 target_compile_definitions (${TARGET_NAME} PRIVATE Plugin_RbfxCsg_EXPORT=1)
+# The diagnostic tests ([.diagnose]) read counters inside the boolean. The plugin build does not define this macro.
+target_compile_definitions (${TARGET_NAME} PRIVATE CSG_DIAGNOSTICS=1)
 target_compile_options (${TARGET_NAME} PRIVATE ${CSG_STRICT_FP_OPTIONS})
 if (CSG_EXACT_USE_DOUBLE)
     target_compile_definitions (${TARGET_NAME} PRIVATE CSG_EXACT_USE_DOUBLE=1)

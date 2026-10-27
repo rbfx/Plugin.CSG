@@ -4,6 +4,7 @@
 
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoolean.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include "TestGeometry.h"
@@ -13,9 +14,12 @@
 #include <catch2/catch_amalgamated.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -501,6 +505,223 @@ TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of r
 {
     RunSweep(0.7f, 16);
 }
+
+#ifdef CSG_DIAGNOSTICS
+
+namespace
+{
+
+/// The counters of the boolean for one step of a sweep sample.
+struct DiagCounters
+{
+    int failedSplits_{};
+    int failedRegionFits_{};
+    int splitTriangles_{};
+    int patches_{};
+    int mixedVotePatches_{};
+    int zeroSumPatches_{};
+    int mergedCrossings_{};
+    int lobeSplits_{};
+    int lobeHoleKept_{};
+
+    static DiagCounters Read()
+    {
+        const auto& d = g_csgDiagnostics;
+        DiagCounters c;
+        c.failedSplits_ = d.failedSplits_.load();
+        c.failedRegionFits_ = d.failedRegionFits_.load();
+        c.splitTriangles_ = d.splitTriangles_.load();
+        c.patches_ = d.patches_.load();
+        c.mixedVotePatches_ = d.mixedVotePatches_.load();
+        c.zeroSumPatches_ = d.zeroSumPatches_.load();
+        c.mergedCrossings_ = d.mergedCrossings_.load();
+        c.lobeSplits_ = d.lobeSplits_.load();
+        c.lobeHoleKept_ = d.lobeHoleKept_.load();
+        return c;
+    }
+
+    void Add(const DiagCounters& o)
+    {
+        failedSplits_ += o.failedSplits_;
+        failedRegionFits_ += o.failedRegionFits_;
+        splitTriangles_ += o.splitTriangles_;
+        patches_ += o.patches_;
+        mixedVotePatches_ += o.mixedVotePatches_;
+        zeroSumPatches_ += o.zeroSumPatches_;
+        mergedCrossings_ += o.mergedCrossings_;
+        lobeSplits_ += o.lobeSplits_;
+        lobeHoleKept_ += o.lobeHoleKept_;
+    }
+};
+
+/// Run one boolean and read the counters of that boolean only.
+SolidPtr RunCounted(const SolidPtr& a, const SolidPtr& b, CsgOperation operation, DiagCounters& counters)
+{
+    g_csgDiagnostics.Reset();
+    auto result = Run(a, b, operation);
+    counters = DiagCounters::Read();
+    return result;
+}
+
+/// Count the directed edges that have no opposite edge with the same multiplicity. The key function maps a position
+/// to a point id: a quantized id as in IsEdgeClosed, or an exact id of the position.
+template <class Key> unsigned CountUnmatchedEdges(const SolidPtr& solid, Key key)
+{
+    std::map<std::array<int, 3>, int> ids;
+    const auto getId = [&](const Vector3& position)
+    {
+        const auto k = key(position);
+        return ids.emplace(k, static_cast<int>(ids.size())).first->second;
+    };
+    std::map<std::pair<int, int>, int> edges;
+    for (const CsgPolygon& polygon : solid->ToPolygons())
+    {
+        const size_t count = polygon.vertices_.size();
+        for (size_t i = 0; i < count; ++i)
+        {
+            const int a = getId(polygon.vertices_[i].GetPosition());
+            const int b = getId(polygon.vertices_[(i + 1) % count].GetPosition());
+            if (a != b)
+                ++edges[{a, b}];
+        }
+    }
+    unsigned unmatched = 0;
+    for (const auto& item : edges)
+    {
+        const auto opposite = edges.find({item.first.second, item.first.first});
+        if (opposite == edges.end() || opposite->second != item.second)
+            ++unmatched;
+    }
+    return unmatched;
+}
+
+unsigned CountQuantizedOpen(const SolidPtr& solid)
+{
+    return CountUnmatchedEdges(solid,
+        [](const Vector3& p)
+        {
+            const IntVector3 q = QuantizePosition(p, 1.0f / GRID_TOLERANCE);
+            return std::array<int, 3>{q.x_, q.y_, q.z_};
+        });
+}
+
+unsigned CountExactOpen(const SolidPtr& solid)
+{
+    return CountUnmatchedEdges(solid,
+        [](const Vector3& p)
+        {
+            std::array<int, 3> k;
+            const float v[3] = {p.x_, p.y_, p.z_};
+            for (int i = 0; i < 3; ++i)
+                std::memcpy(&k[i], &v[i], sizeof(int));
+            return k;
+        });
+}
+
+const char* AxisName(const Vector3& axis)
+{
+    if (axis.x_ == 1.0f && axis.y_ == 0.0f && axis.z_ == 0.0f)
+        return "x";
+    if (axis.y_ == 1.0f && axis.x_ == 0.0f && axis.z_ == 0.0f)
+        return "y";
+    if (axis.z_ == 1.0f && axis.x_ == 0.0f && axis.y_ == 0.0f)
+        return "z";
+    return "111";
+}
+
+} // namespace
+
+// Prints a table with one row for each failed sample of the sweep. It is hidden: run it with the tag [.diagnose].
+// The columns: axis and angle, the steps with an open result (ab, left = ab+c, bc, right = a+bc), and the counters
+// of those steps added together. The open edge counts of a step are: the open edges that the solid reports after the
+// clean-up / the unmatched edges at the tolerance of IsClosed / the unmatched edges with the exact positions.
+// fail: triangles with a Failed split. fit: split triangles with a region that does not fit the face.
+// mix: patches with votes of both signs. zero: zero-sum patches that use the point query. patch: all patches.
+// merge: crossings merged to an existing grid point. lobe: cycles split in two lobes. hole: cycles with a lobe of
+// negative area that stay whole. split: Split triangles.
+TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
+{
+    const Vector3 axes[] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD, Vector3::ONE};
+    DiagCounters passing;
+    int passingSteps = 0;
+    int samples = 0;
+    int failures = 0;
+    std::ostringstream table;
+    char line[256];
+    std::snprintf(line, sizeof(line), "%-5s %7s %-30s %5s %4s %4s %5s %5s %5s %6s %5s %5s\n", "axis", "angle",
+        "open steps (solid/quant/exact)", "fail", "fit", "mix", "zero", "patch", "merge", "split", "lobe", "hole");
+    table << line;
+    for (const Vector3& axis : axes)
+    {
+        for (unsigned i = 0;; ++i)
+        {
+            const float angle = 0.3f + 0.7f * static_cast<float>(i);
+            if (angle > 180.0f)
+                break;
+            const Quaternion world(angle, axis.Normalized());
+            const Quaternion own(37.0f, Vector3(1.0f, 1.0f, 0.0f).Normalized());
+            const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
+            const auto a = MakeBox(Vector3::ZERO, 1, worldTransform);
+            const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, worldTransform);
+            const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
+
+            DiagCounters cAb, cLeft, cBc, cRight;
+            const auto ab = RunCounted(a, b, CsgOperation::Union, cAb);
+            const auto left = RunCounted(ab, c, CsgOperation::Union, cLeft);
+            const auto bc = RunCounted(b, c, CsgOperation::Union, cBc);
+            const auto right = RunCounted(a, bc, CsgOperation::Union, cRight);
+
+            const bool unionRight = std::abs(Volume(ab) - 12.0) <= GridVolumeTolerance(2.0 * BOX_AREA) && IsClosed(ab);
+            const bool associative = std::abs(Volume(left) - Volume(right)) <= GridVolumeTolerance(3.0 * BOX_AREA)
+                && IsClosed(left) && IsClosed(right);
+            ++samples;
+            if (unionRight && associative)
+            {
+                for (const DiagCounters* step : {&cAb, &cLeft, &cBc, &cRight})
+                    passing.Add(*step);
+                passingSteps += 4;
+                continue;
+            }
+            ++failures;
+
+            DiagCounters sum;
+            std::string steps;
+            const auto note = [&](const char* name, const SolidPtr& result, const DiagCounters& counters)
+            {
+                if (IsClosed(result) && !result->HasOpenEdges())
+                    return;
+                sum.Add(counters);
+                steps += std::string(steps.empty() ? "" : " ") + name + "(" + std::to_string(result->OpenEdgeCount())
+                    + "/" + std::to_string(CountQuantizedOpen(result)) + "/" + std::to_string(CountExactOpen(result))
+                    + ")";
+            };
+            note("ab", ab, cAb);
+            note("left", left, cLeft);
+            note("bc", bc, cBc);
+            note("right", right, cRight);
+            if (steps.empty())
+                steps = "volume only";
+            std::snprintf(line, sizeof(line), "%-5s %7.1f %-30s %5d %4d %4d %5d %5d %5d %6d %5d %5d\n", AxisName(axis),
+                angle, steps.c_str(), sum.failedSplits_, sum.failedRegionFits_, sum.mixedVotePatches_,
+                sum.zeroSumPatches_, sum.patches_, sum.mergedCrossings_, sum.splitTriangles_, sum.lobeSplits_,
+                sum.lobeHoleKept_);
+            table << line;
+        }
+    }
+    table << "samples " << samples << ", failed " << failures << "\n";
+    const double n = std::max(1, passingSteps);
+    std::snprintf(line, sizeof(line),
+        "mean over the %d boolean steps of passing samples: fail %.3f fit %.3f mix %.3f zero %.3f patch %.2f merge "
+        "%.2f split %.2f lobe %.3f hole %.3f\n",
+        passingSteps, passing.failedSplits_ / n, passing.failedRegionFits_ / n, passing.mixedVotePatches_ / n,
+        passing.zeroSumPatches_ / n, passing.patches_ / n, passing.mergedCrossings_ / n, passing.splitTriangles_ / n,
+        passing.lobeSplits_ / n, passing.lobeHoleKept_ / n);
+    table << line;
+    std::printf("%s", table.str().c_str());
+    SUCCEED();
+}
+
+#endif
 
 // A rotation about the axis (1, 1, 1) keeps the corner (1, 1, 1) of A. The corner lies at the middle of an edge of B.
 // The snapped corner is often exactly on the snapped edge. The edges of A at the corner then cross a face of B

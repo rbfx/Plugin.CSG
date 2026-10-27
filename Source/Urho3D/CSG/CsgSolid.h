@@ -195,6 +195,8 @@ public:
     bool IsOutOfRange() const { return outOfRange_; }
     /// Return true if any edge has no partner, also a hairline crack that IsClosed tolerates.
     bool HasOpenEdges() const { return !openEdges_.empty(); }
+    /// Return the number of edges that have no partner.
+    unsigned OpenEdgeCount() const { return static_cast<unsigned>(openEdges_.size()); }
     /// Return the total length of the open edges.
     float OpenEdgeLength() const;
     /// Return true if the point is inside the solid. The solid must be closed.

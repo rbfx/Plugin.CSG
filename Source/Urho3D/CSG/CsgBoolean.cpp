@@ -265,6 +265,26 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
             s.patchBest_[root] = e;
         }
     }
+#ifdef CSG_DIAGNOSTICS
+    {
+        ea::vector<uint8_t> signs(elementCount, 0);
+        for (int e = 0; e < elementCount; ++e)
+        {
+            if (s.votes_[e] != 0)
+                signs[find(e)] |= s.votes_[e] > 0 ? 1 : 2;
+        }
+        for (int e = 0; e < elementCount; ++e)
+        {
+            if (find(e) != e)
+                continue;
+            CSG_DIAG_COUNT(patches_);
+            if (signs[e] == 3)
+                CSG_DIAG_COUNT(mixedVotePatches_);
+            if (s.patchBest_[e] >= 0)
+                CSG_DIAG_COUNT(zeroSumPatches_);
+        }
+    }
+#endif
     for (int root = 0; root < elementCount; ++root)
     {
         if (s.patchBest_[root] < 0)
@@ -390,6 +410,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                     if (ok)
                         continue;
                     // A region does not fit its face. The triangle stays whole, as for a failed split.
+                    CSG_DIAG_COUNT(failedRegionFits_);
                     o.elements_.resize(elementMark);
                     o.elementIds_.resize(idMark);
                 }
