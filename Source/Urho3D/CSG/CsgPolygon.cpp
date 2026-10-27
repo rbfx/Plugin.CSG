@@ -49,26 +49,4 @@ void CsgPolygon::Flip()
     plane_.d_ = -plane_.d_;
 }
 
-bool CsgPolygon::IsConvex() const
-{
-    if (vertices_.size() < 3)
-        return false;
-
-    const unsigned count = vertices_.size();
-    for (unsigned i = 0; i < count; ++i)
-    {
-        const Vector3& p0 = vertices_[i].GetPosition();
-        const Vector3& p1 = vertices_[(i + 1) % count].GetPosition();
-        const Vector3& p2 = vertices_[(i + 2) % count].GetPosition();
-
-        const Vector3 edge1 = p1 - p0;
-        const Vector3 edge2 = p2 - p1;
-        const Vector3 cross = edge1.CrossProduct(edge2);
-
-        if (cross.DotProduct(plane_.normal_) < -M_EPSILON)
-            return false;
-    }
-    return true;
-}
-
 } // namespace Urho3D

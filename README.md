@@ -71,7 +71,6 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - Rounding changes the shape. A vertex moves by up to half a grid step on each axis (1/2048 units in float mode, 1/131072 units in double mode).
 - In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, no sample fails in float mode and 1 sample fails in double mode. In that sample the union is right, but the next boolean on the result fails. Some crossings have no valid corner in their cell: a group of crossings on one edge is near a segment, and only a joint move of the group removes the fold. In the sweep, no closed result has a wrong volume.
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
-- `MergeCrossingsOnGrid` (in `CsgCorefine.h`) is a compile-time switch. It is off. With the switch on, crossings that round to one grid point share one id and the splitter closes all its traces. But more samples fail (21 in float mode and 18 in double mode before `ConstrainCrossings`). The open results have coplanar regions that stay twice, because the two operands split them differently. A topology-preserving snap rounding is the next design step.
 - A coordinate outside of +-8192 units gives a result that is not valid.
 - A float point query remains for an operand outside the grid range and for a polygon that does not match its loop. The loop-mismatch case does not occur in the tests.
 

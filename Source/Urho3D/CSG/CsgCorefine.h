@@ -29,11 +29,6 @@ namespace CsgInternal
 /// Coordinates with an absolute value of this limit or more are outside the range of the exact math.
 constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 
-/// Whether crossings that round to one grid point share one id. The merge is off now.
-/// With the merge on, the splitter closes all its traces, but more sweep samples fail than with the merge off.
-/// The open results have coplanar regions that stay twice, because the two operands split them differently.
-constexpr bool MergeCrossingsOnGrid = false;
-
 /// Whether Corefinement::ConstrainCrossings moves a rounded crossing that folds the planar map of a triangle.
 constexpr bool ConstrainCrossingsOnGrid = true;
 
@@ -54,9 +49,6 @@ struct Crossing
     CsgExactVolume difference_{};
     /// Normal of the crossed triangle. It breaks ties between crossings on one edge.
     CsgNormal normal_{};
-    /// Index of the next alias with the same id, or -1. A crossing of a grid point holds the first one.
-    /// An alias holds the next one. An alias keeps the order data of a key that merged into the crossing.
-    int alias_{-1};
 };
 
 /// Order two crossings of one edge by their parameter from its lower to its higher end.
@@ -515,28 +507,13 @@ public:
     int CrossingBase() const { return a_.VertexCount() + b_.VertexCount(); }
     int Global(const Mesh& mesh, int id) const { return mesh.offset_ + id; }
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
-    /// Return the first record of the crossing that satisfies the predicate, or null.
-    /// The records are the crossing and the aliases of the keys that merged into it. Each one has its own key.
-    /// A vertex id has the records of the crossings that round to the grid point of the vertex.
+    /// Return the crossing of the id if it satisfies the predicate, or null. A vertex id gives null.
     template <class Predicate> const Crossing* FindRecord(int globalId, const Predicate& predicate) const
     {
-        const Crossing* record = nullptr;
-        if (globalId >= CrossingBase())
-            record = &CrossingAt(globalId);
-        else
-        {
-            const int* first = vertexAliases_.Find(static_cast<uint64_t>(globalId));
-            if (!first)
-                return nullptr;
-            record = &aliases_[*first];
-        }
-        while (!predicate(*record))
-        {
-            if (record->alias_ < 0)
-                return nullptr;
-            record = &aliases_[record->alias_];
-        }
-        return record;
+        if (globalId < CrossingBase())
+            return nullptr;
+        const Crossing& record = CrossingAt(globalId);
+        return predicate(record) ? &record : nullptr;
     }
 
     /// Find all the face pairs of the operands in the order of the C# reference and intersect them.
@@ -614,7 +591,7 @@ private:
     {
         /// Global id of the crossing.
         int id_{};
-        /// Record with the order data of this edge: a crossing index, or -(alias index + 1) for an alias.
+        /// Record with the order data of this edge: a crossing index.
         int record_{};
         int next_{-1};
     };
@@ -633,22 +610,12 @@ private:
     /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
     int CompareRecords(int x, int y) const;
 
-    /// Order data of an edge list record: a crossing or an alias.
-    const Crossing& Record(int record) const { return record >= 0 ? crossings_[record] : aliases_[-record - 1]; }
+    /// Order data of an edge list record: a crossing.
+    const Crossing& Record(int record) const { return crossings_[record]; }
     /// Global id of an edge list record.
-    int RecordId(int record) const { return record >= 0 ? CrossingBase() + record : aliasIds_[-record - 1]; }
+    int RecordId(int record) const { return CrossingBase() + record; }
 
     CsgFlatMap<CsgCrossingKey, int, CsgCrossingKeyHash> crossingIds_;
-    /// Id by grid point. Crossings that round to one grid point share one id.
-    /// A crossing can be at the grid point of an end of its edge or a corner of its triangle.
-    /// Then the crossing has the id of that vertex.
-    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> gridIds_;
-    /// Order data of the keys that merged into an existing crossing. The data belongs to the key and its edge.
-    ea::vector<Crossing> aliases_;
-    /// Global id of each alias.
-    ea::vector<int> aliasIds_;
-    /// First alias of each vertex id that a crossing rounds to. The alias chain holds the others.
-    CsgFlatMap<uint64_t, int, CsgPackedKeyHash> vertexAliases_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;
@@ -780,7 +747,6 @@ struct CsgBooleanDiagnostics
     /// Zero sum patches in the exact range where every element has zero exact area.
     /// The boolean removes these patches.
     std::atomic<int> zeroSumDegeneratePatches_{};
-    std::atomic<int> mergedCrossings_{};
     std::atomic<int> lobeSplits_{};
     std::atomic<int> lobeHoleKept_{};
     /// Crossings with a rounded position that breaks a rule of the validity test. The counters are for the rules
@@ -805,7 +771,7 @@ struct CsgBooleanDiagnostics
     void Reset()
     {
         for (auto* counter : {&failedSplits_, &failedRegionFits_, &splitTriangles_, &patches_, &mixedVotePatches_,
-                 &zeroSumPatches_, &mergedCrossings_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
+                 &zeroSumPatches_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
                  &unconstrainableCrossings_, &zeroSumFloatFallbacks_, &zeroSumDegeneratePatches_})

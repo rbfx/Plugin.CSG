@@ -628,7 +628,6 @@ struct DiagCounters
     int patches_{};
     int mixedVotePatches_{};
     int zeroSumPatches_{};
-    int mergedCrossings_{};
     int lobeSplits_{};
     int lobeHoleKept_{};
     /// Crossings with a rounded position that breaks a rule of the validity test, and all crossings.
@@ -658,7 +657,6 @@ struct DiagCounters
         c.patches_ = d.patches_.load();
         c.mixedVotePatches_ = d.mixedVotePatches_.load();
         c.zeroSumPatches_ = d.zeroSumPatches_.load();
-        c.mergedCrossings_ = d.mergedCrossings_.load();
         c.lobeSplits_ = d.lobeSplits_.load();
         c.lobeHoleKept_ = d.lobeHoleKept_.load();
         c.invalid_ = d.invalidCrossings_.load();
@@ -684,7 +682,6 @@ struct DiagCounters
         patches_ += o.patches_;
         mixedVotePatches_ += o.mixedVotePatches_;
         zeroSumPatches_ += o.zeroSumPatches_;
-        mergedCrossings_ += o.mergedCrossings_;
         lobeSplits_ += o.lobeSplits_;
         lobeHoleKept_ += o.lobeHoleKept_;
         invalid_ += o.invalid_;
@@ -785,7 +782,7 @@ const char* AxisName(const Vector3& axis)
 // clean-up / the unmatched edges at the tolerance of IsClosed / the unmatched edges with the exact positions.
 // fail: triangles with a Failed split. fit: split triangles with a region that does not fit the face.
 // mix: patches with votes of both signs. zero: zero-sum patches that use the point query. patch: all patches.
-// merge: crossings merged to an existing grid point. lobe: cycles split in two lobes. hole: cycles with a lobe of
+// lobe: cycles split in two lobes. hole: cycles with a lobe of
 // negative area that stay whole. split: Split triangles.
 // inv: for each of the four steps ab/left/bc/right, the number of crossings with a rounded position that breaks a rule
 // of Corefinement::CrossingInvalidRules (strict form). fold: the same count for the non strict form, which finds a
@@ -813,8 +810,8 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
     DiagCounters passingProducer;
     std::ostringstream table;
     char line[400];
-    std::snprintf(line, sizeof(line), "%-5s %7s %-30s %5s %4s %4s %5s %5s %5s %6s %5s %5s %-13s %-13s %5s %-9s %-13s %-13s\n", "axis",
-        "angle", "open steps (solid/quant/exact)", "fail", "fit", "mix", "zero", "patch", "merge", "split", "lobe",
+    std::snprintf(line, sizeof(line), "%-5s %7s %-30s %5s %4s %4s %5s %5s %6s %5s %5s %-13s %-13s %5s %-9s %-13s %-13s\n", "axis",
+        "angle", "open steps (solid/quant/exact)", "fail", "fit", "mix", "zero", "patch", "split", "lobe",
         "hole", "inv ab/l/bc/r", "fold ab/l/bc/r", "prod", "rules i/o/s", "con ab/l/bc/r", "unc ab/l/bc/r");
     table << line;
     for (const Vector3& axis : axes)
@@ -910,9 +907,9 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
             std::snprintf(unconstrainable, sizeof(unconstrainable), "%d/%d/%d/%d", cAb.unconstrainable_,
                 cLeft.unconstrainable_, cBc.unconstrainable_, cRight.unconstrainable_);
             std::snprintf(line, sizeof(line),
-                "%-5s %7.1f %-30s %5d %4d %4d %5d %5d %5d %6d %5d %5d %-13s %-13s %5d %-9s %-13s %-13s\n", AxisName(axis), angle,
+                "%-5s %7.1f %-30s %5d %4d %4d %5d %5d %6d %5d %5d %-13s %-13s %5d %-9s %-13s %-13s\n", AxisName(axis), angle,
                 steps.c_str(), sum.failedSplits_, sum.failedRegionFits_, sum.mixedVotePatches_, sum.zeroSumPatches_,
-                sum.patches_, sum.mergedCrossings_, sum.splitTriangles_, sum.lobeSplits_, sum.lobeHoleKept_, invalid,
+                sum.patches_, sum.splitTriangles_, sum.lobeSplits_, sum.lobeHoleKept_, invalid,
                 fold, producer.fold_, rules, constrained, unconstrainable);
             table << line;
         }
@@ -920,10 +917,10 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
     table << "samples " << samples << ", failed " << failures << "\n";
     const double n = std::max(1, passingSteps);
     std::snprintf(line, sizeof(line),
-        "mean over the %d boolean steps of passing samples: fail %.3f fit %.3f mix %.3f zero %.3f patch %.2f merge "
-        "%.2f split %.2f lobe %.3f hole %.3f\n",
+        "mean over the %d boolean steps of passing samples: fail %.3f fit %.3f mix %.3f zero %.3f patch %.2f "
+        "split %.2f lobe %.3f hole %.3f\n",
         passingSteps, passing.failedSplits_ / n, passing.failedRegionFits_ / n, passing.mixedVotePatches_ / n,
-        passing.zeroSumPatches_ / n, passing.patches_ / n, passing.mergedCrossings_ / n, passing.splitTriangles_ / n,
+        passing.zeroSumPatches_ / n, passing.patches_ / n, passing.splitTriangles_ / n,
         passing.lobeSplits_ / n, passing.lobeHoleKept_ / n);
     table << line;
 

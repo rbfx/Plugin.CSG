@@ -29,7 +29,6 @@ struct PLUGIN_RBFXCSG_API CsgPolygon
     CsgPolygon& operator=(const CsgPolygon&);
 
     void Flip();
-    bool IsConvex() const;
 };
 
 } // namespace Urho3D

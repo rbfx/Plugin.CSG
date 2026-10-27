@@ -439,81 +439,7 @@ int Corefinement::CrossingId(
 
     int id = CrossingBase() + static_cast<int>(crossings_.size());
     int record = static_cast<int>(crossings_.size());
-    bool merged = false;
-    if constexpr (MergeCrossingsOnGrid)
-    {
-        // A crossing that rounds to an existing grid point is the same vertex.
-        // Its order data stays in an alias, because the order is for the edge of this key.
-        CsgVec3Key gridKey;
-        gridKey.x_ = static_cast<uint32_t>(grid.x_);
-        gridKey.y_ = static_cast<uint32_t>(grid.y_);
-        gridKey.z_ = static_cast<uint32_t>(grid.z_);
-        // A crossing can round to the grid point of an end of its edge or a corner of its triangle.
-        // Then the crossing is that vertex.
-        // The vertices of the first operand come first, so one grid point gets one id.
-        const Mesh& other = edges.isSecond_ ? a_ : b_;
-        int vertex = -1;
-        const auto match = [&](const Mesh& mesh, int local)
-        {
-            if (vertex < 0 && local >= 0 && mesh.grid_[local] == grid)
-                vertex = Global(mesh, local);
-        };
-        const auto matchEdge = [&]()
-        {
-            match(edges, key.low_);
-            match(edges, key.high_);
-        };
-        const auto matchTriangle = [&]()
-        {
-            for (int corner = 0; corner < 3; ++corner)
-                match(other, other.triangleIds_[key.triangle_ * 3 + corner]);
-        };
-        if (edges.isSecond_)
-        {
-            matchTriangle();
-            matchEdge();
-        }
-        else
-        {
-            matchEdge();
-            matchTriangle();
-        }
-        bool gridExisted = false;
-        int& gridIdRef = gridIds_.FindOrAdd(gridKey, gridExisted);
-        if (vertex < 0 && gridExisted)
-            vertex = gridIdRef;
-        else if (!gridExisted)
-            gridIdRef = vertex >= 0 ? vertex : id;
-        if (vertex >= 0)
-        {
-            id = vertex;
-            const int alias = static_cast<int>(aliases_.size());
-            record = -alias - 1;
-            aliases_.push_back(data);
-            aliasIds_.push_back(id);
-            Crossing* tail = nullptr;
-            if (id >= CrossingBase())
-                tail = &crossings_[id - CrossingBase()];
-            else
-            {
-                bool vertexExisted = false;
-                int& first = vertexAliases_.FindOrAdd(static_cast<uint64_t>(id), vertexExisted);
-                if (!vertexExisted)
-                    first = alias;
-                else
-                    tail = &aliases_[first];
-            }
-            while (tail && tail->alias_ >= 0)
-                tail = &aliases_[tail->alias_];
-            if (tail)
-                tail->alias_ = alias;
-            merged = true;
-        }
-    }
-    if (merged)
-        CSG_DIAG_COUNT(mergedCrossings_);
-    if (!merged)
-        crossings_.push_back(data);
+    crossings_.push_back(data);
     idRef = id;
 
     bool listExisted = false;
@@ -1983,9 +1909,9 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
                 vertices.push_back(source.vertices_[local]);
                 continue;
             }
-            // A vertex of the other operand, or of another face, is a crossing that rounds to the vertex.
+            // A vertex that is not on this face gives no record. The fit fails.
         }
-        // A merged crossing has one record for each key. Use the record that belongs to this face.
+        // Use the crossing only if it belongs to this face.
         const Crossing* found = core.FindRecord(id,
             [&](const Crossing& c)
             {
@@ -2492,7 +2418,7 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
     bool stopAtFirst, bool strict, bool segmentRule) const
 {
     URHO3D_ASSERT(a_.HasEdgeTriangles() && b_.HasEdgeTriangles(), "CsgCorefine: build the edge triangles first");
-    // The test supports the crossings of crossings_. An alias record (MergeCrossingsOnGrid) is not supported.
+    // The test supports the crossings of crossings_.
     const ptrdiff_t index = &record - crossings_.data();
     URHO3D_ASSERT(index >= 0 && index < static_cast<ptrdiff_t>(crossings_.size()), "CsgCorefine: unknown crossing");
     const int crossingId = CrossingBase() + static_cast<int>(index);
@@ -2690,7 +2616,7 @@ int Corefinement::CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], 
 
 void Corefinement::ConstrainCrossings(CsgScratch& scratch)
 {
-    if constexpr (!ConstrainCrossingsOnGrid || MergeCrossingsOnGrid)
+    if constexpr (!ConstrainCrossingsOnGrid)
         return;
     if (crossings_.empty())
         return;
@@ -2708,8 +2634,10 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
         b_.BuildEdgeTriangles(&filterB);
     }
 
+#ifdef CSG_DIAGNOSTICS
     // 0: not a fold, 1: moved to a valid corner, 2: no valid corner, the nearest rounding stays.
     ea::vector<uint8_t> state;
+#endif
     // Masks of the axes that a candidate flips: none, one axis, two axes, three axes.
     static constexpr int FlipMasks[8] = {0, 1, 2, 4, 3, 5, 6, 7};
 
@@ -2840,8 +2768,10 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
         CsgExact::CrossingCell(lowGrid, highGrid, crossing.lowVolume_, crossing.difference_, nearest, lower, upper);
         if (lower == upper)
             continue;
+#ifdef CSG_DIAGNOSTICS
         if (state.empty())
             state.resize(crossings_.size(), 0);
+#endif
 
         // The grid points of the three triangles of the maps and of the ends of the edge.
         CsgGridPoint corners[11];
@@ -2905,7 +2835,9 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
             for (int i = 0; i < mapCount; ++i)
                 MarkCacheConflicts(cache.maps_[i], CrossingBase(), suspects);
         }
+#ifdef CSG_DIAGNOSTICS
         state[index] = found ? 1 : 2;
+#endif
     }
 
     cache.projection_[0].clear();

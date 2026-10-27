@@ -239,8 +239,7 @@ TEST_CASE("Corefine crossings of two overlapping boxes", "[corefine]")
     // box edges cross the other surface. The face diagonals that miss the corner enter and leave the other box,
     // two crossings each. Three faces meet at each corner, and all three diagonals avoid the corner.
     // Each operand adds 3 + 3 * 2 = 9 crossings: 18 in total.
-    // With the grid merge, crossings that round to one grid point share one id. The 18 crossings give 10 ids.
-    CHECK(result.positions_.size() == (MergeCrossingsOnGrid ? 10u : 18u));
+    CHECK(result.positions_.size() == 18u);
     // An independent count with a small numeric displacement gives the same number.
     const double none[3] = {0.0, 0.0, 0.0};
     const double shift[3] = {1e-3, 1e-6, 1e-9};
@@ -679,18 +678,6 @@ TEST_CASE("Corefine crossings have their rounded grid points", "[corefine]")
         CHECK(std::fabs(crossing.grid_.x_ * step - crossing.position_.x_) <= step);
         CHECK(std::fabs(crossing.grid_.y_ * step - crossing.position_.y_) <= step);
         CHECK(std::fabs(crossing.grid_.z_ * step - crossing.position_.z_) <= step);
-        // Without the grid merge, no crossing has an alias.
-        if constexpr (!MergeCrossingsOnGrid)
-            CHECK(crossing.alias_ < 0);
-    }
-    if constexpr (MergeCrossingsOnGrid)
-    {
-        // The crossings have unique grid points.
-        for (unsigned i = 0; i < core.crossings_.size(); ++i)
-        {
-            for (unsigned j = i + 1; j < core.crossings_.size(); ++j)
-                CHECK(core.crossings_[i].grid_ != core.crossings_[j].grid_);
-        }
     }
 }
 
@@ -738,26 +725,13 @@ TEST_CASE("Corefine handles crossings of one edge that round to one grid point",
                 continue;
             core.EdgeCrossings(core.a_, low, high, scratch, forward);
             core.EdgeCrossings(core.a_, high, low, scratch, backward);
-            if constexpr (MergeCrossingsOnGrid)
-            {
-                // The two crossings of the edge have one id.
-                REQUIRE(forward.size() == 1);
-                REQUIRE(backward.size() == 1);
-                CHECK(forward[0] == backward[0]);
-                const Vector3 position = core.CrossingAt(forward[0]).position_;
-                CHECK(position.x_ == -0.75f);
-                CHECK(position.z_ == 0.0f);
-            }
-            else
-            {
-                // The two crossings of the edge keep two ids, but they have one grid point.
-                REQUIRE(forward.size() == 2);
-                REQUIRE(backward.size() == 2);
-                CHECK(forward[0] != forward[1]);
-                CHECK(forward[0] == backward[1]);
-                CHECK(forward[1] == backward[0]);
-                CHECK(core.CrossingAt(forward[0]).grid_ == core.CrossingAt(forward[1]).grid_);
-            }
+            // The two crossings of the edge keep two ids, but they have one grid point.
+            REQUIRE(forward.size() == 2);
+            REQUIRE(backward.size() == 2);
+            CHECK(forward[0] != forward[1]);
+            CHECK(forward[0] == backward[1]);
+            CHECK(forward[1] == backward[0]);
+            CHECK(core.CrossingAt(forward[0]).grid_ == core.CrossingAt(forward[1]).grid_);
             ++verticalEdges;
         }
     }
