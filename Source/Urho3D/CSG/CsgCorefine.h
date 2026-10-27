@@ -435,6 +435,8 @@ struct CsgValidityScratch
     /// Cache of the projection of each triangle of the two meshes: 0 is unknown, else 1 + 2 * dropAxis + flip.
     /// ConstrainCrossings fills it. It is empty in the other uses.
     ea::vector<uint8_t> projection_[2];
+    /// The boxes of the items of one map: minU, maxU, minV, maxV for each item.
+    ea::vector<CsgGridInt> boxes_;
     /// The prepared maps of the three triangles of one crossing.
     CsgMapCache maps_[3];
 };

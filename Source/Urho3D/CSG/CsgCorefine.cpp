@@ -2226,10 +2226,25 @@ void MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, 
                 suspects[id - base] = 1;
         }
     };
+    v.boxes_.resize(count * 4);
+    for (int i = 0; i < count; ++i)
+    {
+        const CsgGridPoint2 p = v.points_[i * 2];
+        const CsgGridPoint2 q = v.points_[i * 2 + 1];
+        v.boxes_[i * 4] = ea::min(p.u_, q.u_);
+        v.boxes_[i * 4 + 1] = ea::max(p.u_, q.u_);
+        v.boxes_[i * 4 + 2] = ea::min(p.v_, q.v_);
+        v.boxes_[i * 4 + 3] = ea::max(p.v_, q.v_);
+    }
     for (int m = 0; m < count; ++m)
     {
+        const CsgGridInt* box = &v.boxes_[m * 4];
         for (int k = m + 1; k < count; ++k)
         {
+            const CsgGridInt* other = &v.boxes_[k * 4];
+            // Boxes that do not touch cannot have a common point.
+            if (other[1] < box[0] || other[0] > box[1] || other[3] < box[2] || other[2] > box[3])
+                continue;
             if (ItemsConflict(v.items_, v.points_, m, k, false))
             {
                 mark(m);
