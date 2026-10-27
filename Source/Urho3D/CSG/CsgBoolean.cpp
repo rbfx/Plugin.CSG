@@ -299,14 +299,16 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         o.inside_[e] = s.patchVotes_[find(e)] > 0 ? 1 : 0;
 }
 
-/// Tell if a component that the curve does not reach lies inside the other solid.
+bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second);
+
+/// Tell if a component that the curve does not reach lies inside the other solid. This is the float path.
 ///
 /// The reference tests one sample point of the component. That point can lie on the surface of the other solid,
 /// for example when two boxes share a face and the curve has no crossing. The test can then give a wrong answer
 /// and still report that it is reliable. All faces of the component have the same answer, so this function
 /// takes the sample points of the faces in order. It stops when one answer leads by two votes.
 /// If no answer leads after 16 samples, it uses the test of the first sample, as the reference does.
-bool ClassifyComponent(const CsgSolid& solid, unsigned component, const CsgSolid& other, float epsilon)
+bool ClassifyComponentFloat(const CsgSolid& solid, unsigned component, const CsgSolid& other, float epsilon)
 {
     static constexpr unsigned MAX_SAMPLES = 16;
     const ea::span<const unsigned> componentStart = solid.GetComponentStart();
@@ -327,6 +329,34 @@ bool ClassifyComponent(const CsgSolid& solid, unsigned component, const CsgSolid
     if (votes != 0)
         return votes > 0;
     return other.ContainsPoint(solid.ComponentSample(component), epsilon);
+}
+
+/// Tell if a component that the curve does not reach lies inside the other solid.
+///
+/// If the operands are in the range of the exact math, the answer is exact. The component has no curve, so it
+/// does not cross the displaced surface of the other operand. All its vertices lie on the same side, also the
+/// vertices that touch the other surface. The function classifies the first vertex of the first face with a loop.
+/// The exact test breaks a tie on a shared face by the displacement of the second operand.
+/// If an operand is out of range, or no face of the component has a loop, the function uses the float path.
+bool ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned component, const Mesh& other, bool second,
+    float epsilon)
+{
+    if (!core.outOfRange_)
+    {
+        const ea::span<const unsigned> componentStart = mesh.solid_.GetComponentStart();
+        const ea::span<const unsigned> componentFaces = mesh.solid_.GetComponentFaces();
+        for (unsigned i = componentStart[component]; i < componentStart[component + 1]; ++i)
+        {
+            const unsigned face = componentFaces[i];
+            if (mesh.loops_.loopLength_[face] <= 0)
+                continue;
+            const int id = mesh.loops_.vertexIds_[mesh.loops_.vertexStart_[face]];
+            // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
+            // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
+            return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111);
+        }
+    }
+    return ClassifyComponentFloat(mesh.solid_, component, other.solid_, epsilon);
 }
 
 /// Collect the elements of one operand. This function does not classify.
@@ -1150,6 +1180,7 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
         const bool second = index != 0;
         const Mesh& mesh = second ? core.b_ : core.a_;
         const CsgSolid& solid = mesh.solid_;
+        const Mesh& otherMesh = second ? core.a_ : core.b_;
         const CsgSolid& other = second ? *a : *b;
         CsgOperandElements& o = s.operands_[index];
         const bool flip = second && operation == CsgOperation::DifferenceAB;
@@ -1157,7 +1188,7 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
         {
             if (o.touched_[component])
                 continue;
-            const bool inside = ClassifyComponent(solid, component, other, epsilon);
+            const bool inside = ClassifyComponent(core, mesh, component, otherMesh, second, epsilon);
             if (CsgSolid::Keep(inside, operation, second))
                 result.AppendComponent(solid, component, flip);
         }

@@ -236,6 +236,103 @@ TEST_CASE("Boolean of a sphere inside a box", "[boolean]")
     CHECK(Run(sphere, box, CsgOperation::DifferenceAB)->FaceCount() == 0);
 }
 
+TEST_CASE("Boolean of a box with a small box that lies fully inside it", "[boolean][classify]")
+{
+    const auto big = MakeBox(Vector3::ZERO, 1);
+    const auto small = MakeSolid(MakeBoxPolygons(Vector3(0.1f, 0.2f, -0.1f), Vector3(0.25f, 0.25f, 0.25f), 2));
+    const double volumeBig = Volume(big);
+    const double volumeSmall = Volume(small);
+    REQUIRE(volumeSmall == Catch::Approx(0.125).margin(VOLUME_TOLERANCE));
+
+    SECTION("The big box is the first operand")
+    {
+        const auto unionAB = Run(big, small, CsgOperation::Union);
+        const auto differenceAB = Run(big, small, CsgOperation::DifferenceAB);
+        CHECK(Volume(unionAB) == Catch::Approx(volumeBig).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(Run(big, small, CsgOperation::Intersection)) == Catch::Approx(volumeSmall).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(differenceAB) == Catch::Approx(volumeBig - volumeSmall).margin(VOLUME_TOLERANCE));
+        CheckClosed(unionAB);
+        CheckClosed(differenceAB);
+    }
+    SECTION("The small box is the first operand")
+    {
+        const auto unionAB = Run(small, big, CsgOperation::Union);
+        CHECK(Volume(unionAB) == Catch::Approx(volumeBig).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(Run(small, big, CsgOperation::Intersection)) == Catch::Approx(volumeSmall).margin(VOLUME_TOLERANCE));
+        CHECK(Run(small, big, CsgOperation::DifferenceAB)->FaceCount() == 0);
+        CheckClosed(unionAB);
+    }
+}
+
+TEST_CASE("Boolean of a box with a small box that lies fully outside it", "[boolean][classify]")
+{
+    const auto big = MakeBox(Vector3::ZERO, 1);
+    const auto small = MakeSolid(MakeBoxPolygons(Vector3(3.0f, 0.5f, -0.5f), Vector3(0.25f, 0.25f, 0.25f), 2));
+    const double volumeBig = Volume(big);
+    const double volumeSmall = Volume(small);
+
+    SECTION("The big box is the first operand")
+    {
+        const auto differenceAB = Run(big, small, CsgOperation::DifferenceAB);
+        CHECK(Volume(Run(big, small, CsgOperation::Union)) == Catch::Approx(volumeBig + volumeSmall).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(differenceAB) == Catch::Approx(volumeBig).margin(VOLUME_TOLERANCE));
+        CHECK(Run(big, small, CsgOperation::Intersection)->FaceCount() == 0);
+        CheckClosed(differenceAB);
+    }
+    SECTION("The small box is the first operand")
+    {
+        const auto differenceAB = Run(small, big, CsgOperation::DifferenceAB);
+        CHECK(Volume(Run(small, big, CsgOperation::Union)) == Catch::Approx(volumeBig + volumeSmall).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(differenceAB) == Catch::Approx(volumeSmall).margin(VOLUME_TOLERANCE));
+        CHECK(Run(small, big, CsgOperation::Intersection)->FaceCount() == 0);
+        CheckClosed(differenceAB);
+    }
+}
+
+TEST_CASE("Boolean of two boxes that touch on a face, an edge or a corner", "[boolean][classify]")
+{
+    // The second box is at an offset of -2, 0 or 2 on each axis. The boxes touch without a crossing. The offsets
+    // with one, two and three non-zero values give a shared face, a shared edge and a shared corner.
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const double volumeBox = Volume(a);
+    int faceCount = 0;
+    int edgeCount = 0;
+    int cornerCount = 0;
+    for (int x = -2; x <= 2; x += 2)
+    {
+        for (int y = -2; y <= 2; y += 2)
+        {
+            for (int z = -2; z <= 2; z += 2)
+            {
+                const int nonZero = (x != 0) + (y != 0) + (z != 0);
+                if (nonZero == 0)
+                    continue;
+                INFO("offset " << x << " " << y << " " << z);
+                (nonZero == 1 ? faceCount : nonZero == 2 ? edgeCount : cornerCount)++;
+                const auto b = MakeBox(Vector3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)), 2);
+                for (const bool swap : {false, true})
+                {
+                    const SolidPtr& first = swap ? b : a;
+                    const SolidPtr& second = swap ? a : b;
+                    const auto unionAB = Run(first, second, CsgOperation::Union);
+                    const auto differenceAB = Run(first, second, CsgOperation::DifferenceAB);
+                    const auto intersectionAB = Run(first, second, CsgOperation::Intersection);
+                    CHECK(Volume(unionAB) == Catch::Approx(2.0 * volumeBox).margin(VOLUME_TOLERANCE));
+                    CHECK(Volume(differenceAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
+                    CHECK(Volume(intersectionAB) == Catch::Approx(0.0).margin(VOLUME_TOLERANCE));
+                    CHECK(intersectionAB->FaceCount() == 0);
+                    CheckClosed(differenceAB);
+                    if (nonZero == 1)
+                        CheckClosed(unionAB);
+                }
+            }
+        }
+    }
+    CHECK(faceCount == 6);
+    CHECK(edgeCount == 12);
+    CHECK(cornerCount == 8);
+}
+
 TEST_CASE("Boolean results are operands again and the union is associative", "[boolean]")
 {
     const auto a = MakeBox(Vector3::ZERO, 1);
