@@ -756,3 +756,63 @@ TEST_CASE("Trace closes with curves at a crossing beyond its edge", "[split]")
     const auto result = CheckTrace(points, {0, 3, 1, 2, 6}, {{3, 4}, {4, 6}, {3, 5}, {5, 6}});
     CHECK(result.cycles_.size() == 3);
 }
+
+namespace
+{
+
+/// Sorted ids of the cycle that holds the directed edge from - to. It is empty if no cycle holds that edge.
+std::vector<int> CycleWithEdge(const CsgTraceTestResult& result, int from, int to)
+{
+    for (const ea::vector<int>& cycle : result.cycles_)
+    {
+        const int size = static_cast<int>(cycle.size());
+        for (int i = 0; i < size; ++i)
+        {
+            if (cycle[i] == from && cycle[(i + 1) % size] == to)
+            {
+                std::vector<int> ids(cycle.begin(), cycle.end());
+                std::sort(ids.begin(), ids.end());
+                return ids;
+            }
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+TEST_CASE("Trace of a chord that crosses a boundary edge on the grid keeps two regions", "[split]")
+{
+    // The chord 3 - 5 - 4 goes from the edge 0 - 1 to the edge 2 - 0. The rounded point 5 is below the edge 0 - 1,
+    // so the piece 5 - 4 crosses the boundary edge 0 - 3 on the grid. The rounded region 0 - 3 - 5 - 4 is a bow tie.
+    // The trace does not use the points at a chain vertex with one curve or at a curve vertex with two curves.
+    // So the regions are the regions of the exact map.
+    const auto points = TracePoints({Point2(50, 0), Point2(0, 50), Point2(60, -5)});
+    const auto result = CheckTrace(points, {0, 3, 1, 2, 4}, {{3, 5}, {5, 4}});
+    REQUIRE(result.cycles_.size() == 2);
+    CHECK(CycleWithEdge(result, 0, 3) == std::vector<int>{0, 3, 4, 5});
+    CHECK(CycleWithEdge(result, 3, 1) == std::vector<int>{1, 2, 3, 4, 5});
+}
+
+TEST_CASE("Trace of a chord with folded curve vertices keeps two regions", "[split]")
+{
+    // The chord 3 - 5 - 6 - 4 has two curve vertices of degree two. The point 5 is beyond the edge 1 - 2 and the
+    // point 6 is near the edge 0 - 1, so the rounded chord folds over itself. Each region keeps its exact ids.
+    const auto points = TracePoints({Point2(50, 0), Point2(0, 50), Point2(90, 40), Point2(20, 2)});
+    const auto result = CheckTrace(points, {0, 3, 1, 2, 4}, {{3, 5}, {5, 6}, {6, 4}});
+    REQUIRE(result.cycles_.size() == 2);
+    CHECK(CycleWithEdge(result, 0, 3) == std::vector<int>{0, 3, 4, 5, 6});
+    CHECK(CycleWithEdge(result, 3, 1) == std::vector<int>{1, 2, 3, 4, 5, 6});
+}
+
+TEST_CASE("Trace of a folded closed curve gives one cycle in each direction", "[split]")
+{
+    // The closed curve 3 - 4 - 5 - 6 is inside the triangle. Its rounded points make a bow tie. The trace gives the
+    // boundary cycle and the closed curve once in each direction. The hole and its island have the same ids.
+    const auto points = TracePoints({Point2(10, 10), Point2(40, 10), Point2(10, 40), Point2(40, 40)});
+    const auto result = CheckTrace(points, {0, 1, 2}, {{3, 4}, {4, 5}, {5, 6}, {6, 3}});
+    REQUIRE(result.cycles_.size() == 3);
+    CHECK(CycleWithEdge(result, 0, 1) == std::vector<int>{0, 1, 2});
+    CHECK(CycleWithEdge(result, 3, 4) == std::vector<int>{3, 4, 5, 6});
+    CHECK(CycleWithEdge(result, 4, 3) == std::vector<int>{3, 4, 5, 6});
+}
