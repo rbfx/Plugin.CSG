@@ -258,7 +258,10 @@ void PresnappedFaces(const ea::vector<CsgSharedPolygon>& faces, float epsilon, e
     ea::vector<CsgGridPoint> idGrid;
     idPositions.reserve(cornerCount);
     idGrid.reserve(cornerCount);
-    ea::vector<int> ids(cornerCount);
+    // A vector with a size of zero must not allocate. Keep the buffer pointers null.
+    ea::vector<int> ids;
+    if (cornerCount != 0)
+        ids.resize(cornerCount);
     unsigned corner = 0;
     for (const CsgSharedPolygon& face : faces)
     {
@@ -436,8 +439,15 @@ private:
 void GroupComponents(unsigned faceCount, FaceSets& sets, ea::vector<unsigned>& componentStart,
     ea::vector<unsigned>& componentFaces, ea::vector<unsigned>& faceComponents)
 {
-    ea::vector<int> componentIndices(faceCount, -1);
-    faceComponents.resize(faceCount);
+    // A vector with a size of zero must not allocate. Keep the buffer pointers null.
+    ea::vector<int> componentIndices;
+    if (faceCount != 0)
+    {
+        componentIndices.resize(faceCount, -1);
+        faceComponents.resize(faceCount);
+    }
+    else
+        faceComponents.clear();
     unsigned componentCount = 0;
     for (unsigned face = 0; face < faceCount; ++face)
     {

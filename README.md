@@ -35,25 +35,50 @@ The engine uses corefinement:
 - A face BVH (binned SAH) finds the face pairs that overlap.
 - A symbolic perturbation (a displacement of the second operand) resolves the degenerate cases, such as a vertex on a face.
 - A SIMD filter (`CsgFloat4`: SSE2, NEON, WASM or scalar) decides most tests. A lane that it cannot decide goes to the exact expansion path.
-- The exact tests work on an integer grid with a scale of 2^-10 (1/1024) units. Grid coordinates are 32 bit integers below 2^23, so differences are below 2^24 and exact in float.
-- The coordinate limit is 2^13 (8192) units. The engine logs a warning for an operand coordinate outside this limit. It clamps the coordinate to 8191 units and sets the `outOfRange` flag. The result is not valid in this case.
-- The CMake option `CSG_EXACT_USE_DOUBLE` (default OFF) makes `CsgReal` a double. The library builds with strict float flags: `-ffp-contract=off -fno-fast-math` (GCC, Clang) or `/fp:strict` (MSVC).
-- With `CSG_EXACT_USE_DOUBLE`, the grid step is 2^-16 units. Grid coordinates are 32 bit integers below 2^29, so differences are below 2^30 and exact in double. The coordinate limit stays 8192 units. A float coordinate snaps to this grid.
-- The bounds of the exact values follow from the grid (`CsgExact.h`): minors below 2^50 and determinants below 2^75 in float mode, minors below 2^62 and determinants below 2^93 in double mode. The SIMD filter stays on float in both modes. In double mode the conversion of a difference to float can round, and the filter bound covers this error.
 - The result keeps whole faces from the operands and builds new faces only along the curve.
 
-`epsilon` is used for the weld of vertices, for the bounds and for the point queries. An epsilon that is not positive gives the default epsilon.
+### Integer grid
+
+All exact decisions use an integer grid:
+
+- A solid stores one integer grid point for each vertex id. The float position of a vertex is the grid point divided by the scale. A boolean result keeps the grid points of its ids.
+- The grid scale is 2^-10 (1/1024) units in float mode. Grid coordinates are 32 bit integers below 2^23, so differences are below 2^24 and exact in float.
+- The CMake option `CSG_EXACT_USE_DOUBLE` (default OFF) makes `CsgReal` a double. The grid step is then 2^-16 units. Grid coordinates are below 2^29, so differences are below 2^30 and exact in double. A float coordinate snaps to this grid.
+- The library builds with strict float flags: `-ffp-contract=off -fno-fast-math` (GCC, Clang) or `/fp:strict` (MSVC).
+- The coordinate limit is 2^13 (8192) units in both modes. For an operand coordinate outside this limit, or not finite, the engine logs a warning and clamps the grid point to 8191 units. The solid sets the `outOfRange` flag, `IsOutOfRange()` returns true, and the result is not valid.
+- One rounding rule makes a grid coordinate: floor(x + 1/2). A tie goes toward plus infinity.
+- An operand snaps once. `CsgSolid::FromOperand` welds the corners within `epsilon`, repairs the T-junctions, and snaps each welded position to the grid. The fast entry (`PresnappedFaces`) does the weld and the snap in one pass. It is enough if the snapped faces close up exactly. A constructor without grid points (the polygon list entry) also welds within `epsilon`. No later step snaps a position again.
+- A crossing of an edge through a triangle rounds once with the same rule. `CsgExact::RoundOnEdge` and `CsgExact::RoundCrossing` apply the rule exactly to a point on an edge.
+- The bounds of the exact values follow from the grid (`CsgExact.h`): minors below 2^50 and determinants below 2^75 in float mode, minors below 2^62 and determinants below 2^93 in double mode.
+- The SIMD filter stays on float in both modes. Its error bounds are `CsgPlanarFilterBound` (planar determinants and dot products) and `CsgDistanceFilterBound` (distances). In double mode the conversion of a difference to float can round, and the bounds cover this error. A value inside the bound goes to the exact path.
+
+### Splitter, classification and result
+
+- The splitter works on rounded grid points. It uses exact 2D grid predicates in the plane of a face and an exact cyclic order of the edges around a vertex.
+- Classification works per patch. Elements that an edge off the curve joins form a patch. The elements use grid-canonical ids: ids with equal grid points count as one id. The sum of the votes of the curve edges of a patch labels all its elements. A patch with no net vote falls back to a point query.
+- The result path has no weld within `epsilon` and no float repair. The kept faces go through an exact clean-up by grid point and id. The clean-up welds ids with equal grid points, removes repeated ids and zero-width spikes, cancels twin faces (two faces that visit the same ids in opposite directions), and splits an edge at the vertices that are exactly on it (T-junctions).
+- The result is closed if every directed edge has an opposite partner. This test is exact and has no crack budget. If the surface is not closed, the result reports `IsClosed()` false.
+- `epsilon` is used for the weld of operand corners, for the bounds of operands and for the point queries. An operand without exact ids (a solid from `FromOperand` or from polygons) also uses it for the crack budget of `IsClosed()`. An epsilon that is not positive gives the default epsilon.
 
 Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand from a `Model`. Use `CsgTriangulatePolygons` and `CsgBuildModel` to get a `Model` from polygons.
 `CsgSimplifyPolygons` (in `CsgOptimization.h`) simplifies a polygon list.
 
 ## Known limits
 
-- The predicates see positions that are snapped to the grid (1/1024 units in float mode). The output keeps the unsnapped float positions.
-- One rounding rule snaps a value to the grid: floor(x + 1/2). A tie goes toward plus infinity. `CsgExact::RoundOnEdge` and `CsgExact::RoundCrossing` apply this rule exactly to a point on an edge.
-- Rotated coplanar brushes can lose the coplanar contact. A union of such brushes can be wrong.
-- `CSG_EXACT_USE_DOUBLE` makes this problem smaller. In a sweep of 1028 rotations, 114 samples fail in float mode and 25 samples fail in double mode. In these samples the union of the first two brushes is right, and the next boolean fails.
-- In both modes a union of rotated brushes can keep zero-width spikes in its faces. The next boolean can then leave a hole.
+- Rounding changes the shape. A vertex moves by up to half a grid step on each axis (1/2048 units in float mode, 1/131072 units in double mode).
+- In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, 9 samples fail in float mode and 11 samples fail in double mode. Rounding turns thin slivers over, and the surface does not close.
+- `MergeCrossingsOnGrid` (in `CsgCorefine.h`) is a compile-time switch. It is off. With the switch on, crossings that round to one grid point share one id and the splitter closes all its traces. But more samples fail: 21 in float mode and 18 in double mode. The open results have coplanar regions that stay twice, because the two operands split them differently. A topology-preserving snap rounding is the next design step.
+- A coordinate outside of +-8192 units gives a result that is not valid.
+
+## Benchmark
+
+The benchmark is a hidden test (tag `[.benchmark]`). A normal run skips it. Run it with:
+
+```sh
+Tests.CSG "[.benchmark]" --benchmark-samples 20
+```
+
+The baselines for the float build and the double build are in the header of `Source/Tests/TestBenchmark.cpp`.
 
 ## Components
 

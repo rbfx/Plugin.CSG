@@ -393,19 +393,20 @@ void CheckRotatedAssociativity(float angle)
 } // namespace
 
 // Rotation rounds the positions, so the vertices of a coplanar face are on a shared edge only within rounding.
-// The grid step is 2^-10 units. The exact tests snap the corners of rotated brushes one by one.
-// The snapped corners do not stay coplanar. This gives wrong unions, for example at the angle 4.5.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-26 units and the test passes. The float mode still fails.
+// The grid step is 2^-10 units in float mode and 2^-16 units in double mode.
+// The snapped corners do not stay coplanar. The rounding can turn a thin sliver over.
+// The float mode passes all four angles. The double mode fails at the angle 14.3: a result stays open.
+// So the test keeps the [!mayfail] tag. It fails as expected in the double mode only.
 TEST_CASE("known limit: rotated result with coplanar faces is associative", "[boolean][!mayfail]")
 {
     for (const float angle : {30.0f, 12.5f, 4.5f, 14.3f})
         CheckRotatedAssociativity(angle);
 }
 
-// The union of A and B keeps zero-width spikes in some faces. In the union at 9.4 degrees, the face f3 has the
-// vertices (8, 5, 2), and vertex 8 lies on the segment 2-5. The neighbour face f1 has the edge 2-5 without
-// vertex 8. The next corefinement with C leaves a hole near the crossing on that edge. The spike removal is not done.
-TEST_CASE("known limit: zero-width spikes in kept faces", "[boolean][!mayfail]")
+// The union of A and B can have a zero-width spike in a face, for example at 9.4 degrees. The exact clean-up
+// of the result removes the spike and splits the neighbor edge at the vertex on it. The next corefinement with C
+// then closes. The test passes in the float mode and in the double mode.
+TEST_CASE("Zero-width spikes in kept faces do not open the result", "[boolean]")
 {
     for (const float angle : {77.0f, 9.4f})
         CheckRotatedAssociativity(angle);
@@ -486,17 +487,17 @@ void RunSweep(float step, unsigned maxFailures)
 } // namespace
 
 // The sweep covers rotations of the coplanar contact: 4 axes and 257 angles from 0.3 to 179.5 degrees.
-// The grid step is 2^-10 units. The exact tests snap the corners of rotated boxes one by one.
-// The snapped corners do not stay coplanar. The measured count of failed samples is 9 of 1028.
+// The grid step is 2^-10 units in float mode. The snapped corners do not stay coplanar.
+// The measured count of failed samples is 9 of 1028.
 // In all of them the union of A and B is right. The next boolean fails because the result has an open edge.
 // The failed samples are about the axis (1, 1, 1) (6), the z axis (2) and the x axis (1).
 // A closed result must have the exact volume of the union. The test checks this in all samples.
-// The [!mayfail] tag means that a failed check reports but does not fail the run.
-// The test fails if more than 16 samples fail. It is a known limit, so the failure is expected.
+// The failed samples are a known limit: rounding turns a thin sliver over and the result stays open.
+// The test fails if more than 16 samples fail, or if a closed result has a wrong volume. It passes in both modes.
 // With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 11 samples fail: the axis (1, 1, 1) (8), the x axis (2)
-// and the z axis (1). The union of A and B is right in all of them. The test also fails in double mode.
-TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
-    "[boolean][sweep][!mayfail]")
+// and the z axis (1). The union of A and B is right in all of them.
+TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of rotations",
+    "[boolean][sweep]")
 {
     RunSweep(0.7f, 16);
 }
