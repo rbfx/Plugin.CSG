@@ -216,6 +216,54 @@ int CsgExact::Orient(
     return 0;
 }
 
+bool CsgExact::AxisRayCrossesTriangle(const CsgGridPoint& p, const CsgGridPoint& t0, const CsgGridPoint& t1,
+    const CsgGridPoint& t2, int second)
+{
+    URHO3D_ASSERT(second == 0b0111 || second == 0b1000, "The mask must move the triangle or the point");
+
+    // The ray is p + t * (1, 0, 0) with t > 0. Project along x: u = y, v = z.
+    const CsgGridPoint2 q = Project(p, 0, false);
+    const CsgGridPoint2 corners[3] = {Project(t0, 0, false), Project(t1, 0, false), Project(t2, 0, false)};
+
+    // The sign of the projected area is the sign of the x component of the normal.
+    const int s = Orient2(corners[0], corners[1], corners[2]);
+    if (s == 0)
+        return false;
+
+    // Only the relative displacement of the point and the triangle matters. Orient adds delta to each marked point.
+    // Mask 0b1000: the point moves by +delta. Mask 0b0111: the triangle moves, so the point moves by -delta.
+    // Let r be the sign of the displacement of the point relative to the triangle: r = 1 for 0b1000, r = -1 for 0b0111.
+    // The projected displacement of the point is r * (eps^2, eps^3). The x part r * eps only moves the plane test.
+    const int r = second == 0b1000 ? 1 : -1;
+
+    // The point is inside the projected triangle if it is on the inner side of all three edges.
+    // The inner side has the sign s. A tie (o == 0) is resolved by the displacement:
+    // Orient2(e0, e1, q + r * (eps^2, eps^3)) = Orient2(e0, e1, q) + r * (d.u * eps^3 - d.v * eps^2).
+    // Here d = e1 - e0. The term eps^2 is the larger one. If d.v is zero, the term eps^3 decides.
+    for (int i = 0; i < 3; ++i)
+    {
+        const CsgGridPoint2& e0 = corners[i];
+        const CsgGridPoint2& e1 = corners[(i + 1) % 3];
+        int o = Orient2(e0, e1, q);
+        if (o == 0)
+        {
+            const CsgGridPoint2 d = Difference(e1, e0);
+            if (d.v_ != 0)
+                o = d.v_ > 0 ? -r : r;
+            else
+                o = d.u_ > 0 ? r : -r;
+        }
+        if (o * s < 0)
+            return false;
+    }
+
+    // The sign of o3 is the sign of N . (p - t0) with N = (t1 - t0) x (t2 - t0). N.x has the sign s.
+    // The plane meets the ray at t = -N . (p - t0) / N.x. The hit is ahead (t > 0) if the signs differ.
+    const int o3 = Orient(t0, t1, t2, p, second);
+    URHO3D_ASSERT(o3 != 0, "The displacement must resolve the plane test for a triangle that is not parallel to x");
+    return o3 * s < 0;
+}
+
 CsgNormal CsgExact::Normal(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
 {
     const CsgReal ux = static_cast<CsgReal>(static_cast<int64_t>(b.x_) - a.x_);

@@ -188,6 +188,15 @@ public:
     static int Orient(
         const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second);
 
+    /// Tell whether the ray from p along +x crosses the triangle (t0, t1, t2).
+    /// The configuration is the displaced one of Orient. Only two values of second are valid:
+    /// 0b0111 (the triangle is in the second operand and the point is in the first) and
+    /// 0b1000 (the point is in the second operand and the triangle is in the first).
+    /// The marked points move by delta = (eps, eps^2, eps^3). A point on the plane or on an edge is never a tie.
+    /// The bit bounds are those of Orient2 and Orient.
+    static bool AxisRayCrossesTriangle(const CsgGridPoint& p, const CsgGridPoint& t0, const CsgGridPoint& t1,
+        const CsgGridPoint& t2, int second);
+
     /// Project a grid point to a plane. The axis dropAxis (0, 1 or 2) is dropped.
     /// The other two axes keep the cyclic order: drop x gives (y, z), drop y gives (z, x), drop z gives (x, y).
     /// If flip is true, the two coordinates swap. This reverses the orientation of the projection.

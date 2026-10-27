@@ -734,6 +734,10 @@ struct CsgTraceTestResult
 CsgTraceTestResult CsgTraceRegionsForTest(const ea::vector<CsgGridPoint2>& points, const ea::vector<int>& chain,
     const ea::vector<ea::pair<int, int>>& curves);
 
+/// Whether a grid point is inside a solid. It runs the exact ray parity of the boolean. The mask second is 0b0111
+/// if the solid is the second operand and the point is in the first, or 0b1000 for the reverse.
+bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, int second);
+
 #ifdef CSG_DIAGNOSTICS
 /// Counters of events inside the boolean. Only the diagnostic tests define CSG_DIAGNOSTICS.
 /// The counters are atomic with relaxed order, because a boolean can run on more than one thread.

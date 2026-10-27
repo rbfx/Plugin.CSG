@@ -993,3 +993,158 @@ TEST_CASE("Crossing vertex of a boolean result lies exactly on the grid", "[bool
     }
     CHECK(crossings > 0);
 }
+
+namespace
+{
+
+/// Axis aligned box on the grid, in grid units.
+struct GridBox
+{
+    int low_[3];
+    int high_[3];
+};
+
+GridBox MakeGridBox(const Vector3& center, const Vector3& halfSize)
+{
+    GridBox result;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        result.low_[axis] = CsgGridPoint::Round(center.Data()[axis] - halfSize.Data()[axis]);
+        result.high_[axis] = CsgGridPoint::Round(center.Data()[axis] + halfSize.Data()[axis]);
+    }
+    return result;
+}
+
+/// Expected result for a point against a box in the displaced configuration.
+/// The point moves by rho * (eps, eps^2, eps^3) relative to the box. Here rho is 1 for the mask 0b1000
+/// and -1 for the mask 0b0111. A coordinate on the low side is inside if rho = 1, on the high side if rho = -1.
+bool ExpectedInside(const GridBox& box, const CsgGridPoint& p, int second)
+{
+    const int rho = second == 0b1000 ? 1 : -1;
+    const int coordinates[3] = {p.x_, p.y_, p.z_};
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const int c = coordinates[axis];
+        const bool inside = (c > box.low_[axis] && c < box.high_[axis]) || (c == box.low_[axis] && rho > 0)
+            || (c == box.high_[axis] && rho < 0);
+        if (!inside)
+            return false;
+    }
+    return true;
+}
+
+bool IsOnBoxSurface(const GridBox& box, const CsgGridPoint& p, int margin)
+{
+    const int coordinates[3] = {p.x_, p.y_, p.z_};
+    bool inside = true;
+    bool near = false;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        const int c = coordinates[axis];
+        inside = inside && c >= box.low_[axis] - margin && c <= box.high_[axis] + margin;
+        near = near || std::abs(c - box.low_[axis]) <= margin || std::abs(c - box.high_[axis]) <= margin;
+    }
+    return inside && near;
+}
+
+} // namespace
+
+TEST_CASE("ClassifyGridPoint equals ContainsPoint for a sphere and a box", "[boolean][classify]")
+{
+    const Vector3 boxCenter(0.05f, 0.02f, -0.03f);
+    const Vector3 boxHalf(0.5f, 0.6f, 0.55f);
+    const CsgSolid box(MakeBoxPolygons(boxCenter, boxHalf, 1));
+    const CsgSolid sphere(MakeSpherePolygons(Vector3(0.1f, 0.0f, 0.05f), 0.7f, 12, 16, 2));
+    const GridBox gridBox = MakeGridBox(boxCenter, boxHalf);
+    const Mesh sphereMesh(sphere, false, 0);
+    const Mesh boxMesh(box, false, 0);
+
+    int compared = 0;
+    int insideCount = 0;
+    int outsideCount = 0;
+    const int margin = static_cast<int>(CsgGridScale * 0.002);
+    for (const CsgGridPoint& vertex : sphereMesh.grid_)
+    {
+        if (IsOnBoxSurface(gridBox, vertex, margin))
+            continue;
+        const bool expected = box.ContainsPoint(vertex.ToPosition());
+        for (const int second : {0b0111, 0b1000})
+            CHECK(CsgClassifyGridPointForTest(box, vertex, second) == expected);
+        ++compared;
+        (expected ? insideCount : outsideCount)++;
+    }
+    CHECK(compared > 50);
+    CHECK(insideCount > 5);
+    CHECK(outsideCount > 5);
+
+    // The reverse: the corners of the box against the sphere, and the box points in the middle of the sphere.
+    for (const CsgGridPoint& vertex : boxMesh.grid_)
+    {
+        const bool expected = sphere.ContainsPoint(vertex.ToPosition());
+        for (const int second : {0b0111, 0b1000})
+            CHECK(CsgClassifyGridPointForTest(sphere, vertex, second) == expected);
+    }
+}
+
+TEST_CASE("ClassifyGridPoint of the vertices of boxes that share a face", "[boolean][classify]")
+{
+    // The second box touches the first box on one face. Three arrangements: above, below and beside.
+    const Vector3 offsets[] = {Vector3(0.0f, 2.0f, 0.0f), Vector3(0.0f, -2.0f, 0.0f), Vector3(2.0f, 0.0f, 0.0f),
+        Vector3(0.0f, 0.0f, -2.0f)};
+    for (const Vector3& offset : offsets)
+    {
+        INFO("offset " << offset.x_ << " " << offset.y_ << " " << offset.z_);
+        const Vector3 half(1.0f, 1.0f, 1.0f);
+        const CsgSolid a(MakeBoxPolygons(Vector3::ZERO, half, 1));
+        const CsgSolid b(MakeBoxPolygons(offset, half, 2));
+        const GridBox boxA = MakeGridBox(Vector3::ZERO, half);
+        const GridBox boxB = MakeGridBox(offset, half);
+        const Mesh meshA(a, false, 0);
+        const Mesh meshB(b, true, 0);
+        // Every vertex of A against B with the triangle of B moved, and every vertex of B against A with the point moved.
+        for (const CsgGridPoint& vertex : meshA.grid_)
+            CHECK(CsgClassifyGridPointForTest(b, vertex, 0b0111) == ExpectedInside(boxB, vertex, 0b0111));
+        for (const CsgGridPoint& vertex : meshB.grid_)
+            CHECK(CsgClassifyGridPointForTest(a, vertex, 0b1000) == ExpectedInside(boxA, vertex, 0b1000));
+    }
+}
+
+TEST_CASE("ClassifyGridPoint of a box on top of a box", "[boolean][classify]")
+{
+    // B sits on top of A. The shared face is y = 1. The displacement moves B up by eps^2, so the boxes separate.
+    // The derivation gives: a vertex of A on the shared face is outside B for the mask 0b0111, and a vertex of B
+    // on the shared face is outside A for the mask 0b1000 (the point moves above the top face of A).
+    const Vector3 half(1.0f, 1.0f, 1.0f);
+    const CsgSolid a(MakeBoxPolygons(Vector3::ZERO, half, 1));
+    const CsgSolid b(MakeBoxPolygons(Vector3(0.0f, 2.0f, 0.0f), half, 2));
+    const Mesh meshA(a, false, 0);
+    const Mesh meshB(b, true, 0);
+    const CsgGridInt top = CsgGridPoint::From(Vector3(0.0f, 1.0f, 0.0f)).y_;
+    int onFace = 0;
+    for (const CsgGridPoint& vertex : meshA.grid_)
+    {
+        if (vertex.y_ != top)
+            continue;
+        CHECK_FALSE(CsgClassifyGridPointForTest(b, vertex, 0b0111));
+        ++onFace;
+    }
+    CHECK(onFace == 4);
+    onFace = 0;
+    for (const CsgGridPoint& vertex : meshB.grid_)
+    {
+        if (vertex.y_ != top)
+            continue;
+        CHECK_FALSE(CsgClassifyGridPointForTest(a, vertex, 0b1000));
+        // The orientation test agrees: with the point moved, it is above every top triangle of A.
+        for (unsigned t = 0; t < meshA.triangleFace_.size(); ++t)
+        {
+            const CsgGridPoint& c0 = meshA.grid_[meshA.triangleIds_[t * 3]];
+            const CsgGridPoint& c1 = meshA.grid_[meshA.triangleIds_[t * 3 + 1]];
+            const CsgGridPoint& c2 = meshA.grid_[meshA.triangleIds_[t * 3 + 2]];
+            if (c0.y_ == top && c1.y_ == top && c2.y_ == top)
+                CHECK(CsgExact::Orient(c0, c1, c2, vertex, 0b1000) > 0);
+        }
+        ++onFace;
+    }
+    CHECK(onFace == 4);
+}

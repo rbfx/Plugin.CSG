@@ -2,11 +2,14 @@
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
 #include "Urho3D/CSG/CsgExpansion.h"
+#include "Urho3D/CSG/CsgSolid.h"
 
 #include "TestExactReference.h"
+#include "TestGeometry.h"
 
 #include <catch2/catch_amalgamated.hpp>
 
@@ -2445,6 +2448,198 @@ TEST_CASE("Orient2 cost", "[.orient2cost][exact]")
     const double nanoseconds = std::chrono::duration<double, std::nano>(end - begin).count() / (double(repeats) * 4094.0);
     WARN("Orient2: " << nanoseconds << " ns per call (checksum " << total << ")");
     REQUIRE(total != 12345678);
+}
+
+namespace
+{
+
+CsgGridPoint GridP(int x, int y, int z)
+{
+    CsgGridPoint result;
+    result.x_ = x;
+    result.y_ = y;
+    result.z_ = z;
+    return result;
+}
+
+constexpr int RayMasks[2] = {0b0111, 0b1000};
+
+/// Count the triangles that the ray from p along +x crosses.
+int CountRayCrossings(const std::vector<CsgGridPoint>& corners, const std::vector<int>& triangles,
+    const CsgGridPoint& p, int second)
+{
+    int count = 0;
+    for (size_t i = 0; i + 2 < triangles.size(); i += 3)
+    {
+        count += CsgExact::AxisRayCrossesTriangle(
+            p, corners[triangles[i]], corners[triangles[i + 1]], corners[triangles[i + 2]], second);
+    }
+    return count;
+}
+
+/// Cube with the corner (0, 0, 0) and the side 10. Its 12 triangles have the diagonals through the corner 0 or 7.
+void MakeGridCube(std::vector<CsgGridPoint>& corners, std::vector<int>& triangles)
+{
+    corners.clear();
+    for (int i = 0; i < 8; ++i)
+        corners.push_back(GridP((i & 1) * 10, ((i >> 1) & 1) * 10, ((i >> 2) & 1) * 10));
+    triangles = {// x = 0
+        0, 2, 6, 0, 6, 4,
+        // x = 10
+        1, 5, 7, 1, 7, 3,
+        // y = 0
+        0, 4, 5, 0, 5, 1,
+        // y = 10
+        2, 3, 7, 2, 7, 6,
+        // z = 0
+        0, 1, 3, 0, 3, 2,
+        // z = 10
+        4, 6, 7, 4, 7, 5};
+}
+
+} // namespace
+
+TEST_CASE("AxisRayCrossesTriangle of a cube", "[exact][axisray]")
+{
+    std::vector<CsgGridPoint> corners;
+    std::vector<int> triangles;
+    MakeGridCube(corners, triangles);
+    for (const int second : RayMasks)
+    {
+        // Inner points. The point (5, 5, 5) lies exactly on the projected diagonals of the faces x = 0 and x = 10.
+        const CsgGridPoint inner[] = {GridP(5, 5, 5), GridP(5, 3, 7), GridP(1, 1, 1), GridP(9, 9, 9), GridP(5, 5, 3),
+            GridP(3, 3, 3)};
+        for (const CsgGridPoint& p : inner)
+        {
+            INFO("mask " << second << " point " << p.x_ << " " << p.y_ << " " << p.z_);
+            CHECK(CountRayCrossings(corners, triangles, p, second) == 1);
+        }
+        // Outer points. The ray crosses the cube twice or not at all.
+        CHECK(CountRayCrossings(corners, triangles, GridP(-5, 3, 4), second) == 2);
+        CHECK(CountRayCrossings(corners, triangles, GridP(-5, 5, 5), second) == 2);
+        CHECK(CountRayCrossings(corners, triangles, GridP(-5, 20, 4), second) == 0);
+        CHECK(CountRayCrossings(corners, triangles, GridP(-5, 5, -1), second) == 0);
+        CHECK(CountRayCrossings(corners, triangles, GridP(20, 5, 5), second) == 0);
+        CHECK(CountRayCrossings(corners, triangles, GridP(20, 3, 4), second) == 0);
+        // Points on the boundary of the projection. The point moves by r * (eps^2, eps^3) relative to the cube.
+        // It is inside the projected cube if both displaced coordinates stay in the open range (0, 10).
+        // The coordinate 0 needs r = 1, the coordinate 10 needs r = -1 and the coordinate 5 always works.
+        const int r = second == 0b1000 ? 1 : -1;
+        const auto inRange = [r](int c) { return c == 5 || (c == 0 && r > 0) || (c == 10 && r < 0); };
+        const int boundary[][2] = {{0, 5}, {10, 5}, {5, 0}, {5, 10}, {0, 0}, {0, 10}, {10, 0}, {10, 10}};
+        for (const auto& yz : boundary)
+        {
+            INFO("mask " << second << " y " << yz[0] << " z " << yz[1]);
+            CHECK(CountRayCrossings(corners, triangles, GridP(-5, yz[0], yz[1]), second)
+                == (inRange(yz[0]) && inRange(yz[1]) ? 2 : 0));
+        }
+        // A point on the face x = 0. The cube moves by eps in x for the mask 0b0111 and the point for the mask 0b1000.
+        CHECK(CountRayCrossings(corners, triangles, GridP(0, 5, 5), second) == (second == 0b1000 ? 1 : 2));
+        CHECK(CountRayCrossings(corners, triangles, GridP(10, 5, 5), second) == (second == 0b1000 ? 0 : 1));
+    }
+}
+
+TEST_CASE("AxisRayCrossesTriangle with a point on a shared projected edge", "[exact][axisray]")
+{
+    // Two triangles share the edge (0, 0) - (10, 10) of the (y, z) projection, with a different x on the two sides.
+    {
+        const std::vector<CsgGridPoint> corners = {
+            GridP(5, 0, 0), GridP(5, 10, 10), GridP(5, 10, 0), GridP(6, 0, 0), GridP(4, 10, 10), GridP(5, 0, 10)};
+        const std::vector<int> triangles = {0, 1, 2, 3, 4, 5};
+        // The projected triangles are on the two sides of the edge. The second has the opposite orientation.
+        for (const int second : RayMasks)
+            CHECK(CountRayCrossings(corners, triangles, GridP(0, 5, 5), second) == 1);
+    }
+    // The shared edge is parallel to the u axis.
+    {
+        const std::vector<CsgGridPoint> corners = {
+            GridP(5, 0, 5), GridP(5, 10, 5), GridP(5, 5, 10), GridP(5, 10, 5), GridP(5, 0, 5), GridP(5, 5, 0)};
+        const std::vector<int> triangles = {0, 1, 2, 3, 4, 5};
+        for (const int second : RayMasks)
+            CHECK(CountRayCrossings(corners, triangles, GridP(0, 5, 5), second) == 1);
+    }
+    // The shared edge is parallel to the v axis, and the triangles have the same orientation as the cube faces.
+    {
+        const std::vector<CsgGridPoint> corners = {
+            GridP(5, 5, 0), GridP(5, 5, 10), GridP(5, 10, 5), GridP(5, 5, 10), GridP(5, 5, 0), GridP(5, 0, 5)};
+        const std::vector<int> triangles = {0, 1, 2, 3, 4, 5};
+        for (const int second : RayMasks)
+            CHECK(CountRayCrossings(corners, triangles, GridP(0, 5, 5), second) == 1);
+    }
+}
+
+TEST_CASE("AxisRayCrossesTriangle with a point on the projected vertex of a fan", "[exact][axisray]")
+{
+    // The apex is (5, 5, 5). The six ring points surround the projected apex.
+    const int ring[6][2] = {{15, 5}, {10, 15}, {0, 15}, {-5, 5}, {0, -5}, {10, -5}};
+    for (const bool reversed : {false, true})
+    {
+        std::vector<CsgGridPoint> corners = {GridP(5, 5, 5)};
+        for (int i = 0; i < 6; ++i)
+            corners.push_back(GridP(3 + (i * 3) % 5, ring[i][0], ring[i][1]));
+        std::vector<int> triangles;
+        for (int i = 0; i < 6; ++i)
+        {
+            triangles.push_back(0);
+            triangles.push_back(reversed ? 1 + (i + 1) % 6 : 1 + i);
+            triangles.push_back(reversed ? 1 + i : 1 + (i + 1) % 6);
+        }
+        for (const int second : RayMasks)
+        {
+            INFO("mask " << second << " reversed " << reversed);
+            CHECK(CountRayCrossings(corners, triangles, GridP(0, 5, 5), second) == 1);
+            CHECK(CountRayCrossings(corners, triangles, GridP(-7, 5, 5), second) == 1);
+        }
+    }
+}
+
+TEST_CASE("AxisRayCrossesTriangle with a point in the plane of the triangle", "[exact][axisray]")
+{
+    // The triangle lies in the plane x = 5 and the point is in the plane, inside the projection.
+    const CsgGridPoint t0 = GridP(5, 0, 0), t1 = GridP(5, 10, 0), t2 = GridP(5, 0, 10);
+    const CsgGridPoint p = GridP(5, 1, 1);
+    // The triangle moves to x = 5 + eps, so the point is behind the plane and the ray crosses it.
+    CHECK(CsgExact::AxisRayCrossesTriangle(p, t0, t1, t2, 0b0111));
+    CHECK(CsgExact::AxisRayCrossesTriangle(p, t0, t2, t1, 0b0111));
+    // The point moves to x = 5 + eps, so the point is ahead of the plane and the ray does not cross it.
+    CHECK_FALSE(CsgExact::AxisRayCrossesTriangle(p, t0, t1, t2, 0b1000));
+    CHECK_FALSE(CsgExact::AxisRayCrossesTriangle(p, t0, t2, t1, 0b1000));
+    // A triangle parallel to the ray never crosses.
+    CHECK_FALSE(CsgExact::AxisRayCrossesTriangle(GridP(0, 1, 1), GridP(3, 0, 0), GridP(4, 10, 0), GridP(3, 0, 0), 0b0111));
+    CHECK_FALSE(CsgExact::AxisRayCrossesTriangle(GridP(0, 1, 1), GridP(3, 0, 0), GridP(4, 10, 0), GridP(5, 20, 0), 0b1000));
+}
+
+TEST_CASE("AxisRayCrossesTriangle parity equals ContainsPoint on a sphere", "[exact][axisray]")
+{
+    const CsgSolid sphere(MakeSpherePolygons(Vector3(0.1f, -0.2f, 0.05f), 1.0f, 16, 24, 1));
+    const CsgInternal::Mesh mesh(sphere, false, 0);
+    const std::vector<CsgGridPoint> corners(mesh.grid_.begin(), mesh.grid_.end());
+    std::vector<int> triangles(mesh.triangleIds_.begin(), mesh.triangleIds_.end());
+    REQUIRE(!triangles.empty());
+
+    std::mt19937_64 random(777);
+    std::uniform_int_distribution<int> coordinate(static_cast<int>(-1.5 * CsgGridScale), static_cast<int>(1.5 * CsgGridScale));
+    int inside = 0;
+    int tested = 0;
+    for (int i = 0; i < 2000; ++i)
+    {
+        CsgGridPoint p = GridP(coordinate(random), coordinate(random), coordinate(random));
+        const Vector3 position = p.ToPosition();
+        // Skip the points near the faceted surface, where a float ray is not reliable.
+        const float distance = (position - Vector3(0.1f, -0.2f, 0.05f)).Length();
+        if (std::abs(distance - 1.0f) < 0.06f)
+            continue;
+        const bool expected = sphere.ContainsPoint(position);
+        for (const int second : RayMasks)
+        {
+            const bool parity = (CountRayCrossings(corners, triangles, p, second) & 1) != 0;
+            REQUIRE(parity == expected);
+        }
+        ++tested;
+        inside += expected ? 1 : 0;
+    }
+    CHECK(tested > 1000);
+    CHECK(inside > 100);
 }
 
 } // namespace Urho3D

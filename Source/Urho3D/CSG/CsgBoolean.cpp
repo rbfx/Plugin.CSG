@@ -10,6 +10,7 @@
 #include <Urho3D/IO/Log.h>
 
 #include <EASTL/algorithm.h>
+#include <EASTL/fixed_vector.h>
 #include <EASTL/sort.h>
 
 #include <cmath>
@@ -1175,6 +1176,72 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
     result.AppendSolid(*regionSolid);
 }
 
+/// Whether a ray from the origin along +x can hit a box. The pad covers the float rounding of the origin
+/// and the pad of the BVH boxes.
+bool AxisRayHitsBox(const Vector3& origin, const Vector3& min, const Vector3& max, float pad)
+{
+    return origin.y_ >= min.y_ - pad && origin.y_ <= max.y_ + pad && origin.z_ >= min.z_ - pad
+        && origin.z_ <= max.z_ + pad && origin.x_ <= max.x_ + pad;
+}
+
+/// Return true if a grid point is inside the solid of a mesh. The point and the mesh have the displacement
+/// mask second, as in CsgExact::AxisRayCrossesTriangle. It is 0b0111 if the mesh is the second operand.
+/// The result is the parity of the exact crossings of a ray along +x. No float test decides a crossing.
+/// The float boxes only skip triangles that the ray cannot hit.
+bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second)
+{
+    constexpr float pad = 0.002f;
+    const CsgSolid& solid = other.solid_;
+    const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
+    URHO3D_ASSERT(other.triangleIds_.size() == 3 * static_cast<size_t>(triangleStart.empty() ? 0 : triangleStart.back()));
+
+    const Vector3 origin = p.ToPosition();
+    const CsgFaceBvh& components = solid.GetComponentTree();
+    if (components.ItemCount() == 0)
+        return false;
+
+    bool parity = false;
+    const auto addFaceTriangles = [&](unsigned face)
+    {
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+        {
+            parity ^= CsgExact::AxisRayCrossesTriangle(p, other.grid_[other.triangleIds_[t * 3]],
+                other.grid_[other.triangleIds_[t * 3 + 1]], other.grid_[other.triangleIds_[t * 3 + 2]], second);
+        }
+    };
+    const auto walk = [&](const CsgFaceBvh& tree, auto&& visitItem)
+    {
+        if (tree.ItemCount() == 0)
+            return;
+        const ea::span<const CsgFaceBvh::Node> nodes = tree.GetNodes();
+        const ea::span<const int> items = tree.GetItems();
+        ea::fixed_vector<int, 64, true> stack;
+        stack.push_back(0);
+        while (!stack.empty())
+        {
+            const CsgFaceBvh::Node& node = nodes[stack.back()];
+            stack.pop_back();
+            if (!AxisRayHitsBox(origin, node.min_, node.max_, pad))
+                continue;
+            if (node.count_ == 0)
+            {
+                stack.push_back(node.first_ + 1);
+                stack.push_back(node.first_);
+                continue;
+            }
+            for (int i = node.first_; i < node.first_ + node.count_; ++i)
+                visitItem(static_cast<unsigned>(items[i]));
+        }
+    };
+    walk(components,
+        [&](unsigned component)
+        {
+            if (AxisRayHitsBox(origin, solid.GetComponentMin(component), solid.GetComponentMax(component), pad))
+                walk(solid.GetFaceTree(component), addFaceTriangles);
+        });
+    return parity;
+}
+
 } // namespace
 
 SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
@@ -1203,6 +1270,12 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, s.operands_[1], s);
     ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
     return result.Finish();
+}
+
+bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, int second)
+{
+    const Mesh mesh(other, second == 0b0111, 0);
+    return ClassifyGridPoint(mesh, p, second);
 }
 
 } // namespace CsgInternal
