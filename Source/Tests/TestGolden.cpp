@@ -487,16 +487,20 @@ void WriteLines(const std::filesystem::path& path, const std::vector<std::string
 
 TEST_CASE("Golden corpus of boolean results", "[.golden]")
 {
+    CsgInternal::g_csgDiagnostics.Reset();
     Corpus corpus;
     AddShapes(corpus);
     AddSweep(corpus);
     AddChains(corpus);
+    const int failedSplits = CsgInternal::g_csgDiagnostics.failedSplits_.load();
+    const int failedRegionFits = CsgInternal::g_csgDiagnostics.failedRegionFits_.load();
     const std::vector<std::string>& lines = corpus.GetLines();
     INFO("booleans " << corpus.GetBooleanCount() << ", lines " << lines.size() << ", boolean wall time "
                      << corpus.GetBooleanSeconds() << " s");
     // The wall time is also visible with a passing run.
     std::printf("golden: %zu lines, %u booleans, boolean wall time %.3f s\n", lines.size(), corpus.GetBooleanCount(),
         corpus.GetBooleanSeconds());
+    std::printf("golden: failedSplits %d, failedRegionFits %d\n", failedSplits, failedRegionFits);
     REQUIRE(corpus.GetDuplicateCount() == 0);
 
     const std::filesystem::path directory = GetEnv("CSG_GOLDEN_DIR", DEFAULT_GOLDEN_DIR);
@@ -556,4 +560,7 @@ TEST_CASE("Golden corpus of boolean results", "[.golden]")
     // Catch attaches the unscoped messages to the next assertion only. The diff check comes first for this reason.
     CHECK(diffCount == 0);
     CHECK(openNow <= openBaseline);
+    // The pipeline must not fail on the corpus.
+    CHECK(failedSplits == 0);
+    CHECK(failedRegionFits == 0);
 }
