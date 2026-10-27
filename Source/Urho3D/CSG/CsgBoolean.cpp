@@ -1265,16 +1265,16 @@ bool AxisRayHitsBox(const Vector3& origin, const Vector3& min, const Vector3& ma
         && origin.z_ <= max.z_ + pad && origin.x_ <= max.x_ + pad;
 }
 
-/// Count the exact crossings of a ray along +x with the triangles of a mesh and return their parity.
+/// Count the exact crossings of a ray along +x with the triangles of a solid and return their parity.
 /// The origin is a float position of the ray. It only selects the triangles with the float boxes.
+/// The callback corner(f, t, k) returns the grid point of the corner k of the triangle t of the face f.
 /// The callback crosses(a, b, c) gets the grid points of a triangle and returns the exact result.
 /// No float test decides a crossing. The float boxes only skip triangles that the ray cannot hit.
-template <class Crosses> bool ClassifyRay(const Mesh& other, const Vector3& origin, const Crosses& crosses)
+template <class Corner, class Crosses>
+bool ClassifyRay(const CsgSolid& solid, const Vector3& origin, const Corner& corner, const Crosses& crosses)
 {
     constexpr float pad = 0.002f;
-    const CsgSolid& solid = other.solid_;
     const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
-    URHO3D_ASSERT(other.triangleIds_.size() == 3 * static_cast<size_t>(triangleStart.empty() ? 0 : triangleStart.back()));
 
     const CsgFaceBvh& components = solid.GetComponentTree();
     if (components.ItemCount() == 0)
@@ -1284,10 +1284,7 @@ template <class Crosses> bool ClassifyRay(const Mesh& other, const Vector3& orig
     const auto addFaceTriangles = [&](unsigned face)
     {
         for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
-        {
-            parity ^= crosses(other.grid_[other.triangleIds_[t * 3]], other.grid_[other.triangleIds_[t * 3 + 1]],
-                other.grid_[other.triangleIds_[t * 3 + 2]]);
-        }
+            parity ^= crosses(corner(face, t, 0), corner(face, t, 1), corner(face, t, 2));
     };
     const auto walk = [&](const CsgFaceBvh& tree, auto&& visitItem)
     {
@@ -1320,6 +1317,18 @@ template <class Crosses> bool ClassifyRay(const Mesh& other, const Vector3& orig
                 walk(solid.GetFaceTree(component), addFaceTriangles);
         });
     return parity;
+}
+
+/// Count the exact crossings with the triangles of a mesh. The ids of the mesh give the corners.
+template <class Crosses> bool ClassifyRay(const Mesh& other, const Vector3& origin, const Crosses& crosses)
+{
+    const ea::span<const unsigned> triangleStart = other.solid_.GetTriangleStart();
+    URHO3D_ASSERT(other.triangleIds_.size() == 3 * static_cast<size_t>(triangleStart.empty() ? 0 : triangleStart.back()));
+    return ClassifyRay(
+        other.solid_, origin,
+        [&](unsigned, unsigned triangle, unsigned corner) -> const CsgGridPoint&
+        { return other.grid_[other.triangleIds_[triangle * 3 + corner]]; },
+        crosses);
 }
 
 /// Return true if a grid point is inside the solid of a mesh. The point and the mesh have the displacement
@@ -1379,6 +1388,20 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, s.operands_[1], s);
     ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
     return result.Finish();
+}
+
+bool CsgContainsGridPoint(const CsgSolid& solid, const CsgGridPoint& p)
+{
+    if (solid.FaceCount() == 0)
+        return false;
+    const CsgExactLoops loops = solid.GetExactLoops();
+    const ea::span<const unsigned> triangleVertices = solid.GetTriangleVertices();
+    return ClassifyRay(
+        solid, p.ToPosition(),
+        [&](unsigned face, unsigned triangle, unsigned corner) -> const CsgGridPoint&
+        { return loops.grid_[loops.ids_[loops.vertexStart_[face] + triangleVertices[triangle * 3 + corner]]]; },
+        [&](const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2)
+        { return CsgExact::AxisRayCrossesTriangle(p, t0, t1, t2, 0b0111); });
 }
 
 bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, int second)

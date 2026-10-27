@@ -204,9 +204,11 @@ public:
     float OpenEdgeLength() const;
     /// Return true if the point is inside the solid. The solid must be closed.
     ///
-    /// Three fixed rays vote by the parity of their crossings. Crossings closer than two epsilons count as one.
-    /// A point that is not finite is outside. The result for a point within epsilon of a face is not defined.
-    bool ContainsPoint(const Vector3& point, float epsilon = CSG_DEFAULT_EPSILON) const;
+    /// The answer is exact. The function snaps the point to the grid, as it does for the input of a solid.
+    /// Then it counts the crossings of an exact ray along +x with the grid triangles and uses the parity.
+    /// A point that is not finite, or that is outside the range of the grid, is outside.
+    /// A point on the surface has a fixed answer from the symbolic displacement of the exact predicates.
+    bool ContainsPoint(const Vector3& point) const;
 
     /// Return a copy of the face with the winding, the normals and the plane reversed.
     static CsgSharedPolygon Flipped(const CsgPolygon& face);
@@ -247,12 +249,6 @@ public:
     /// Return true if the stored triangles of the face needed the fallback of the triangulator.
     /// Then the triangles can be flat or inverted.
     bool IsFallbackFace(unsigned face) const;
-    /// Classify a point in a closed solid with three rays. Return true if the point is inside.
-    ///
-    /// The answer is reliable if the three rays agree and no ray crosses the surface within four epsilons.
-    /// A point that is not finite is outside and not reliable.
-    bool ClassifyPoint(const Vector3& point, float epsilon, bool& reliable) const;
-
     /// Build a solid from kept faces of a boolean.
     ///
     /// The origins have one entry for each face or none. A face with an origin copies the triangles and the bounds

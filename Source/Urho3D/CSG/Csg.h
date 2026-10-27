@@ -42,7 +42,7 @@ static const char* CsgOperationNames[] = {
 /// Compute CSG boolean operation between two solids and return the resulting solid.
 ///
 /// The solids must be closed. The operation uses exact math for the intersection curve.
-/// `epsilon` is used for the bounds, for the weld of the result and for the point queries.
+/// `epsilon` is used for the bounds and for the weld of the result.
 /// An epsilon that is not positive gives the default epsilon.
 /// An operand with IsOutOfRange true gives an empty solid with IsOutOfRange true.
 /// The result can be one of the operands if the other operand is empty. A null operand gives a null result.

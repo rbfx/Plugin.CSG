@@ -5,13 +5,13 @@
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include "Urho3D/CSG/Csg.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgFaceBvh.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include <Urho3D/Core/Assert.h>
 #include <Urho3D/Core/Profiler.h>
 
 #include <EASTL/algorithm.h>
-#include <EASTL/fixed_vector.h>
 #include <EASTL/sort.h>
 #include <EASTL/unique_ptr.h>
 #include <EASTL/utility.h>
@@ -465,156 +465,6 @@ void GroupComponents(unsigned faceCount, FaceSets& sets, ea::vector<unsigned>& c
     ea::vector<unsigned> fill(componentStart.begin(), componentStart.begin() + componentCount);
     for (unsigned face = 0; face < faceCount; ++face)
         componentFaces[fill[faceComponents[face]]++] = face;
-}
-
-/// Directions of the parity rays. They are not axis aligned, so the rays avoid most shared edges and vertices.
-const Vector3* GetRayDirections()
-{
-    static const Vector3 directions[3] = {
-        Vector3(1.0f, 0.371f, 0.173f).Normalized(),
-        Vector3(0.239f, 1.0f, 0.419f).Normalized(),
-        Vector3(0.193f, 0.317f, 1.0f).Normalized(),
-    };
-    return directions;
-}
-
-/// Return true if the ray from the origin can hit the box. The inverse is one over the direction.
-/// A NaN value never rejects the box. The triangle test rejects a NaN hit.
-bool RayHitsBox(const Vector3& origin, const Vector3& inverse, const Vector3& min, const Vector3& max)
-{
-    float enter = 0.0f;
-    float exit = INF;
-    for (int axis = 0; axis < 3; ++axis)
-    {
-        float t0 = (min.Data()[axis] - origin.Data()[axis]) * inverse.Data()[axis];
-        float t1 = (max.Data()[axis] - origin.Data()[axis]) * inverse.Data()[axis];
-        if (t0 > t1)
-            ea::swap(t0, t1);
-        if (t0 > enter)
-            enter = t0;
-        if (t1 < exit)
-            exit = t1;
-    }
-    return enter <= exit;
-}
-
-/// Two-sided Moeller-Trumbore test. Return infinity if the ray misses. NaN input can give a NaN distance.
-float RayTriangle(
-    const Vector3& origin, const Vector3& direction, const Vector3& v0, const Vector3& v1, const Vector3& v2)
-{
-    const Vector3 edge1 = v1 - v0;
-    const Vector3 edge2 = v2 - v0;
-    const Vector3 p = direction.CrossProduct(edge2);
-    float det = edge1.DotProduct(p);
-    if (std::abs(det) < M_EPSILON)
-        return INF;
-    // A negative determinant is the back face. Mirror the barycentric tests instead of a rewind.
-    const float sign = det < 0.0f ? -1.0f : 1.0f;
-    det *= sign;
-    const Vector3 offset = origin - v0;
-    const float u = offset.DotProduct(p) * sign;
-    if (u < 0.0f || u > det)
-        return INF;
-    const Vector3 q = offset.CrossProduct(edge1);
-    const float v = direction.DotProduct(q) * sign;
-    if (v < 0.0f || u + v > det)
-        return INF;
-    const float distance = edge2.DotProduct(q) * sign / det;
-    return distance >= 0.0f ? distance : INF;
-}
-
-using RayHits = ea::fixed_vector<float, 64, true>;
-using NodeStack = ea::fixed_vector<int, 64, true>;
-
-void CollectRayHits(const CsgSolid& solid, const CsgFaceBvh& tree, const Vector3& origin, const Vector3& direction,
-    const Vector3& inverse, RayHits& hits)
-{
-    if (tree.ItemCount() == 0)
-        return;
-    const ea::span<const CsgFaceBvh::Node> nodes = tree.GetNodes();
-    const ea::span<const int> items = tree.GetItems();
-    const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
-    const ea::span<const Vector3> positions = solid.GetTrianglePositions();
-    NodeStack stack;
-    stack.push_back(0);
-    while (!stack.empty())
-    {
-        const CsgFaceBvh::Node& node = nodes[stack.back()];
-        stack.pop_back();
-        if (!RayHitsBox(origin, inverse, node.min_, node.max_))
-            continue;
-        if (node.count_ == 0)
-        {
-            stack.push_back(node.first_ + 1);
-            stack.push_back(node.first_);
-            continue;
-        }
-        for (int i = node.first_; i < node.first_ + node.count_; ++i)
-        {
-            const unsigned face = items[i];
-            for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
-            {
-                const float distance = RayTriangle(origin, direction, positions[t * 3],
-                    positions[t * 3 + 1], positions[t * 3 + 2]);
-                // The negated test also catches NaN. A hit at the origin is no crossing.
-                if (!(distance > 0.0f) || !std::isfinite(distance))
-                    continue;
-                hits.push_back(distance);
-            }
-        }
-    }
-}
-
-/// Count the crossings of a ray. The nearest hit is the distance of the closest triangle, or infinity.
-int CountCrossings(
-    const CsgSolid& solid, const Vector3& origin, const Vector3& direction, float epsilon, float* nearest = nullptr)
-{
-    const Vector3 inverse(1.0f / direction.x_, 1.0f / direction.y_, 1.0f / direction.z_);
-    RayHits hits;
-    NodeStack stack;
-
-    const CsgFaceBvh& components = solid.GetComponentTree();
-    if (components.ItemCount() != 0)
-    {
-        const ea::span<const CsgFaceBvh::Node> nodes = components.GetNodes();
-        const ea::span<const int> items = components.GetItems();
-        stack.push_back(0);
-        while (!stack.empty())
-        {
-            const CsgFaceBvh::Node& node = nodes[stack.back()];
-            stack.pop_back();
-            if (!RayHitsBox(origin, inverse, node.min_, node.max_))
-                continue;
-            if (node.count_ == 0)
-            {
-                stack.push_back(node.first_ + 1);
-                stack.push_back(node.first_);
-                continue;
-            }
-            for (int i = node.first_; i < node.first_ + node.count_; ++i)
-            {
-                const unsigned component = items[i];
-                if (RayHitsBox(origin, inverse, solid.GetComponentMin(component), solid.GetComponentMax(component)))
-                    CollectRayHits(solid, solid.GetFaceTree(component), origin, direction, inverse, hits);
-            }
-        }
-    }
-
-    // A crossing is a distance that differs from the last by more than two epsilons. This way two triangles
-    // on the same surface do not change the parity twice. All distances are finite, so the sort is safe.
-    ea::sort(hits.begin(), hits.end());
-    if (nearest)
-        *nearest = hits.empty() ? INF : hits.front();
-    int crossings = 0;
-    float last = -INF;
-    for (const float hit : hits)
-    {
-        if (hit - last <= epsilon * 2.0f)
-            continue;
-        ++crossings;
-        last = hit;
-    }
-    return crossings;
 }
 
 /// Result of the topology build.
@@ -1207,39 +1057,6 @@ bool CsgSolid::CopyTriangles(unsigned face, ea::vector<unsigned>& output) const
     const unsigned end = triangleStart_[face + 1] * 3;
     output.assign(triangleVertices_.begin() + begin, triangleVertices_.begin() + end);
     return !output.empty();
-}
-
-bool CsgSolid::ClassifyPoint(const Vector3& point, float epsilon, bool& reliable) const
-{
-    reliable = true;
-    // The negated test also catches NaN.
-    if (!(epsilon > 0.0f))
-        epsilon = CSG_DEFAULT_EPSILON;
-    if (faces_.empty())
-        return false;
-    // A ray from a point that is not finite has no meaning.
-    if (!std::isfinite(point.x_) || !std::isfinite(point.y_) || !std::isfinite(point.z_))
-    {
-        reliable = false;
-        return false;
-    }
-    if (!BoundsOverlap(point, point, epsilon * 4.0f))
-        return false;
-
-    const Vector3* directions = GetRayDirections();
-    int insideVotes = 0;
-    for (int ray = 0; ray < 3; ++ray)
-    {
-        float nearest = INF;
-        if ((CountCrossings(*this, point, directions[ray], epsilon, &nearest) & 1) != 0)
-            ++insideVotes;
-        // A hit that is close to the point puts the point on the surface.
-        if (!(nearest > epsilon * 4.0f))
-            reliable = false;
-    }
-    if (insideVotes != 0 && insideVotes != 3)
-        reliable = false;
-    return insideVotes >= 2;
 }
 
 CsgSolid::Builder::Builder(unsigned faceCapacity, unsigned cornerCapacity, float epsilon)
@@ -1878,30 +1695,12 @@ void CsgSolid::BuildBounds()
         ea::span<const Vector3>(componentMax_.data(), componentMax_.size()));
 }
 
-bool CsgSolid::ContainsPoint(const Vector3& point, float epsilon) const
+bool CsgSolid::ContainsPoint(const Vector3& point) const
 {
-    // The negated test also catches NaN.
-    if (!(epsilon > 0.0f))
-        epsilon = CSG_DEFAULT_EPSILON;
-    if (faces_.empty())
+    // A point that is not finite or not in the range of the grid is in no solid.
+    if (faces_.empty() || !exact_ || outOfRange_ || !InGridRange(point))
         return false;
-    // A point that is not finite is in no solid, and a ray from it has no meaning.
-    if (!std::isfinite(point.x_) || !std::isfinite(point.y_) || !std::isfinite(point.z_))
-        return false;
-    if (!BoundsOverlap(point, point, 0.0f))
-        return false;
-
-    const Vector3* directions = GetRayDirections();
-    int insideVotes = 0;
-    for (int ray = 0; ray < 3; ++ray)
-    {
-        if ((CountCrossings(*this, point, directions[ray], epsilon) & 1) != 0)
-            ++insideVotes;
-        // Majority of three: stop once the remaining ray cannot change the outcome.
-        if (insideVotes == 2 || ray - insideVotes == 1)
-            break;
-    }
-    return insideVotes >= 2;
+    return CsgInternal::CsgContainsGridPoint(*this, CsgGridPoint::From(point));
 }
 
 } // namespace Urho3D

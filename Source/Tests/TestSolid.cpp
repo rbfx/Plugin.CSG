@@ -3,6 +3,7 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSG/Csg.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include "TestGeometry.h"
@@ -569,8 +570,8 @@ TEST_CASE("Solid ContainsPoint for a box", "[solid][contains]")
     CHECK_FALSE(solid.ContainsPoint(Vector3(-10.0f, -10.0f, -10.0f)));
     CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.0f, 2.0f, 0.0f)));
 
-    // Near a face, on each side of it.
-    for (const float offset : {0.01f, 1e-3f, 1e-5f})
+    // Near a face, on each side of it. The offsets are more than one grid step, so the snap keeps the side.
+    for (const float offset : {0.01f, 0.003f})
     {
         CHECK(solid.ContainsPoint(center + Vector3(0.5f - offset, 0.0f, 0.0f)));
         CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.5f + offset, 0.0f, 0.0f)));
@@ -580,22 +581,28 @@ TEST_CASE("Solid ContainsPoint for a box", "[solid][contains]")
         CHECK_FALSE(solid.ContainsPoint(center + Vector3(0.1f, 0.2f, 1.5f + offset)));
     }
 
-    // On a face, on an edge and on a corner the result is not defined, but it is stable.
+    // On a face, on an edge and on a corner the symbolic perturbation decides. The answer is deterministic.
     const Vector3 surface[] = {center + Vector3(0.5f, 0.0f, 0.0f), center + Vector3(0.5f, 1.0f, 0.0f),
         center + Vector3(0.5f, 1.0f, 1.5f), center + Vector3(-0.5f, -1.0f, -1.5f), center + Vector3(0.0f, 1.0f, 1.5f)};
     for (const Vector3& point : surface)
-        CHECK(solid.ContainsPoint(point) == solid.ContainsPoint(point));
+    {
+        const bool first = solid.ContainsPoint(point);
+        CHECK(solid.ContainsPoint(point) == first);
+        CHECK(CsgInternal::CsgClassifyGridPointForTest(solid, CsgGridPoint::From(point), 0b0111) == first);
+    }
+    // The triangles move along +x, so the ray from a point on the face at +x crosses that face only.
+    CHECK(solid.ContainsPoint(center + Vector3(0.5f, 0.0f, 0.0f)));
+    CHECK_FALSE(solid.ContainsPoint(center + Vector3(-0.5f, 0.0f, 0.0f)));
 
-    // Points that are not finite are outside. A bad epsilon gives the default.
+    // Points that are not finite or out of the range of the grid are outside.
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float inf = std::numeric_limits<float>::infinity();
     CHECK_FALSE(solid.ContainsPoint(Vector3(nan, nan, nan)));
     CHECK_FALSE(solid.ContainsPoint(Vector3(center.x_, nan, center.z_)));
     CHECK_FALSE(solid.ContainsPoint(Vector3(inf, 0.0f, 0.0f)));
     CHECK_FALSE(solid.ContainsPoint(Vector3(-inf, -inf, -inf)));
-    CHECK(solid.ContainsPoint(center, 0.0f));
-    CHECK(solid.ContainsPoint(center, nan));
-    CHECK(solid.ContainsPoint(center, -1.0f));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(1.0e6f, 0.0f, 0.0f)));
+    CHECK_FALSE(solid.ContainsPoint(Vector3(0.0f, -1.0e30f, 0.0f)));
 }
 
 TEST_CASE("Solid ContainsPoint for a sphere", "[solid][contains]")
@@ -661,8 +668,9 @@ TEST_CASE("Solid ContainsPoint agrees with an analytic box", "[solid][contains]"
 {
     const Vector3 center(1.0f, 2.0f, 3.0f);
     const Vector3 halfSize(0.5f, 1.0f, 1.5f);
-    const float epsilon = 1e-4f;
-    const CsgSolid solid(MakeBoxPolygons(center, halfSize, 1), epsilon);
+    const CsgSolid solid(MakeBoxPolygons(center, halfSize, 1));
+    // Two grid steps. A point nearer to the surface can snap onto it.
+    const float margin = 2.0f / static_cast<float>(CsgGridScale);
 
     // A fixed generator, so the points are the same on every platform.
     uint32_t state = 12345u;
@@ -678,18 +686,55 @@ TEST_CASE("Solid ContainsPoint agrees with an analytic box", "[solid][contains]"
     {
         const Vector3 point(-1.0f + next() * 4.0f, -0.5f + next() * 5.0f, 0.0f + next() * 6.0f);
         const float distance = BoxDistance(point, center, halfSize);
-        // A point within a few epsilons of the surface can go either way.
-        if (Abs(distance) < 10.0f * epsilon)
+        // A point within a few grid steps of the surface can snap onto it.
+        if (Abs(distance) < margin)
             continue;
         ++checked;
         const bool expected = distance < 0.0f;
         inside += expected ? 1 : 0;
-        CHECK(solid.ContainsPoint(point, epsilon) == expected);
+        CHECK(solid.ContainsPoint(point) == expected);
     }
     // The sample must have points on both sides.
     CHECK(checked > 900);
     CHECK(inside > 20);
     CHECK(inside < checked);
+}
+
+TEST_CASE("Solid ContainsPoint equals the exact classifier on random points", "[solid][contains]")
+{
+    const CsgSolid box(MakeBoxPolygons(Vector3(0.3f, -0.2f, 0.1f), Vector3(0.5f, 1.0f, 1.5f), 1));
+    const CsgSolid sphere(MakeSpherePolygons(Vector3(0.1f, 0.0f, 0.2f), 1.2f, 12, 16, 2));
+    const auto cutter = CsgSolid::FromOperand(MakeBoxPolygons(Vector3(0.9f, 0.0f, 0.0f), Vector3::ONE * 0.8f, 1));
+    const auto base = CsgSolid::FromOperand(MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1));
+    REQUIRE((cutter && base));
+    const auto difference = CsgBooleanOperation(base.Get(), cutter.Get(), CsgOperation::DifferenceAB);
+    REQUIRE(difference);
+    REQUIRE(difference->FaceCount() > 0);
+
+    const CsgSolid* solids[] = {&box, &sphere, difference.Get()};
+
+    // A fixed generator, so the points are the same on every platform.
+    uint32_t state = 987654321u;
+    const auto next = [&]()
+    {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state >> 8) / static_cast<float>(1u << 24);
+    };
+
+    for (const CsgSolid* solid : solids)
+    {
+        unsigned inside = 0;
+        constexpr unsigned count = 600;
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const Vector3 point(-2.0f + next() * 4.0f, -2.0f + next() * 4.0f, -2.0f + next() * 4.0f);
+            const bool contains = solid->ContainsPoint(point);
+            CHECK(contains == CsgInternal::CsgClassifyGridPointForTest(*solid, CsgGridPoint::From(point), 0b0111));
+            inside += contains ? 1 : 0;
+        }
+        CHECK(inside > 10);
+        CHECK(inside < count);
+    }
 }
 
 TEST_CASE("Solid FromOperand keeps a clean box", "[solid]")
@@ -1038,54 +1083,6 @@ TEST_CASE("Solid Keep follows the operation table", "[solid][kept]")
     }
 }
 
-TEST_CASE("Solid ClassifyPoint agrees with ContainsPoint and reports the surface", "[solid][kept]")
-{
-    const auto solid = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
-    const float epsilon = CSG_DEFAULT_EPSILON;
-    bool reliable = false;
-
-    CHECK(solid->ClassifyPoint(Vector3(0.1f, 0.2f, -0.3f), epsilon, reliable));
-    CHECK(reliable);
-    CHECK_FALSE(solid->ClassifyPoint(Vector3(3.0f, 0.2f, 0.1f), epsilon, reliable));
-    CHECK(reliable);
-    CHECK_FALSE(solid->ClassifyPoint(Vector3(0.2f, -0.4f, 1.5f), epsilon, reliable));
-    CHECK(reliable);
-    reliable = false;
-    CHECK_FALSE(solid->ClassifyPoint(Vector3(100.0f, 0.0f, 0.0f), epsilon, reliable));
-    CHECK(reliable);
-
-    for (int i = 0; i < 40; ++i)
-    {
-        const Vector3 point(-1.5f + 0.0731f * i, -1.4f + 0.0613f * i, 1.4f - 0.0709f * i);
-        const bool inside = solid->ClassifyPoint(point, epsilon, reliable);
-        if (reliable)
-            CHECK(inside == solid->ContainsPoint(point, epsilon));
-    }
-
-    // Just inside and just outside of a face: the answer can not be trusted.
-    solid->ClassifyPoint(Vector3(1.0f - 0.5f * epsilon, 0.1f, 0.1f), epsilon, reliable);
-    CHECK_FALSE(reliable);
-    solid->ClassifyPoint(Vector3(-1.0f - 0.5f * epsilon, 0.1f, 0.1f), epsilon, reliable);
-    CHECK_FALSE(reliable);
-    // Far enough from the face, the answer is reliable again.
-    solid->ClassifyPoint(Vector3(1.0f - 20.0f * epsilon, 0.1f, 0.1f), epsilon, reliable);
-    CHECK(reliable);
-
-    // Values that are not valid never hang or crash.
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const float inf = std::numeric_limits<float>::infinity();
-    CHECK_FALSE(solid->ClassifyPoint(Vector3(nan, 0.0f, 0.0f), epsilon, reliable));
-    CHECK_FALSE(reliable);
-    CHECK_FALSE(solid->ClassifyPoint(Vector3(0.0f, inf, 0.0f), epsilon, reliable));
-    CHECK_FALSE(reliable);
-    solid->ClassifyPoint(Vector3(0.0f, 0.0f, 0.0f), nan, reliable);
-    solid->ClassifyPoint(Vector3(0.0f, 0.0f, 0.0f), -1.0f, reliable);
-
-    const CsgSolid empty(ea::span<const CsgPolygon>{});
-    CHECK_FALSE(empty.ClassifyPoint(Vector3::ZERO, epsilon, reliable));
-    CHECK(reliable);
-}
-
 TEST_CASE("Solid copies no triangles of a face without triangles", "[solid][kept]")
 {
     // A face without triangles gives no triangles.
@@ -1117,8 +1114,8 @@ TEST_CASE("Solid from kept faces survives non-finite positions", "[solid][kept]"
     const auto solid = CsgSolid::FromKeptFaces(
         ea::move(faces), CSG_DEFAULT_EPSILON, {}, {ids.data(), ids.size()}, next);
     CHECK(solid->FaceCount() == 6);
-    bool reliable = true;
-    solid->ClassifyPoint(Vector3(0.1f, 0.1f, 0.1f), CSG_DEFAULT_EPSILON, reliable);
+    // The query must finish on a solid with non-finite corners.
+    (void)solid->ContainsPoint(Vector3(0.1f, 0.1f, 0.1f));
     CHECK_FALSE(solid->IsClosed());
 }
 
