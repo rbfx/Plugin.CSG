@@ -65,7 +65,6 @@ All exact decisions use an integer grid:
 - `epsilon` is used for the weld of operand corners, for the bounds of operands and for the point queries. An operand without exact ids (a solid from `FromOperand` or from polygons) also uses it for the crack budget of `IsClosed()`. An epsilon that is not positive gives the default epsilon.
 
 Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand from a `Model`. Use `CsgTriangulatePolygons` and `CsgBuildModel` to get a `Model` from polygons.
-`CsgSimplifyPolygons` (in `CsgOptimization.h`) simplifies a polygon list.
 
 ## Known limits
 

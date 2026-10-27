@@ -20,7 +20,6 @@ set (SOURCE_FILES
     TestSplit.cpp
     TestBoolean.cpp
     TestTriangulation.cpp
-    TestOptimization.cpp
     TestRoot.cpp
     TestParallel.cpp
     TestBenchmark.cpp
@@ -40,7 +39,6 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgExact.cpp
     ${CSG_DIR}/CsgExpansion.cpp
     ${CSG_DIR}/CsgFaceBvh.cpp
-    ${CSG_DIR}/CsgOptimization.cpp
     ${CSG_DIR}/CsgPolygon.cpp
     ${CSG_DIR}/CsgSolid.cpp
     ${CSG_DIR}/CsgTriangulation.cpp

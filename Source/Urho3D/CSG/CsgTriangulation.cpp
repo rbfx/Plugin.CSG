@@ -5,7 +5,6 @@
 #include "Urho3D/CSG/CsgTriangulation.h"
 
 #include "Urho3D/CSG/CsgCommon.h"
-#include "Urho3D/CSG/CsgOptimization.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Container/Ptr.h>
 #include <Urho3D/Math/MathDefs.h>
