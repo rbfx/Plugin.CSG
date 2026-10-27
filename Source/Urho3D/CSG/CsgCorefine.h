@@ -26,9 +26,6 @@ namespace Urho3D
 namespace CsgInternal
 {
 
-/// Coordinates with an absolute value of this limit or more are outside the range of the exact math.
-constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
-
 /// Whether Corefinement::ConstrainCrossings moves a rounded crossing that folds the planar map of a triangle.
 constexpr bool ConstrainCrossingsOnGrid = true;
 
@@ -36,8 +33,7 @@ constexpr bool ConstrainCrossingsOnGrid = true;
 struct Crossing
 {
     /// The crossing of the edge between the grid points of its ends, rounded to the grid.
-    /// position_ is grid / scale, see CsgGridPoint::ToPosition. If an operand is out of range, the grid points
-    /// are clamped and position_ is the crossing on the float edge.
+    /// position_ is grid / scale, see CsgGridPoint::ToPosition.
     CsgGridPoint grid_;
     Vector3 position_;
     /// Parameter along the edge from its lower to its higher welded id.
@@ -72,7 +68,7 @@ public:
     Mesh(const CsgSolid& solid, bool isSecond, int offset);
 
     int VertexCount() const { return static_cast<int>(grid_.size()); }
-    /// Return true if the triangle has no area because corners weld together, or if a corner is not finite.
+    /// Return true if the triangle has no area because corners weld together.
     bool IsCollapsed(int triangle) const;
 
     /// Fill edgeTriangles_ in one pass over triangleIds_. The mesh does not build it, because only the check of the
@@ -96,10 +92,6 @@ public:
     ea::vector<int> triangleIds_;
     /// Grid position of each welded id. The span is the grid of the solid.
     ea::span<const CsgGridPoint> grid_;
-    /// One byte for each welded id. Not zero if the position is not finite. The vector is empty if all are finite.
-    ea::vector<uint8_t> invalid_;
-    /// True if a position is not finite or has a coordinate outside the range of the exact math.
-    bool outOfRange_{};
     /// Triangles of each undirected edge, by CsgUndirectedKey of the welded ids. BuildEdgeTriangles fills it.
     CsgFlatMap<uint64_t, CsgEdgeTriangles, CsgPackedKeyHash> edgeTriangles_;
     bool edgeTrianglesBuilt_{};
@@ -582,9 +574,6 @@ public:
     CsgSplitResult splitB_;
     /// Curve segments by their undirected ends, oriented from entering to exiting along n_A x n_B.
     CsgFlatMap<uint64_t, ea::pair<int, int>, CsgPackedKeyHash> curveEdges_;
-    /// True if a coordinate of an operand is outside the range of the exact math. The results are not exact then.
-    bool outOfRange_{};
-
 private:
     /// Entry in the pool list of the crossings of an edge.
     struct EdgeNode
@@ -656,7 +645,6 @@ struct CsgCorefineTestResult
     ea::vector<int> segmentCountsB_;
     /// Curve segments in insertion order, as crossing indices (global id minus the first crossing id).
     ea::vector<ea::pair<int, int>> curveEdges_;
-    bool outOfRange_{};
 };
 
 /// Compute the crossings of two solids and return a summary. Both solids must have faces.
@@ -700,7 +688,6 @@ struct CsgSplitTestResult
     ea::vector<Vector3> positions_;
     /// Curve segments oriented as in curveEdges_, as global ids.
     ea::vector<ea::pair<int, int>> curveEdges_;
-    bool outOfRange_{};
 };
 
 /// Compute the crossings of two solids and split the triangles along the curve. Both solids must have faces.

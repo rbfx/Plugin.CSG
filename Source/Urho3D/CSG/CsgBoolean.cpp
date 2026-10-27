@@ -126,8 +126,6 @@ enum class ExactResult
 {
     /// The exact test gave the answer.
     Done,
-    /// The operands are out of the range of the exact math.
-    OutOfRange,
     /// Every triangle of the element has zero exact area.
     ZeroArea,
     /// The polygon does not match its loop, or the triangulation failed.
@@ -195,9 +193,8 @@ ExactResult ClassifyElementExact(const Corefinement& core, CsgBooleanScratch& s,
 /// the element on the left of an oriented segment is inside for the first operand, and on its right for the second.
 /// Elements joined by an edge off the curve form a patch. All elements of a patch get the same label:
 /// the sign of the sum of the votes of all curve edges of the patch.
-/// A patch with no net vote gets a point query on its largest element. If the operands are in the range of the
-/// exact math, the query is the exact ray test of the centroid of a triangle. Else it is the float query.
-/// In the exact range, the query uses an element with an exact area. A patch with no such element has no side.
+/// A patch with no net vote gets a point query on one element. The query is the exact ray test of the centroid of
+/// a triangle. The query uses an element with an exact area. A patch with no such element has no side.
 /// The patch is removed.
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
@@ -230,47 +227,36 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
     // The curve edges use the same canonical ids as the loops.
     s.curveEdges_.Clear();
     s.curveEdges_.Reserve(core.curveEdges_.Size());
-    if (core.outOfRange_)
+    s.firstId_.Clear();
+    s.firstId_.Reserve(edgeTotal);
+    const auto canonical = [&](int id)
     {
-        for (const auto& entry : core.curveEdges_)
-        {
-            bool existed = false;
-            s.curveEdges_.FindOrAdd(entry.key_, existed) = entry.value_;
-        }
-    }
-    else
+        const CsgGridPoint& point = PointGrid(core, id);
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        bool existed = false;
+        int& slot = s.firstId_.FindOrAdd(key, existed);
+        if (!existed)
+            slot = id;
+        return slot;
+    };
+    for (int i = 0; i < edgeTotal; ++i)
+        s.loops_[i] = canonical(s.loops_[i]);
+    for (const auto& entry : core.curveEdges_)
     {
-        s.firstId_.Clear();
-        s.firstId_.Reserve(edgeTotal);
-        const auto canonical = [&](int id)
-        {
-            const CsgGridPoint& point = PointGrid(core, id);
-            CsgVec3Key key;
-            key.x_ = static_cast<uint32_t>(point.x_);
-            key.y_ = static_cast<uint32_t>(point.y_);
-            key.z_ = static_cast<uint32_t>(point.z_);
-            bool existed = false;
-            int& slot = s.firstId_.FindOrAdd(key, existed);
-            if (!existed)
-                slot = id;
-            return slot;
-        };
-        for (int i = 0; i < edgeTotal; ++i)
-            s.loops_[i] = canonical(s.loops_[i]);
-        for (const auto& entry : core.curveEdges_)
-        {
-            const int first = canonical(entry.value_.first);
-            const int second = canonical(entry.value_.second);
-            if (first == second)
-                continue;
-            bool existed = false;
-            auto& slotc = s.curveEdges_.FindOrAdd(UndirectedKey(first, second), existed);
-            // Two segments on one edge with opposite sides cancel each other: the edge gets no vote and no twin.
-            if (existed && (slotc.first < 0 || slotc.first != first))
-                slotc = ea::make_pair(-1, -1);
-            else
-                slotc = ea::make_pair(first, second);
-        }
+        const int first = canonical(entry.value_.first);
+        const int second = canonical(entry.value_.second);
+        if (first == second)
+            continue;
+        bool existed = false;
+        auto& slotc = s.curveEdges_.FindOrAdd(UndirectedKey(first, second), existed);
+        // Two segments on one edge with opposite sides cancel each other: the edge gets no vote and no twin.
+        if (existed && (slotc.first < 0 || slotc.first != first))
+            slotc = ea::make_pair(-1, -1);
+        else
+            slotc = ea::make_pair(first, second);
     }
 
     // The last element with a directed edge owns it, as in the reference.
@@ -364,7 +350,7 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         const int root = find(e);
         if (s.patchVotes_[root] != 0)
             continue;
-        const bool exact = !core.outOfRange_ && HasGridArea(core, s, e);
+        const bool exact = HasGridArea(core, s, e);
         const double area = PolygonArea(*o.elements_[e].polygon_);
         if ((exact && !s.patchExact_[root]) || (exact == (s.patchExact_[root] != 0) && area > s.patchArea_[root]))
         {
@@ -399,7 +385,7 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         if (s.patchBest_[root] < 0)
             continue;
         const int best = s.patchBest_[root];
-        if (!core.outOfRange_ && !s.patchExact_[root])
+        if (!s.patchExact_[root])
         {
             // No element of the patch has an exact area, so no side of the other operand is right for the patch.
             // The patch is removed. It leaves no kept face. Its curve edges have no net vote and no twin.
@@ -408,9 +394,8 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
             continue;
         }
         bool inside = false;
-        ExactResult result = ExactResult::OutOfRange;
-        if (!core.outOfRange_)
-            result = ClassifyElementExact(core, s, best, *o.elements_[best].polygon_, otherMesh, second, inside);
+        const ExactResult result =
+            ClassifyElementExact(core, s, best, *o.elements_[best].polygon_, otherMesh, second, inside);
         if (result != ExactResult::Done)
         {
             // A polygon that does not match its loop, or a triangulation with zero exact area, has no exact test.
@@ -465,28 +450,25 @@ bool ClassifyComponentFloat(const CsgSolid& solid, unsigned component, const Csg
 
 /// Tell if a component that the curve does not reach lies inside the other solid.
 ///
-/// If the operands are in the range of the exact math, the answer is exact. The component has no curve, so it
+/// The answer is exact. The component has no curve, so it
 /// does not cross the displaced surface of the other operand. All its vertices lie on the same side, also the
 /// vertices that touch the other surface. The function classifies the first vertex of the first face with a loop.
 /// The exact test breaks a tie on a shared face by the displacement of the second operand.
-/// If an operand is out of range, or no face of the component has a loop, the function uses the float path.
+/// If no face of the component has a loop, the function uses the float path.
 bool ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned component, const Mesh& other, bool second,
     float epsilon)
 {
-    if (!core.outOfRange_)
+    const ea::span<const unsigned> componentStart = mesh.solid_.GetComponentStart();
+    const ea::span<const unsigned> componentFaces = mesh.solid_.GetComponentFaces();
+    for (unsigned i = componentStart[component]; i < componentStart[component + 1]; ++i)
     {
-        const ea::span<const unsigned> componentStart = mesh.solid_.GetComponentStart();
-        const ea::span<const unsigned> componentFaces = mesh.solid_.GetComponentFaces();
-        for (unsigned i = componentStart[component]; i < componentStart[component + 1]; ++i)
-        {
-            const unsigned face = componentFaces[i];
-            if (mesh.loops_.loopLength_[face] <= 0)
-                continue;
-            const int id = mesh.loops_.vertexIds_[mesh.loops_.vertexStart_[face]];
-            // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
-            // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
-            return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111);
-        }
+        const unsigned face = componentFaces[i];
+        if (mesh.loops_.loopLength_[face] <= 0)
+            continue;
+        const int id = mesh.loops_.vertexIds_[mesh.loops_.vertexStart_[face]];
+        // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
+        // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
+        return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111);
     }
     return ClassifyComponentFloat(mesh.solid_, component, other.solid_, epsilon);
 }
@@ -498,9 +480,7 @@ bool ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned comp
 /// The components that the curve does not reach are not elements. ClassifyAndEmit classifies them whole.
 ///
 /// A triangle that is collapsed is left out of a face that the curve reaches. The reference leaves out only
-/// triangles with welded corners. Here a triangle with a corner that is not finite is left out too, because
-/// a result vertex that is not finite has no meaning for the later steps.
-/// A face that the curve does not reach is kept as it is, also with a corner that is not finite.
+/// triangles with welded corners. The function does the same.
 void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentLists& segments,
     const CsgSplitResult& split, CsgOperandElements& o, CsgBooleanScratch& s)
 {
@@ -872,7 +852,7 @@ struct CsgRegionClean
     unsigned cleanCount_{};
     /// For each loop before the T-split, the range of its replacement loops. It is empty if no loop split.
     ea::vector<ea::pair<unsigned, unsigned>> replacements_;
-    /// The edges with a winding that is not zero, before the T-split. It is empty if a coordinate is out of range.
+    /// The edges with a winding that is not zero, before the T-split.
     ea::vector<CsgOpenEdge> openEdges_;
 };
 
@@ -890,7 +870,6 @@ struct CsgRegionClean
 /// - two faces that visit the same ids in opposite directions cancel;
 /// - an edge without a partner splits at the vertices exactly on it. Then its loop is cleaned again,
 ///   and the twins cancel again, because a twin pair can show only after the split.
-/// If a coordinate is out of the range of the grid, the grid points are clamped. Then only the ids weld.
 void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const ea::vector<int>& keptIds,
     CsgRegionClean& out)
 {
@@ -945,23 +924,20 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
     cornerStart.push_back(cornerIds.size());
 
     // Weld by grid point: each id maps to the first id with its grid point.
-    if (!core.outOfRange_)
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> firstId;
+    firstId.Reserve(cornerIds.size());
+    for (unsigned i = 0; i < cornerIds.size(); ++i)
     {
-        CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> firstId;
-        firstId.Reserve(cornerIds.size());
-        for (unsigned i = 0; i < cornerIds.size(); ++i)
-        {
-            const CsgGridPoint& point = cornerGrid[i];
-            CsgVec3Key key;
-            key.x_ = static_cast<uint32_t>(point.x_);
-            key.y_ = static_cast<uint32_t>(point.y_);
-            key.z_ = static_cast<uint32_t>(point.z_);
-            bool existed = false;
-            int& slot = firstId.FindOrAdd(key, existed);
-            if (!existed)
-                slot = cornerIds[i];
-            cornerIds[i] = slot;
-        }
+        const CsgGridPoint& point = cornerGrid[i];
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        bool existed = false;
+        int& slot = firstId.FindOrAdd(key, existed);
+        if (!existed)
+            slot = cornerIds[i];
+        cornerIds[i] = slot;
     }
 
     // Clean the loops. A loop with no surface is left out, and a loop that is not simple splits.
@@ -1001,7 +977,7 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
                 ranges.push_back({outer, static_cast<unsigned>(piece.size()) - (second - first)});
                 continue;
             }
-            if (!core.outOfRange_ && IsOnOneLine(piece))
+            if (IsOnOneLine(piece))
                 continue;
             uint64_t hash = 0;
             for (const LoopCorner& corner : piece)
@@ -1080,10 +1056,36 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
     // The edge is split at such vertices. The test is exact on the grid points, and only the ends of the edges
     // without a partner are candidates. The candidates are sorted by x, so an edge tests only the candidates
     // in its x range. A loop with a split is cleaned again, and then the twins cancel again.
-    if (!core.outOfRange_)
+    CsgFlatMap<uint64_t, int, CsgPackedKeyHash> winding;
+    winding.Reserve(loopIds.size());
+    for (unsigned l = 0; l < loops.size(); ++l)
     {
-        CsgFlatMap<uint64_t, int, CsgPackedKeyHash> winding;
-        winding.Reserve(loopIds.size());
+        if (removed[l])
+            continue;
+        const Loop& loop = loops[l];
+        for (unsigned k = 0; k < loop.count_; ++k)
+        {
+            const int from = loopIds[loop.start_ + k];
+            const int to = loopIds[loop.start_ + (k + 1) % loop.count_];
+            bool existed = false;
+            int& sum = winding.FindOrAdd(CsgUndirectedKey(from, to), existed);
+            if (!existed)
+                sum = 0;
+            sum += from < to ? 1 : -1;
+        }
+    }
+    for (const auto& entry : winding)
+    {
+        if (entry.value_ != 0)
+        {
+            out.openEdges_.push_back(
+                {static_cast<int>(entry.key_ >> 32), static_cast<int>(entry.key_ & 0xFFFFFFFFu), entry.value_});
+        }
+    }
+    const auto isOpen = [&](int from, int to) { return *winding.Find(CsgUndirectedKey(from, to)) != 0; };
+    ea::vector<ea::pair<int, CsgGridPoint>> candidates;
+    {
+        CsgFlatMap<uint64_t, int, CsgPackedKeyHash> seen;
         for (unsigned l = 0; l < loops.size(); ++l)
         {
             if (removed[l])
@@ -1091,108 +1093,79 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
             const Loop& loop = loops[l];
             for (unsigned k = 0; k < loop.count_; ++k)
             {
-                const int from = loopIds[loop.start_ + k];
-                const int to = loopIds[loop.start_ + (k + 1) % loop.count_];
-                bool existed = false;
-                int& sum = winding.FindOrAdd(CsgUndirectedKey(from, to), existed);
-                if (!existed)
-                    sum = 0;
-                sum += from < to ? 1 : -1;
-            }
-        }
-        for (const auto& entry : winding)
-        {
-            if (entry.value_ != 0)
-            {
-                out.openEdges_.push_back(
-                    {static_cast<int>(entry.key_ >> 32), static_cast<int>(entry.key_ & 0xFFFFFFFFu), entry.value_});
-            }
-        }
-        const auto isOpen = [&](int from, int to) { return *winding.Find(CsgUndirectedKey(from, to)) != 0; };
-        ea::vector<ea::pair<int, CsgGridPoint>> candidates;
-        {
-            CsgFlatMap<uint64_t, int, CsgPackedKeyHash> seen;
-            for (unsigned l = 0; l < loops.size(); ++l)
-            {
-                if (removed[l])
-                    continue;
-                const Loop& loop = loops[l];
-                for (unsigned k = 0; k < loop.count_; ++k)
-                {
-                    const unsigned next = (k + 1) % loop.count_;
-                    if (!isOpen(loopIds[loop.start_ + k], loopIds[loop.start_ + next]))
-                        continue;
-                    for (const unsigned end : {k, next})
-                    {
-                        const LoopCorner& corner = loopCorners[loop.start_ + end];
-                        bool existed = false;
-                        seen.FindOrAdd(static_cast<uint64_t>(static_cast<uint32_t>(corner.id_)), existed);
-                        if (!existed)
-                            candidates.push_back({corner.id_, corner.grid_});
-                    }
-                }
-            }
-        }
-        ea::sort(candidates.begin(), candidates.end(),
-            [](const ea::pair<int, CsgGridPoint>& x, const ea::pair<int, CsgGridPoint>& y)
-        { return x.second.x_ != y.second.x_ ? x.second.x_ < y.second.x_ : x.first < y.first; });
-
-        struct Cut
-        {
-            int64_t place_;
-            int id_;
-            CsgGridPoint grid_;
-        };
-        ea::vector<Cut> cuts;
-        bool anyCut = false;
-        const unsigned loopCount = loops.size();
-        for (unsigned l = 0; l < loopCount && !candidates.empty(); ++l)
-        {
-            if (removed[l])
-                continue;
-            const Loop loop = loops[l];
-            bool split = false;
-            piece.clear();
-            for (unsigned k = 0; k < loop.count_; ++k)
-            {
                 const unsigned next = (k + 1) % loop.count_;
-                const LoopCorner& fromCorner = loopCorners[loop.start_ + k];
-                const LoopCorner& toCorner = loopCorners[loop.start_ + next];
-                piece.push_back(fromCorner);
-                if (!isOpen(fromCorner.id_, toCorner.id_))
+                if (!isOpen(loopIds[loop.start_ + k], loopIds[loop.start_ + next]))
                     continue;
-                const CsgGridInt low = ea::min(fromCorner.grid_.x_, toCorner.grid_.x_);
-                const CsgGridInt high = ea::max(fromCorner.grid_.x_, toCorner.grid_.x_);
-                auto it = ea::lower_bound(candidates.begin(), candidates.end(), low,
-                    [](const ea::pair<int, CsgGridPoint>& x, CsgGridInt value) { return x.second.x_ < value; });
-                cuts.clear();
-                for (; it != candidates.end() && it->second.x_ <= high; ++it)
+                for (const unsigned end : {k, next})
                 {
-                    if (it->first == fromCorner.id_ || it->first == toCorner.id_)
-                        continue;
-                    if (const int64_t place = PlaceOnSegment(fromCorner.grid_, toCorner.grid_, it->second))
-                        cuts.push_back({place, it->first, it->second});
+                    const LoopCorner& corner = loopCorners[loop.start_ + end];
+                    bool existed = false;
+                    seen.FindOrAdd(static_cast<uint64_t>(static_cast<uint32_t>(corner.id_)), existed);
+                    if (!existed)
+                        candidates.push_back({corner.id_, corner.grid_});
                 }
-                if (cuts.empty())
-                    continue;
-                ea::sort(cuts.begin(), cuts.end(), [](const Cut& x, const Cut& y) { return x.place_ < y.place_; });
-                for (const Cut& cut : cuts)
-                    piece.push_back({cut.id_, fromCorner.from_, toCorner.from_, cut.grid_});
-                split = true;
             }
-            if (!split)
-                continue;
-            removed[l] = 1;
-            anyCut = true;
-            if (replacements.empty())
-                replacements.assign(cleanCount, {0u, 0u});
-            const unsigned first = loops.size();
-            appendClean(loop.face_);
-            replacements[l] = {first, static_cast<unsigned>(loops.size())};
         }
-        if (anyCut)
-            cancelTwins();
     }
+    ea::sort(candidates.begin(), candidates.end(),
+        [](const ea::pair<int, CsgGridPoint>& x, const ea::pair<int, CsgGridPoint>& y)
+    { return x.second.x_ != y.second.x_ ? x.second.x_ < y.second.x_ : x.first < y.first; });
+
+    struct Cut
+    {
+        int64_t place_;
+        int id_;
+        CsgGridPoint grid_;
+    };
+    ea::vector<Cut> cuts;
+    bool anyCut = false;
+    const unsigned loopCount = loops.size();
+    for (unsigned l = 0; l < loopCount && !candidates.empty(); ++l)
+    {
+        if (removed[l])
+            continue;
+        const Loop loop = loops[l];
+        bool split = false;
+        piece.clear();
+        for (unsigned k = 0; k < loop.count_; ++k)
+        {
+            const unsigned next = (k + 1) % loop.count_;
+            const LoopCorner& fromCorner = loopCorners[loop.start_ + k];
+            const LoopCorner& toCorner = loopCorners[loop.start_ + next];
+            piece.push_back(fromCorner);
+            if (!isOpen(fromCorner.id_, toCorner.id_))
+                continue;
+            const CsgGridInt low = ea::min(fromCorner.grid_.x_, toCorner.grid_.x_);
+            const CsgGridInt high = ea::max(fromCorner.grid_.x_, toCorner.grid_.x_);
+            auto it = ea::lower_bound(candidates.begin(), candidates.end(), low,
+                [](const ea::pair<int, CsgGridPoint>& x, CsgGridInt value) { return x.second.x_ < value; });
+            cuts.clear();
+            for (; it != candidates.end() && it->second.x_ <= high; ++it)
+            {
+                if (it->first == fromCorner.id_ || it->first == toCorner.id_)
+                    continue;
+                if (const int64_t place = PlaceOnSegment(fromCorner.grid_, toCorner.grid_, it->second))
+                    cuts.push_back({place, it->first, it->second});
+            }
+            if (cuts.empty())
+                continue;
+            ea::sort(cuts.begin(), cuts.end(), [](const Cut& x, const Cut& y) { return x.place_ < y.place_; });
+            for (const Cut& cut : cuts)
+                piece.push_back({cut.id_, fromCorner.from_, toCorner.from_, cut.grid_});
+            split = true;
+        }
+        if (!split)
+            continue;
+        removed[l] = 1;
+        anyCut = true;
+        if (replacements.empty())
+            replacements.assign(cleanCount, {0u, 0u});
+        const unsigned first = loops.size();
+        appendClean(loop.face_);
+        replacements[l] = {first, static_cast<unsigned>(loops.size())};
+    }
+    if (anyCut)
+        cancelTwins();
 
 }
 

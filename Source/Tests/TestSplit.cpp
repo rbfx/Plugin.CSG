@@ -400,32 +400,6 @@ TEST_CASE("Split of disjoint solids has no regions", "[split][corefine]")
     CHECK(TotalHoles(result.a_) == 0);
 }
 
-TEST_CASE("Split survives a NaN corner", "[split][corefine]")
-{
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const Vector3 half(1.0f, 1.0f, 1.0f);
-    const CsgSolid clean(MakeBoxPolygons(Vector3(0.5f, 0.25f, 0.125f), half, 1));
-
-    auto polygons = MakeBoxPolygons(Vector3::ZERO, half, 2);
-    polygons[0].vertices_[0].SetPosition(Vector3(nan, 0.0f, nan));
-    const CsgSolid broken(polygons);
-
-    const CsgSplitTestResult first = CsgCorefineSplitForTest(clean, broken);
-    const CsgSplitTestResult second = CsgCorefineSplitForTest(broken, clean);
-    CHECK(first.a_.regions_.size() < 10000);
-    CHECK(second.a_.regions_.size() < 10000);
-    CHECK(SameSplit(first, CsgCorefineSplitForTest(clean, broken)));
-    // Every region id is valid, and a triangle with a NaN corner is never split.
-    for (const CsgSplitTestRegion& region : first.b_.regions_)
-    {
-        for (int id : region.ids_)
-        {
-            CHECK(id >= 0);
-            CHECK(id < static_cast<int>(first.positions_.size()));
-        }
-    }
-}
-
 TEST_CASE("Split of coplanar touching boxes is finite and deterministic", "[split][corefine]")
 {
     const Vector3 half(1.0f, 1.0f, 1.0f);

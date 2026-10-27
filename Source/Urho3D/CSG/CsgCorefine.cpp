@@ -177,31 +177,14 @@ Mesh::Mesh(const CsgSolid& solid, bool isSecond, int offset)
 
     // The solid stores the grid points. The mesh does not snap the positions again.
     grid_ = loops_.grid_;
-    outOfRange_ = solid.IsOutOfRange();
-    // Only a solid out of range can have a position that is not finite.
-    if (outOfRange_)
-    {
-        for (unsigned id = 0; id < loops_.positions_.size(); ++id)
-        {
-            const Vector3& position = loops_.positions_[id];
-            if (std::isfinite(position.x_) && std::isfinite(position.y_) && std::isfinite(position.z_))
-                continue;
-            if (invalid_.empty())
-                invalid_.assign(loops_.positions_.size(), 0);
-            invalid_[id] = 1;
-        }
-    }
 }
 
 bool Mesh::IsCollapsed(int triangle) const
 {
-    // This function also returns true for a triangle with a corner that is not finite. The C# reference does not.
     const int a = triangleIds_[triangle * 3];
     const int b = triangleIds_[triangle * 3 + 1];
     const int c = triangleIds_[triangle * 3 + 2];
-    if (a == b || b == c || c == a)
-        return true;
-    return !invalid_.empty() && (invalid_[a] || invalid_[b] || invalid_[c]);
+    return a == b || b == c || c == a;
 }
 
 void Mesh::BuildEdgeTriangles(const ea::vector<uint8_t>* vertexFilter)
@@ -245,12 +228,7 @@ Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
     , b_(b, true, a_.VertexCount())
     , epsilon_(epsilon)
 {
-    outOfRange_ = a_.outOfRange_ || b_.outOfRange_;
-    if (outOfRange_)
-    {
-        URHO3D_LOGWARNING("CsgCorefine: an operand has a coordinate outside of +-{}. The coordinate is clamped and the result is not valid.",
-            static_cast<int>(CSG_EXACT_COORDINATE_LIMIT));
-    }
+    URHO3D_ASSERT(!a.IsOutOfRange() && !b.IsOutOfRange(), "CsgCorefine: an operand is out of range");
     segmentsA_.Reset(static_cast<unsigned>(a_.triangleFace_.size()));
     segmentsB_.Reset(static_cast<unsigned>(b_.triangleFace_.size()));
     touchedA_.assign(a_.triangleFace_.size(), 0);
@@ -422,15 +400,7 @@ int Corefinement::CrossingId(
     // The crossing lies between the ends of the edge, so it is in the range of the grid.
     URHO3D_ASSERT(InGridRange(grid), "CsgCorefine crossing is outside the range of the grid");
     // The position is grid / scale, so the result vertex is on the grid and the next boolean keeps it.
-    // An operand out of range has clamped grid points. Then the position is on the float edge.
-    if (!outOfRange_)
-        data.position_ = grid.ToPosition();
-    else
-    {
-        const Vector3& lowPosition = edges.loops_.positions_[key.low_];
-        const Vector3& highPosition = edges.loops_.positions_[key.high_];
-        data.position_ = lowPosition + (highPosition - lowPosition) * static_cast<float>(t);
-    }
+    data.position_ = grid.ToPosition();
     data.t_ = t;
     data.key_ = key;
     data.lowVolume_ = lowVolume;
@@ -2824,8 +2794,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
                 || segmentsConflict(candidate))
                 continue;
             crossing.grid_ = candidate;
-            if (!outOfRange_)
-                crossing.position_ = candidate.ToPosition();
+            crossing.position_ = candidate.ToPosition();
             found = true;
             break;
         }
@@ -2937,7 +2906,6 @@ CsgCorefineTestResult CsgCorefineCrossingsForTest(const CsgSolid& a, const CsgSo
     CsgScratch scratch;
     core.CollectCrossings(scratch);
 
-    result.outOfRange_ = core.outOfRange_;
     result.positions_.reserve(core.crossings_.size());
     result.keys_.reserve(core.crossings_.size());
     for (const Crossing& crossing : core.crossings_)
@@ -3029,7 +2997,6 @@ CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
     core.ConstrainCrossings(scratch);
     core.SplitFaces(scratch);
 
-    result.outOfRange_ = core.outOfRange_;
     result.vertexCountA_ = core.a_.VertexCount();
     result.vertexCountB_ = core.b_.VertexCount();
     result.crossingBase_ = core.CrossingBase();

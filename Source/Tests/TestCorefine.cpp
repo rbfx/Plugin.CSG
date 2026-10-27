@@ -89,7 +89,7 @@ bool SamePositionSets(const ea::vector<Vector3>& a, const ea::vector<Vector3>& b
 bool SameResult(const CsgCorefineTestResult& a, const CsgCorefineTestResult& b)
 {
     if (a.positions_.size() != b.positions_.size() || a.segmentCountsA_ != b.segmentCountsA_
-        || a.segmentCountsB_ != b.segmentCountsB_ || a.curveEdges_ != b.curveEdges_ || a.outOfRange_ != b.outOfRange_)
+        || a.segmentCountsB_ != b.segmentCountsB_ || a.curveEdges_ != b.curveEdges_)
         return false;
     for (unsigned i = 0; i < a.positions_.size(); ++i)
     {
@@ -247,7 +247,6 @@ TEST_CASE("Corefine crossings of two overlapping boxes", "[corefine]")
     CHECK(CountEdgeCrossings(a, MakeAxisBox(shiftedCenter, half, shift), none)
             + CountEdgeCrossings(b, MakeAxisBox(Vector3::ZERO, half, none), shift)
         == 18);
-    CHECK_FALSE(result.outOfRange_);
     for (const Vector3& p : result.positions_)
     {
         CHECK(OnBoxSurface(p, Vector3::ZERO, half));
@@ -375,50 +374,6 @@ TEST_CASE("Corefine crossings of a sphere and a box", "[corefine]")
 
     const auto swapped = CsgCorefineCrossingsForTest(box, sphere);
     CHECK(SamePositionSets(result.positions_, swapped.positions_, 2e-3f));
-}
-
-TEST_CASE("Corefine flags coordinates outside of the exact range", "[corefine]")
-{
-    const Vector3 half(2.0f, 2.0f, 2.0f);
-    const CsgSolid unit(MakeBoxPolygons(Vector3::ZERO, Vector3(1.0f, 1.0f, 1.0f), 1));
-
-    SECTION("Disjoint")
-    {
-        const CsgSolid far(MakeBoxPolygons(Vector3(10000.0f, 0.0f, 0.0f), half, 2));
-        const auto result = CsgCorefineCrossingsForTest(unit, far);
-        CHECK(result.outOfRange_);
-        CHECK(result.positions_.size() == 0);
-    }
-    SECTION("Both operands far away")
-    {
-        const CsgSolid farA(MakeBoxPolygons(Vector3(10000.0f, 0.0f, 0.0f), half, 1));
-        const CsgSolid farB(MakeBoxPolygons(Vector3(10001.0f, 0.5f, 0.25f), half, 2));
-        const auto result = CsgCorefineCrossingsForTest(farA, farB);
-        CHECK(result.outOfRange_);
-        CHECK(result.positions_.size() < 10000);
-    }
-    SECTION("In range")
-    {
-        const CsgSolid near(MakeBoxPolygons(Vector3(0.5f, 0.0f, 0.0f), half, 2));
-        CHECK_FALSE(CsgCorefineCrossingsForTest(unit, near).outOfRange_);
-    }
-}
-
-TEST_CASE("Corefine survives a NaN corner", "[corefine]")
-{
-    const float nan = std::numeric_limits<float>::quiet_NaN();
-    const Vector3 half(1.0f, 1.0f, 1.0f);
-    const CsgSolid clean(MakeBoxPolygons(Vector3(0.5f, 0.25f, 0.125f), half, 1));
-
-    auto polygons = MakeBoxPolygons(Vector3::ZERO, half, 2);
-    polygons[0].vertices_[0].SetPosition(Vector3(nan, 0.0f, nan));
-    const CsgSolid broken(polygons);
-
-    const auto first = CsgCorefineCrossingsForTest(clean, broken);
-    const auto second = CsgCorefineCrossingsForTest(broken, clean);
-    CHECK(first.positions_.size() < 10000);
-    CHECK(second.positions_.size() < 10000);
-    CHECK(SameResult(first, CsgCorefineCrossingsForTest(clean, broken)));
 }
 
 namespace

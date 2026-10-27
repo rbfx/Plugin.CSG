@@ -182,7 +182,7 @@ private:
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
     static void EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
-        bool& outOfRange, unsigned startChild = 0);
+        unsigned startChild = 0);
     /// Copy the fingerprints of the brushes. Return false if the tree is not flat or a brush is dead.
     static bool TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushFingerprint>& output);
     static void AcknowledgeBrushes(const BrushStep& step);

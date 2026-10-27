@@ -51,8 +51,6 @@ struct CsgRoot::BuildJob
     float epsilon_{};
     /// World scale of the root. The root frame carries this scale.
     Vector3 metricScale_{Vector3::ONE};
-    /// True if an operand has a coordinate that the exact math cannot handle.
-    bool outOfRange_{};
 
     SharedPtr<Model> baseModel_;
     ResourceRefList baseMaterials_;
@@ -708,25 +706,6 @@ ea::vector<CsgPolygon> RescalePolygons(const CsgSolid& solid, const Vector3& fac
 
 } // namespace CsgInternal
 
-namespace
-{
-
-/// Set the flag if a bound of the solid is at or beyond the limit of the exact math.
-void CheckSolidRange(const CsgSolid& solid, bool& outOfRange)
-{
-    if (solid.FaceCount() == 0)
-        return;
-    for (const Vector3* bound : {&solid.GetBoundsMin(), &solid.GetBoundsMax()})
-    {
-        if (!(Abs(bound->x_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT && Abs(bound->y_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT
-                && Abs(bound->z_) < CsgInternal::CSG_EXACT_COORDINATE_LIMIT))
-            outOfRange = true;
-    }
-}
-
-} // namespace
-
-
 void CsgRoot::Rebuild()
 {
     if (!node_)
@@ -889,11 +868,8 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
     HiresTimer timer;
     SharedPtr<const CsgSolid> solid = job->cachedSolid_;
     if (!solid)
-    {
         solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
-        CheckSolidRange(*solid, job->outOfRange_);
-    }
-    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->outOfRange_, job->reusedRootChildren_);
+    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
     job->resultSolid_ = solid;
 
     SharedPtr<CsgTriangulatedModel> triangulated;
@@ -1190,15 +1166,14 @@ bool CsgRoot::TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushF
 }
 
 void CsgRoot::EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
-    bool& outOfRange, unsigned startChild)
+    unsigned startChild)
 {
     for (unsigned childIndex = startChild; childIndex < step.children_.size(); ++childIndex)
     {
         const BrushStep& child = step.children_[childIndex];
         SharedPtr<const CsgSolid> childSolid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(child.polygons_), epsilon);
-        CheckSolidRange(*childSolid, outOfRange);
         if (!child.children_.empty())
-            EvaluateOperationTree(child, childSolid, epsilon, outOfRange);
+            EvaluateOperationTree(child, childSolid, epsilon);
 
         // A null result is an empty solid.
         SharedPtr<const CsgSolid> result = CsgBooleanOperation(currentSolid.Get(), childSolid.Get(), child.op_, epsilon);

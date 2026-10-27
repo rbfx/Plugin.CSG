@@ -465,6 +465,17 @@ TEST_CASE("Boolean with an operand out of range returns an empty solid that is o
     CHECK(chained->FaceCount() == 0);
     CHECK(chained->IsOutOfRange());
 
+    // An operand with a corner that is not finite is out of range too.
+    auto nanPolygons = MakeBoxPolygons(Vector3::ZERO, Vector3(1.0f, 1.0f, 1.0f), 3);
+    nanPolygons[0].vertices_[0].SetPosition(Vector3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f));
+    const auto nanBox = MakeSolid(ea::move(nanPolygons));
+    REQUIRE(nanBox->IsOutOfRange());
+    for (const auto& result : {Run(nanBox, nearBox, CsgOperation::Union), Run(nearBox, nanBox, CsgOperation::Intersection)})
+    {
+        CHECK(result->FaceCount() == 0);
+        CHECK(result->IsOutOfRange());
+    }
+
     // Two operands in range give a result in range.
     const auto inRange = Run(nearBox, MakeBox(Vector3(1.0f, 0.0f, 0.0f), 3), CsgOperation::Union);
     CHECK(inRange->FaceCount() != 0);
