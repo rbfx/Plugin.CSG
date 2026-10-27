@@ -439,6 +439,19 @@ struct CsgValidityScratch
     ea::vector<CsgGridInt> boxes_;
     /// The prepared maps of the three triangles of one crossing.
     CsgMapCache maps_[3];
+    /// The global ids of a closed cycle of segments and their projected grid points.
+    ea::vector<int> cycle_;
+    ea::vector<CsgGridPoint2> cyclePoints_;
+    /// The segments of one triangle as pairs of global ids, and a flag for each pair that a cycle uses.
+    ea::vector<ea::pair<int, int>> pairs_;
+    ea::vector<uint8_t> used_;
+    /// Cache of the closed cycles that can turn over. ConstrainCrossings fills it. It is empty in the other uses.
+    /// For each crossing the index of its cycle, or -1. For each cycle the start of its ids in cycleIds_ (the
+    /// last entry of cycleStart_ is the end) and the exact sign of its area.
+    ea::vector<int> cycleOf_;
+    ea::vector<int> cycleIds_;
+    ea::vector<int> cycleStart_;
+    ea::vector<int8_t> cycleSign_;
 };
 
 /// Reusable vectors. A boolean makes one scratch and passes it to every step.
@@ -464,7 +477,9 @@ enum CsgCrossingRule : unsigned
     /// A segment or a chain edge that moves with the crossing crosses another segment or chain edge.
     CsgRuleSegments = 4,
     /// The position is equal to a corner of the crossed triangle or of the two triangles on the edge.
-    CsgRuleCorner = 8
+    CsgRuleCorner = 8,
+    /// The crossing is on a closed cycle of segments inside the crossed triangle, and the rounded cycle turns over.
+    CsgRuleCycle = 16
 };
 
 /// The intersection of two operands: crossing vertices and the curve segments on each triangle.
@@ -518,11 +533,13 @@ public:
     /// The rules are: the position is strictly inside the projected crossed triangle; it is strictly between its
     /// neighbors on the edge of the crossing, in the projection of each triangle on the edge; the segments and
     /// the chain edges that end at the crossing cross no other segment and no other chain edge in the maps of the
-    /// three triangles (the crossed one and the two on the edge); it is not a corner of these triangles.
+    /// three triangles (the crossed one and the two on the edge); it is not a corner of these triangles; a closed
+    /// cycle of segments through the crossing inside the crossed triangle keeps the orientation of the exact cycle.
     /// Call BuildEdgeTriangles of both meshes before. If stopAtFirst is true, the function returns at the first
     /// broken rule and the result has that rule only.
     /// If strict is false, the rules only find a fold: the position may be on the boundary of the crossed triangle,
     /// may be equal to a neighbor on the edge or to a corner, and a segment must cross at a point inside both.
+    /// The cycle rule is the same in both forms: a rounded cycle of no area also breaks it.
     /// The diagnostic counters use this form to tell a fold from an exact contact.
     /// If segmentRule is false, the function skips the test of the segments (the costly rule).
     unsigned CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
@@ -534,8 +551,9 @@ public:
     }
     /// Same as above with a temporary scratch. The first form is faster for many calls.
     bool CrossingIsValid(const Crossing& record, const CsgGridPoint& candidate) const;
-    /// Count the crossings whose rounded position breaks a rule. The counts for the single rules are in perRule,
-    /// in the order of CsgCrossingRule. Build the edge triangles of both meshes first.
+    /// Count the crossings whose rounded position breaks a rule. The counts for the first four rules are in perRule,
+    /// in the order of CsgCrossingRule. The cycle rule has no count of its own. Build the edge triangles of both
+    /// meshes first.
     int CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], bool strict = true) const;
     /// Move each rounded crossing that is a fold (the non strict rules of CrossingInvalidRules) to a valid grid
     /// point of the cell of its exact position. The candidates are the corners of the cell: first the nearest

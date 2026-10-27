@@ -1101,3 +1101,96 @@ TEST_CASE("Constrain crossings: a valid crossing does not move", "[corefine][con
         CHECK(core.crossings_[i].position_ == before[i].position_);
     }
 }
+
+TEST_CASE("Crossing validity: a closed cycle of segments that turns over is invalid", "[corefine][validity]")
+{
+    // B is a triangular pyramid with the apex above the top of A. Its three edges to the base cross the top at the
+    // grid points (180, 130), (220, 130) and (200, 170). The three segments make a closed cycle inside the top.
+    const GridInts top[3] = {{0, 0, 0}, {1000, 0, 0}, {0, 600, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts apex{200, 150, 300};
+    const ea::vector<GridInts> base = {{170, 120, 0}, {230, 120, 0}, {200, 180, 0}};
+    const CsgSolid b(MakeGridPyramid(base, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    core.a_.BuildEdgeTriangles();
+    core.b_.BuildEdgeTriangles();
+    REQUIRE(core.crossings_.size() == 3);
+    const Crossing* crossing = FindEdgeCrossing(core, base[0], apex);
+    REQUIRE(crossing != nullptr);
+    REQUIRE(crossing->grid_ == GridPointOf({180, 130, 100}));
+    CHECK(core.CrossingInvalidRules(*crossing, crossing->grid_, scratch) == 0);
+
+    // Move the crossing to the other side of the line through the two other crossings. The rounded cycle turns
+    // over, but no segment crosses another one: the three segments still make a triangle.
+    const CsgGridPoint over = GridPointOf({230, 170, 100});
+    const unsigned rules = core.CrossingInvalidRules(*crossing, over, scratch);
+    CHECK((rules & CsgRuleCycle) != 0);
+    CHECK((rules & CsgRuleInside) == 0);
+    CHECK((core.CrossingInvalidRules(*crossing, over, scratch, false, false) & CsgRuleCycle) != 0);
+    // A move that keeps the orientation does not break the rule.
+    CHECK((core.CrossingInvalidRules(*crossing, GridPointOf({181, 131, 100}), scratch) & CsgRuleCycle) == 0);
+    // A move onto the line of the two other crossings gives a cycle of no area. It breaks both forms of the rule.
+    const CsgGridPoint onLine = GridPointOf({240, 90, 100});
+    CHECK((core.CrossingInvalidRules(*crossing, onLine, scratch) & CsgRuleCycle) != 0);
+    CHECK((core.CrossingInvalidRules(*crossing, onLine, scratch, false, false) & CsgRuleCycle) != 0);
+}
+
+TEST_CASE("Constrain crossings: a small cycle that turns over when rounded keeps its orientation", "[corefine][constrain]")
+{
+    // B is a flat pyramid. Its apex is 1 grid step above the top of A, so its three edges cross the top at 1/101 of
+    // their length from the apex. The exact crossings (299.36, 198.55), (301.76, 201.50) and (298.02, 198.47) make
+    // a counterclockwise cycle. The nearest roundings (299, 199), (302, 201) and (298, 198) make a clockwise cycle.
+    const GridInts top[3] = {{0, 0, 0}, {2000, 0, 0}, {0, 1200, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts apex{300, 200, 101};
+    const ea::vector<GridInts> base = {{235, 54, 0}, {478, 351, 0}, {100, 45, 0}};
+    const CsgSolid b(MakeGridPyramid(base, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    REQUIRE(core.crossings_.size() == 3);
+    const Crossing* c0 = FindEdgeCrossing(core, base[0], apex);
+    const Crossing* c1 = FindEdgeCrossing(core, base[1], apex);
+    const Crossing* c2 = FindEdgeCrossing(core, base[2], apex);
+    REQUIRE((c0 && c1 && c2));
+    REQUIRE(c0->grid_ == GridPointOf({299, 199, 100}));
+    REQUIRE(c1->grid_ == GridPointOf({302, 201, 100}));
+    REQUIRE(c2->grid_ == GridPointOf({298, 198, 100}));
+    const auto orientation = [&]()
+    {
+        const auto project = [](const CsgGridPoint& p) { return CsgExact::Project(p, 2, false); };
+        return CsgExact::Orient2(project(c0->grid_), project(c1->grid_), project(c2->grid_));
+    };
+    REQUIRE(orientation() < 0);
+    core.a_.BuildEdgeTriangles();
+    core.b_.BuildEdgeTriangles();
+    // The nearest rounding has no fold of the other rules. Only the cycle rule finds it.
+    int perRule[4];
+    CHECK(core.CountInvalidCrossings(scratch, perRule, false) == 3);
+    CHECK(perRule[0] + perRule[1] + perRule[2] == 0);
+
+    g_csgDiagnostics.Reset();
+    core.ConstrainCrossings(scratch);
+    CHECK(g_csgDiagnostics.constrainedCrossings_.load() >= 1);
+    CHECK(g_csgDiagnostics.unconstrainableCrossings_.load() == 0);
+    CHECK(orientation() > 0);
+    CHECK(core.CountInvalidCrossings(scratch, perRule, false) == 0);
+    // Each crossing stays in the cell of its exact point.
+    for (const Crossing* crossing : {c0, c1, c2})
+    {
+        CsgGridPoint lower;
+        CsgGridPoint upper;
+        CsgGridPoint nearest;
+        const CsgGridPoint& lowEnd = core.b_.grid_[crossing->key_.low_];
+        const CsgGridPoint& highEnd = core.b_.grid_[crossing->key_.high_];
+        nearest = CsgExact::RoundCrossing(lowEnd, highEnd, crossing->lowVolume_, crossing->difference_);
+        CsgExact::CrossingCell(lowEnd, highEnd, crossing->lowVolume_, crossing->difference_, nearest, lower, upper);
+        CHECK((crossing->grid_.x_ >= lower.x_ && crossing->grid_.x_ <= upper.x_));
+        CHECK((crossing->grid_.y_ >= lower.y_ && crossing->grid_.y_ <= upper.y_));
+        CHECK((crossing->grid_.z_ >= lower.z_ && crossing->grid_.z_ <= upper.z_));
+    }
+}

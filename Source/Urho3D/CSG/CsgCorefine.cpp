@@ -2254,6 +2254,184 @@ void MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, 
     }
 }
 
+/// Trace the closed cycle of directed segments through the crossing in the map of the triangle. Each point of the
+/// cycle must be a crossing of an edge of the other mesh with this triangle, so the cycle does not touch the
+/// boundary of the triangle. Each point must have one outgoing segment. The output has the ids in the order of the
+/// segments, the crossing first. The function returns false if the crossing is not on such a cycle.
+bool TraceClosedCycle(const Corefinement& core, const Mesh& mesh, int triangle, int crossingId, ea::vector<int>& cycle)
+{
+    const CsgSegmentLists& segments = mesh.isSecond_ ? core.segmentsB_ : core.segmentsA_;
+    const int count = segments.Count(triangle);
+    cycle.clear();
+    if (count < 3)
+        return false;
+    int current = crossingId;
+    while (static_cast<int>(cycle.size()) < count)
+    {
+        cycle.push_back(current);
+        int next = -1;
+        int outgoing = 0;
+        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+        {
+            if (segments.At(node).p_ == current)
+            {
+                next = segments.At(node).q_;
+                ++outgoing;
+            }
+        }
+        if (outgoing != 1)
+            return false;
+        if (next == crossingId)
+            return cycle.size() >= 3;
+        if (next < core.CrossingBase())
+            return false;
+        const CsgCrossingKey& key = core.CrossingAt(next).key_;
+        if (key.triangle_ != triangle || key.edgeInSecond_ == mesh.isSecond_)
+            return false;
+        current = next;
+    }
+    return false;
+}
+
+/// Return the sign of the area of the exact cycle of crossings in the projection, or 0 if the estimate does not
+/// decide. The exact point of a crossing is low + t (high - low). The parameter t is the double quotient of the
+/// exact volumes. Its relative error is below 2^-44. The bound covers this error and the rounding of the sums.
+/// The output fragile tells whether moves of the crossings in their grid cells can change the sign. A move in the
+/// cell is at most 1 step on each axis. It changes twice the area by at most 2 |perimeter| + 2 count.
+int CycleAreaSignEstimate(
+    const Corefinement& core, const int* cycle, int count, int dropAxis, bool flip, bool* fragile = nullptr)
+{
+    struct Point
+    {
+        double u_;
+        double v_;
+        double error_;
+    };
+    // The points are relative to the low end of the edge of the first crossing. This keeps the terms small.
+    const Crossing& first = core.CrossingAt(cycle[0]);
+    const CsgGridPoint& origin = (first.key_.edgeInSecond_ ? core.b_ : core.a_).grid_[first.key_.low_];
+    const auto exactPoint = [&](int id)
+    {
+        const Crossing& crossing = core.CrossingAt(id);
+        const Mesh& edges = crossing.key_.edgeInSecond_ ? core.b_ : core.a_;
+        const CsgGridPoint& low = edges.grid_[crossing.key_.low_];
+        const CsgGridPoint& high = edges.grid_[crossing.key_.high_];
+        const CsgGridInt lowAxes[3] = {low.x_, low.y_, low.z_};
+        const CsgGridInt highAxes[3] = {high.x_, high.y_, high.z_};
+        const CsgGridInt originAxes[3] = {origin.x_, origin.y_, origin.z_};
+        double axes[3];
+        double error = 0.0;
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const double offset = static_cast<double>(lowAxes[axis]) - originAxes[axis];
+            const double delta = static_cast<double>(highAxes[axis]) - lowAxes[axis];
+            axes[axis] = offset + crossing.t_ * delta;
+            error = ea::max(error,
+                std::ldexp(std::fabs(delta), -44) + std::ldexp(std::fabs(offset) + std::fabs(axes[axis]), -50));
+        }
+        // The same axes as CsgExact::Project.
+        const int uAxis = (dropAxis + 1) % 3;
+        const int vAxis = (dropAxis + 2) % 3;
+        return flip ? Point{axes[vAxis], axes[uAxis], error} : Point{axes[uAxis], axes[vAxis], error};
+    };
+    const Point start = exactPoint(cycle[0]);
+    Point previous = start;
+    double sum = 0.0;
+    double bound = 0.0;
+    double magnitude = 0.0;
+    double perimeter = 0.0;
+    for (int i = 1; i <= count; ++i)
+    {
+        const Point point = i < count ? exactPoint(cycle[i]) : start;
+        perimeter += std::fabs(point.u_ - previous.u_) + std::fabs(point.v_ - previous.v_);
+        const double a = previous.u_ * point.v_;
+        const double b = previous.v_ * point.u_;
+        sum += a - b;
+        magnitude += std::fabs(a) + std::fabs(b);
+        bound += previous.error_ * (std::fabs(point.u_) + std::fabs(point.v_))
+            + point.error_ * (std::fabs(previous.u_) + std::fabs(previous.v_)) + 2.0 * previous.error_ * point.error_;
+        previous = point;
+    }
+    // The factor 2 covers the use of the estimated coordinates in the bound.
+    bound = 2.0 * bound + std::ldexp(magnitude, -50) * static_cast<double>(count + 2);
+    if (fragile)
+    {
+        // The factor and the term 1 cover the rounding of the perimeter.
+        *fragile = std::fabs(sum) <= bound + 1.01 * (2.0 * perimeter + 2.0 * count) + 1.0;
+    }
+    return sum > bound ? 1 : (sum < -bound ? -1 : 0);
+}
+
+/// Fill the cycle cache of the validity scratch with the closed cycles of segments in the triangles of the mesh.
+/// A cycle goes to the cache only if moves in the grid cells can turn it over and the estimate gives its sign.
+/// See TraceClosedCycle for the cycles.
+void FindFragileCycles(const Corefinement& core, const Mesh& mesh, CsgScratch& scratch)
+{
+    CsgValidityScratch& v = scratch.validity_;
+    const CsgSegmentLists& segments = mesh.isSecond_ ? core.segmentsB_ : core.segmentsA_;
+    const int base = core.CrossingBase();
+    for (unsigned triangle = 0; triangle < segments.ListCount(); ++triangle)
+    {
+        const int count = segments.Count(triangle);
+        if (count < 3)
+            continue;
+        // The segments sorted by the start point. A point with two outgoing segments is on no cycle.
+        v.pairs_.clear();
+        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+            v.pairs_.push_back({segments.At(node).p_, segments.At(node).q_});
+        ea::sort(v.pairs_.begin(), v.pairs_.end());
+        v.used_.assign(count, 0);
+        const auto interior = [&](int id)
+        {
+            if (id < base)
+                return false;
+            const CsgCrossingKey& key = core.CrossingAt(id).key_;
+            return key.triangle_ == static_cast<int>(triangle) && key.edgeInSecond_ != mesh.isSecond_;
+        };
+        for (int first = 0; first < count; ++first)
+        {
+            if (v.used_[first])
+                continue;
+            const int start = v.pairs_[first].first;
+            v.cycle_.clear();
+            int current = start;
+            bool closed = false;
+            while (static_cast<int>(v.cycle_.size()) < count && interior(current))
+            {
+                const auto it = ea::lower_bound(v.pairs_.begin(), v.pairs_.end(), ea::make_pair(current, INT_MIN));
+                const int at = static_cast<int>(it - v.pairs_.begin());
+                if (at >= count || it->first != current || (at + 1 < count && v.pairs_[at + 1].first == current)
+                    || v.used_[at])
+                    break;
+                v.used_[at] = 1;
+                v.cycle_.push_back(current);
+                current = it->second;
+                if (current == start)
+                {
+                    closed = v.cycle_.size() >= 3;
+                    break;
+                }
+            }
+            if (!closed)
+                continue;
+            int dropAxis = 0;
+            bool flip = false;
+            CachedTriangleProjection(mesh, static_cast<int>(triangle), scratch, dropAxis, flip);
+            bool fragile = false;
+            const int cycleCount = static_cast<int>(v.cycle_.size());
+            const int sign = CycleAreaSignEstimate(core, v.cycle_.data(), cycleCount, dropAxis, flip, &fragile);
+            if (sign == 0 || !fragile)
+                continue;
+            const int cycle = static_cast<int>(v.cycleSign_.size());
+            for (const int id : v.cycle_)
+                v.cycleOf_[id - base] = cycle;
+            v.cycleIds_.insert(v.cycleIds_.end(), v.cycle_.begin(), v.cycle_.end());
+            v.cycleStart_.push_back(static_cast<int>(v.cycleIds_.size()));
+            v.cycleSign_.push_back(static_cast<int8_t>(sign));
+        }
+    }
+}
+
 } // namespace
 
 unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
@@ -2374,6 +2552,52 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
     if (finished())
         return rules;
 
+    // Rule e: a closed cycle of segments through the crossing inside the crossed triangle keeps the orientation of
+    // the exact cycle. A rounded cycle that turns over gives the region inside it the wrong side.
+    {
+        const View& view = views[0];
+        CsgValidityScratch& v = scratch.validity_;
+        const int* ids = nullptr;
+        int count = 0;
+        int exact = 0;
+        if (!v.cycleOf_.empty())
+        {
+            // The cache of ConstrainCrossings has the cycles that can turn over.
+            const int cycle = v.cycleOf_[index];
+            if (cycle >= 0)
+            {
+                ids = v.cycleIds_.data() + v.cycleStart_[cycle];
+                count = v.cycleStart_[cycle + 1] - v.cycleStart_[cycle];
+                exact = v.cycleSign_[cycle];
+            }
+        }
+        else if (TraceClosedCycle(*this, *view.mesh_, view.triangle_, crossingId, v.cycle_))
+        {
+            ids = v.cycle_.data();
+            count = static_cast<int>(v.cycle_.size());
+            exact = CycleAreaSignEstimate(*this, ids, count, view.dropAxis_, view.flip_);
+        }
+        {
+            if (exact != 0)
+            {
+                v.cyclePoints_.clear();
+                for (int k = 0; k < count; ++k)
+                {
+                    const int id = ids[k];
+                    v.cyclePoints_.push_back(CsgExact::Project(
+                        id == crossingId ? candidate : PointGrid(*this, id), view.dropAxis_, view.flip_));
+                }
+                const int rounded =
+                    CsgExact::LoopAreaSign(v.cyclePoints_.data(), static_cast<int>(v.cyclePoints_.size()));
+                // A rounded cycle of no area also breaks the rule: the region inside it has no area.
+                if (rounded != exact)
+                    rules |= CsgRuleCycle;
+            }
+        }
+    }
+    if (finished())
+        return rules;
+
     // Rule c: the items at the crossing cross no other item in the three maps.
     for (int i = 0; i < viewCount && segmentRule; ++i)
     {
@@ -2438,6 +2662,12 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
     CsgValidityScratch& cache = scratch.validity_;
     cache.projection_[0].assign(a_.triangleIds_.size() / 3, 0);
     cache.projection_[1].assign(b_.triangleIds_.size() / 3, 0);
+    cache.cycleOf_.assign(crossings_.size(), -1);
+    cache.cycleIds_.clear();
+    cache.cycleStart_.assign(1, 0);
+    cache.cycleSign_.clear();
+    FindFragileCycles(*this, a_, scratch);
+    FindFragileCycles(*this, b_, scratch);
 
     // A crossing is a suspect if it is at an end of two conflicting items of a map. Only a suspect gets the segment rule.
     // A cheap pass finds the conflicts once for each map. A move of a crossing marks the conflicts of its maps again.
@@ -2624,6 +2854,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
 
     cache.projection_[0].clear();
     cache.projection_[1].clear();
+    cache.cycleOf_.clear();
 
 #ifdef CSG_DIAGNOSTICS
     // A later move can fix a crossing that found no corner. Then it is no fold and it does not count.
