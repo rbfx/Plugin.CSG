@@ -1209,22 +1209,6 @@ bool CsgSolid::CopyTriangles(unsigned face, ea::vector<unsigned>& output) const
     return !output.empty();
 }
 
-Vector3 CsgSolid::FaceSample(unsigned face) const
-{
-    if (triangleStart_[face] == triangleStart_[face + 1])
-    {
-        const auto& vertices = faces_[face]->vertices_;
-        return vertices.empty() ? Vector3::ZERO : vertices[0].GetPosition();
-    }
-    const unsigned offset = triangleStart_[face] * 3;
-    return (trianglePositions_[offset] + trianglePositions_[offset + 1] + trianglePositions_[offset + 2]) / 3.0f;
-}
-
-Vector3 CsgSolid::ComponentSample(unsigned component) const
-{
-    return FaceSample(componentFaces_[componentStart_[component]]);
-}
-
 bool CsgSolid::ClassifyPoint(const Vector3& point, float epsilon, bool& reliable) const
 {
     reliable = true;

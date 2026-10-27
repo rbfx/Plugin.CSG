@@ -45,43 +45,6 @@ double PolygonArea(const CsgPolygon& polygon)
     return static_cast<double>(normal.Length()) * 0.5;
 }
 
-/// Return a point inside a polygon: the centroid of its largest triangle.
-Vector3 PolygonInteriorPoint(const CsgPolygon& polygon, ea::vector<unsigned>& indices)
-{
-    const auto& vertices = polygon.vertices_;
-    indices.clear();
-    if (vertices.size() > 3 && CsgTriangulatePolygon(polygon, indices) && indices.size() >= 3)
-    {
-        unsigned best = 0;
-        float bestArea = -1.0f;
-        for (unsigned t = 0; t + 2 < indices.size(); t += 3)
-        {
-            // A bad index from the triangulator is skipped, so the read stays inside the polygon.
-            if (indices[t] >= vertices.size() || indices[t + 1] >= vertices.size() || indices[t + 2] >= vertices.size())
-                continue;
-            const Vector3 a = vertices[indices[t]].GetPosition();
-            const float area = (vertices[indices[t + 1]].GetPosition() - a)
-                                   .CrossProduct(vertices[indices[t + 2]].GetPosition() - a)
-                                   .LengthSquared();
-            if (area > bestArea)
-            {
-                bestArea = area;
-                best = t;
-            }
-        }
-        if (bestArea >= 0.0f)
-        {
-            return (vertices[indices[best]].GetPosition() + vertices[indices[best + 1]].GetPosition()
-                       + vertices[indices[best + 2]].GetPosition())
-                / 3.0f;
-        }
-    }
-    Vector3 sum = Vector3::ZERO;
-    for (const ModelVertex& vertex : vertices)
-        sum += vertex.GetPosition();
-    return vertices.empty() ? sum : sum / static_cast<float>(vertices.size());
-}
-
 /// Return the number of ids in the loop of an element.
 int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
 {
@@ -199,7 +162,7 @@ ExactResult ClassifyElementExact(const Corefinement& core, CsgBooleanScratch& s,
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
 void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElements& o, CsgBooleanScratch& s,
-    const CsgSolid& other, const Mesh& otherMesh, bool second, float epsilon)
+    const Mesh& otherMesh, bool second)
 {
     const int elementCount = static_cast<int>(o.elements_.size());
 
@@ -399,10 +362,10 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         if (result != ExactResult::Done)
         {
             // A polygon that does not match its loop, or a triangulation with zero exact area, has no exact test.
-            if (result == ExactResult::ZeroArea || result == ExactResult::Mismatch)
-                CSG_DIAG_COUNT(zeroSumFloatFallbacks_);
-            bool reliable = true;
-            inside = other.ClassifyPoint(PolygonInteriorPoint(*o.elements_[best].polygon_, s.indices_), epsilon, reliable);
+            // The patch is removed, as a patch with no element of exact area.
+            CSG_DIAG_COUNT(zeroSumUnclassifiedPatches_);
+            s.patchBest_[root] = PATCH_REMOVED;
+            continue;
         }
         s.patchVotes_[root] = inside ? 1 : -1;
     }
@@ -418,35 +381,14 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
 
 bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second);
 
-/// Tell if a component that the curve does not reach lies inside the other solid. This is the float path.
-///
-/// The reference tests one sample point of the component. That point can lie on the surface of the other solid,
-/// for example when two boxes share a face and the curve has no crossing. The test can then give a wrong answer
-/// and still report that it is reliable. All faces of the component have the same answer, so this function
-/// takes the sample points of the faces in order. It stops when one answer leads by two votes.
-/// If no answer leads after 16 samples, it uses the test of the first sample, as the reference does.
-bool ClassifyComponentFloat(const CsgSolid& solid, unsigned component, const CsgSolid& other, float epsilon)
+/// The side of a component that the curve does not reach.
+enum class ComponentSide
 {
-    static constexpr unsigned MAX_SAMPLES = 16;
-    const ea::span<const unsigned> componentStart = solid.GetComponentStart();
-    const ea::span<const unsigned> componentFaces = solid.GetComponentFaces();
-    const unsigned first = componentStart[component];
-    const unsigned sampleCount = ea::min(componentStart[component + 1] - first, MAX_SAMPLES);
-    int votes = 0;
-    for (unsigned i = 0; i < sampleCount; ++i)
-    {
-        bool reliable = true;
-        const bool inside = other.ClassifyPoint(solid.FaceSample(componentFaces[first + i]), epsilon, reliable);
-        if (!reliable)
-            continue;
-        votes += inside ? 1 : -1;
-        if (votes >= 2 || votes <= -2)
-            return votes > 0;
-    }
-    if (votes != 0)
-        return votes > 0;
-    return other.ContainsPoint(solid.ComponentSample(component), epsilon);
-}
+    Outside,
+    Inside,
+    /// The component has no face with a loop, so it has no exact side. The boolean removes it.
+    None
+};
 
 /// Tell if a component that the curve does not reach lies inside the other solid.
 ///
@@ -454,9 +396,8 @@ bool ClassifyComponentFloat(const CsgSolid& solid, unsigned component, const Csg
 /// does not cross the displaced surface of the other operand. All its vertices lie on the same side, also the
 /// vertices that touch the other surface. The function classifies the first vertex of the first face with a loop.
 /// The exact test breaks a tie on a shared face by the displacement of the second operand.
-/// If no face of the component has a loop, the function uses the float path.
-bool ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned component, const Mesh& other, bool second,
-    float epsilon)
+/// If no face of the component has a loop, the component has no side: the function counts it and returns None.
+ComponentSide ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned component, const Mesh& other, bool second)
 {
     const ea::span<const unsigned> componentStart = mesh.solid_.GetComponentStart();
     const ea::span<const unsigned> componentFaces = mesh.solid_.GetComponentFaces();
@@ -468,9 +409,11 @@ bool ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned comp
         const int id = mesh.loops_.vertexIds_[mesh.loops_.vertexStart_[face]];
         // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
         // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
-        return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111);
+        return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111) ? ComponentSide::Inside :
+                                                                                     ComponentSide::Outside;
     }
-    return ClassifyComponentFloat(mesh.solid_, component, other.solid_, epsilon);
+    CSG_DIAG_COUNT(componentsRemoved_);
+    return ComponentSide::None;
 }
 
 /// Collect the elements of one operand. This function does not classify.
@@ -1273,7 +1216,8 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
 
 /// Label the elements of both operands, make the kept set and build the result.
 ///
-/// A component that the curve does not reach is classified whole. A kept component goes to the builder. The first
+/// A component that the curve does not reach is classified whole. A component with no side is removed.
+/// A kept component goes to the builder. The first
 /// operand goes first. The elements of the other components get the labels of ClassifyElements. The kept faces then go through
 /// the exact clean-up. The result path has no float repair. If the exact surface is not closed, the result reports
 /// IsClosed() false.
@@ -1286,19 +1230,20 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
         const Mesh& mesh = second ? core.b_ : core.a_;
         const CsgSolid& solid = mesh.solid_;
         const Mesh& otherMesh = second ? core.a_ : core.b_;
-        const CsgSolid& other = second ? *a : *b;
         CsgOperandElements& o = s.operands_[index];
         const bool flip = second && operation == CsgOperation::DifferenceAB;
         for (unsigned component = 0; component < solid.ComponentCount(); ++component)
         {
             if (o.touched_[component])
                 continue;
-            const bool inside = ClassifyComponent(core, mesh, component, otherMesh, second, epsilon);
-            if (CsgSolid::Keep(inside, operation, second))
+            const ComponentSide side = ClassifyComponent(core, mesh, component, otherMesh, second);
+            if (side == ComponentSide::None)
+                continue;
+            if (CsgSolid::Keep(side == ComponentSide::Inside, operation, second))
                 result.AppendComponent(solid, component, flip);
         }
         if (!o.elements_.empty())
-            ClassifyElements(core, mesh, o, s, other, otherMesh, second, epsilon);
+            ClassifyElements(core, mesh, o, s, otherMesh, second);
     }
 
     BuildKeptSet(operation, s);

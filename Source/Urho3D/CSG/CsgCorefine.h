@@ -368,7 +368,7 @@ struct CsgOppositeCandidate
     int index_{};
 };
 
-/// The label of an element in a patch with zero exact area.
+/// The label of an element in a patch with zero exact area, or in a zero sum patch with no exact classification.
 constexpr uint8_t CSG_ELEMENT_REMOVED = 2;
 
 /// The elements of one operand of a boolean, collected before the classification.
@@ -380,7 +380,8 @@ struct CsgOperandElements
     /// The id pool of the elements that have no source face.
     ea::vector<int> elementIds_;
     /// The label of each element after the classification: 0 if outside the other operand, 1 if inside,
-    /// CSG_ELEMENT_REMOVED if the element belongs to a patch with zero exact area. The boolean keeps no such element.
+    /// CSG_ELEMENT_REMOVED if the element belongs to a patch with zero exact area, or to a zero sum patch with no
+    /// exact classification. The boolean keeps no such element.
     ea::vector<uint8_t> inside_;
 };
 
@@ -728,9 +729,11 @@ struct CsgBooleanDiagnostics
     std::atomic<int> patches_{};
     std::atomic<int> mixedVotePatches_{};
     std::atomic<int> zeroSumPatches_{};
-    /// Zero sum patches in the exact range that use the float point query. The polygon does not match its loop,
-    /// or its triangulation has zero exact area.
-    std::atomic<int> zeroSumFloatFallbacks_{};
+    /// Zero sum patches in the exact range with no exact classification. The polygon does not match its loop,
+    /// or its triangulation has zero exact area. The boolean removes these patches.
+    std::atomic<int> zeroSumUnclassifiedPatches_{};
+    /// Components that the curve does not reach and that have no face with a loop. The boolean removes them.
+    std::atomic<int> componentsRemoved_{};
     /// Zero sum patches in the exact range where every element has zero exact area.
     /// The boolean removes these patches.
     std::atomic<int> zeroSumDegeneratePatches_{};
@@ -761,7 +764,8 @@ struct CsgBooleanDiagnostics
                  &zeroSumPatches_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
-                 &unconstrainableCrossings_, &zeroSumFloatFallbacks_, &zeroSumDegeneratePatches_})
+                 &unconstrainableCrossings_, &zeroSumUnclassifiedPatches_, &zeroSumDegeneratePatches_,
+                 &componentsRemoved_})
             counter->store(0, std::memory_order_relaxed);
     }
 };

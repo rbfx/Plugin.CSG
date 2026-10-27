@@ -247,10 +247,6 @@ public:
     /// Return true if the stored triangles of the face needed the fallback of the triangulator.
     /// Then the triangles can be flat or inverted.
     bool IsFallbackFace(unsigned face) const;
-    /// Return a point on the first triangle of the face. A face without triangles gives its first corner.
-    Vector3 FaceSample(unsigned face) const;
-    /// Return a point on the first face of the component.
-    Vector3 ComponentSample(unsigned component) const;
     /// Classify a point in a closed solid with three rays. Return true if the point is inside.
     ///
     /// The answer is reliable if the three rays agree and no ray crosses the surface within four epsilons.

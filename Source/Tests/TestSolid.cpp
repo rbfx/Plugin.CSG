@@ -1086,46 +1086,14 @@ TEST_CASE("Solid ClassifyPoint agrees with ContainsPoint and reports the surface
     CHECK(reliable);
 }
 
-TEST_CASE("Solid samples lie on their face and component", "[solid][kept]")
+TEST_CASE("Solid copies no triangles of a face without triangles", "[solid][kept]")
 {
-    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
-    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 2.0f);
-    CsgSolid::Builder builder(12, 72);
-    builder.AppendSolid(*a);
-    builder.AppendSolid(*b);
-    const auto solid = builder.Finish();
-
-    for (unsigned face = 0; face < solid->FaceCount(); ++face)
-    {
-        const Vector3 sample = solid->FaceSample(face);
-        const CsgPolygon& polygon = *solid->GetFace(face);
-        CHECK(std::abs(polygon.plane_.Distance(sample)) < 1e-5f);
-        const float slack = 1e-5f;
-        CHECK(sample.x_ >= solid->GetFaceMin()[face].x_ - slack);
-        CHECK(sample.y_ >= solid->GetFaceMin()[face].y_ - slack);
-        CHECK(sample.z_ >= solid->GetFaceMin()[face].z_ - slack);
-        CHECK(sample.x_ <= solid->GetFaceMax()[face].x_ + slack);
-        CHECK(sample.y_ <= solid->GetFaceMax()[face].y_ + slack);
-        CHECK(sample.z_ <= solid->GetFaceMax()[face].z_ + slack);
-    }
-    for (unsigned component = 0; component < solid->ComponentCount(); ++component)
-    {
-        const Vector3 sample = solid->ComponentSample(component);
-        const unsigned face = solid->GetComponentFaces()[solid->GetComponentStart()[component]];
-        CHECK(sample == solid->FaceSample(face));
-        CHECK(solid->GetFaceComponents()[face] == component);
-        CHECK(sample.x_ >= solid->GetComponentMin(component).x_);
-        CHECK(sample.x_ <= solid->GetComponentMax(component).x_);
-    }
-
-    // A face without triangles samples its first corner.
+    // A face without triangles gives no triangles.
     ModelVertex vertex;
     vertex.SetPosition(Vector3(4.0f, 5.0f, 6.0f));
     ea::vector<ModelVertex> vertices{vertex, vertex};
     ea::vector<CsgSharedPolygon> faces{ea::make_shared<CsgPolygon>(ea::move(vertices), 1)};
     const auto degenerate = CsgSolid::FromKeptFaces(ea::move(faces), CSG_DEFAULT_EPSILON, {}, {}, 0);
-    CHECK(degenerate->FaceSample(0) == Vector3(4.0f, 5.0f, 6.0f));
-    CHECK(degenerate->ComponentSample(0) == Vector3(4.0f, 5.0f, 6.0f));
     ea::vector<unsigned> triangles{1, 2, 3};
     CHECK_FALSE(degenerate->CopyTriangles(0, triangles));
     CHECK(triangles.empty());

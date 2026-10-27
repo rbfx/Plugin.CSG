@@ -628,8 +628,9 @@ void RunSweep(float step, unsigned maxFailures)
                     << ", closed with a wrong volume " << stats.volumeWrong_);
 #ifdef CSG_DIAGNOSTICS
     INFO("zero sum patches " << g_csgDiagnostics.zeroSumPatches_.load() << ", with zero exact area "
-                             << g_csgDiagnostics.zeroSumDegeneratePatches_.load() << ", float fallbacks "
-                             << g_csgDiagnostics.zeroSumFloatFallbacks_.load());
+                             << g_csgDiagnostics.zeroSumDegeneratePatches_.load() << ", unclassified "
+                             << g_csgDiagnostics.zeroSumUnclassifiedPatches_.load() << ", components removed "
+                             << g_csgDiagnostics.componentsRemoved_.load());
 #endif
     CHECK(stats.volumeWrong_ == 0);
     CHECK(stats.failures_ <= maxFailures);
@@ -670,6 +671,10 @@ struct DiagCounters
     int patches_{};
     int mixedVotePatches_{};
     int zeroSumPatches_{};
+    /// Zero sum patches that the boolean removed because the exact test did not classify them.
+    int unclassified_{};
+    /// Components with no loop that the boolean removed.
+    int removedComponents_{};
     int lobeSplits_{};
     int lobeHoleKept_{};
     /// Crossings with a rounded position that breaks a rule of the validity test, and all crossings.
@@ -699,6 +704,8 @@ struct DiagCounters
         c.patches_ = d.patches_.load();
         c.mixedVotePatches_ = d.mixedVotePatches_.load();
         c.zeroSumPatches_ = d.zeroSumPatches_.load();
+        c.unclassified_ = d.zeroSumUnclassifiedPatches_.load();
+        c.removedComponents_ = d.componentsRemoved_.load();
         c.lobeSplits_ = d.lobeSplits_.load();
         c.lobeHoleKept_ = d.lobeHoleKept_.load();
         c.invalid_ = d.invalidCrossings_.load();
@@ -724,6 +731,8 @@ struct DiagCounters
         patches_ += o.patches_;
         mixedVotePatches_ += o.mixedVotePatches_;
         zeroSumPatches_ += o.zeroSumPatches_;
+        unclassified_ += o.unclassified_;
+        removedComponents_ += o.removedComponents_;
         lobeSplits_ += o.lobeSplits_;
         lobeHoleKept_ += o.lobeHoleKept_;
         invalid_ += o.invalid_;
@@ -838,6 +847,7 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
     g_csgDiagnostics.countInvalid_.store(true);
     const Vector3 axes[] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD, Vector3::ONE};
     DiagCounters passing;
+    DiagCounters total;
     int passingSteps = 0;
     int samples = 0;
     int failures = 0;
@@ -881,6 +891,8 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
                 && IsClosed(left) && IsClosed(right);
             ++samples;
             const DiagCounters* steps4[4] = {&cAb, &cLeft, &cBc, &cRight};
+            for (const DiagCounters* step : steps4)
+                total.Add(*step);
             if (unionRight && associative)
             {
                 for (const DiagCounters* step : steps4)
@@ -996,6 +1008,10 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
             passingFoldSamples, passingSamples, passingFoldSteps, passingProducerSteps);
         table << line;
     }
+    std::snprintf(line, sizeof(line),
+        "over all steps: zeroSumUnclassifiedPatches_ %d, componentsRemoved_ %d\n", total.unclassified_,
+        total.removedComponents_);
+    table << line;
     std::printf("%s", table.str().c_str());
     g_csgDiagnostics.countInvalid_.store(false);
     SUCCEED();
@@ -1380,16 +1396,18 @@ SolidPtr MakeTetrahedron(const Vector3 (&corners)[4], unsigned shared)
 namespace
 {
 
-/// Checks at the end of a test that no zero sum patch used the float point query because of a mismatch.
-/// The operands are in the exact range. A patch with zero exact area has no side, so the boolean removes it
-/// and does not use the float query. The counter zeroSumDegeneratePatches_ counts these patches.
-struct NoZeroSumFloatFallback
+/// Checks at the end of a test that the exact test classified every zero sum patch with an exact area.
+/// A patch with zero exact area has no side, so the boolean removes it.
+/// The counter zeroSumDegeneratePatches_ counts these patches.
+struct NoZeroSumUnclassifiedPatch
 {
 #ifdef CSG_DIAGNOSTICS
-    NoZeroSumFloatFallback() { g_csgDiagnostics.Reset(); }
-    ~NoZeroSumFloatFallback() { CHECK(g_csgDiagnostics.zeroSumFloatFallbacks_.load() == 0); }
+    NoZeroSumUnclassifiedPatch() { g_csgDiagnostics.Reset(); }
+    ~NoZeroSumUnclassifiedPatch() { CHECK(g_csgDiagnostics.zeroSumUnclassifiedPatches_.load() == 0); }
     /// The number of zero sum patches with zero exact area that the booleans removed.
     static int RemovedPatches() { return g_csgDiagnostics.zeroSumDegeneratePatches_.load(); }
+    /// The number of components with no loop that the booleans removed.
+    static int RemovedComponents() { return g_csgDiagnostics.componentsRemoved_.load(); }
 #endif
 };
 
@@ -1397,7 +1415,7 @@ struct NoZeroSumFloatFallback
 
 TEST_CASE("Boolean of a tetrahedron with an apex on a box face", "[boolean][zerosum]")
 {
-    const NoZeroSumFloatFallback noFallback;
+    const NoZeroSumUnclassifiedPatch noUnclassified;
     // The apex lies exactly on the top face of the box, on the grid. The curve is only the apex.
     const auto box = MakeBox(Vector3::ZERO, 1);
     const double volumeBox = Volume(box);
@@ -1442,7 +1460,7 @@ TEST_CASE("Boolean of a tetrahedron with an apex on a box face", "[boolean][zero
 
 TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean][zerosum]")
 {
-    const NoZeroSumFloatFallback noFallback;
+    const NoZeroSumUnclassifiedPatch noUnclassified;
     // The width of the needle is below a fifth of a grid step. The two crossings on the top face of the box
     // round to the same grid point, so the chord between them collapses.
     const auto box = MakeBox(Vector3::ZERO, 1);
@@ -1458,19 +1476,30 @@ TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean
         const SolidPtr& b = swapped ? box : needle;
         const auto unionAB = Run(a, b, CsgOperation::Union);
         const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+        const auto intersection = Run(a, b, CsgOperation::Intersection);
         CheckClosed(unionAB);
         CHECK(Volume(unionAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
+        // The needle has no side, so the boolean removes it. The intersection is empty.
+        CHECK(intersection->FaceCount() == 0);
         if (!swapped)
         {
             CheckClosed(differenceAB);
             CHECK(Volume(differenceAB) == Catch::Approx(volumeBox).margin(VOLUME_TOLERANCE));
         }
+        else
+        {
+            // The needle minus the box is empty.
+            CHECK(differenceAB->FaceCount() == 0);
+        }
     }
+#ifdef CSG_DIAGNOSTICS
+    CHECK(NoZeroSumUnclassifiedPatch::RemovedComponents() > 0);
+#endif
 }
 
 TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boolean][zerosum]")
 {
-    const NoZeroSumFloatFallback noFallback;
+    const NoZeroSumUnclassifiedPatch noUnclassified;
     // The plate crosses the face x = 1 of the box. The two sheets of the plate cross the face on lines that
     // round to the same grid line. The two segments have opposite sides and cancel each other.
     const auto box = MakeBox(Vector3::ZERO, 1);
@@ -1494,14 +1523,14 @@ TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boo
         }
     }
 #ifdef CSG_DIAGNOSTICS
-    // The patches with zero exact area are removed, not classified with the float query.
-    CHECK(NoZeroSumFloatFallback::RemovedPatches() > 0);
+    // The patches with zero exact area are removed. The exact test does not classify them.
+    CHECK(NoZeroSumUnclassifiedPatch::RemovedPatches() > 0);
 #endif
 }
 
 TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[boolean][zerosum]")
 {
-    const NoZeroSumFloatFallback noFallback;
+    const NoZeroSumUnclassifiedPatch noUnclassified;
     // A sample of the benchmark sweep: B shares a plane with A. The coplanar contact makes thin patches with no net vote.
     const Quaternion world(18.5f, Vector3::ONE.Normalized());
     const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
@@ -1511,7 +1540,7 @@ TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[bool
     CheckClosed(unionAB);
     CHECK(Volume(unionAB) == Catch::Approx(Volume(a) + Volume(b) - 4.0).margin(GridVolumeTolerance(2 * BOX_AREA)));
 #ifdef CSG_DIAGNOSTICS
-    // The patches with zero exact area are removed, not classified with the float query.
-    CHECK(NoZeroSumFloatFallback::RemovedPatches() > 0);
+    // The patches with zero exact area are removed. The exact test does not classify them.
+    CHECK(NoZeroSumUnclassifiedPatch::RemovedPatches() > 0);
 #endif
 }

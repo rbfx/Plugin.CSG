@@ -58,7 +58,8 @@ All exact decisions use an integer grid:
 - The splitter works on rounded grid points. It uses exact 2D grid predicates in the plane of a face and an exact cyclic order of the edges around a vertex.
 - Classification works per patch. Elements that an edge off the curve joins form a patch. The elements use grid-canonical ids: ids with equal grid points count as one id. The sum of the votes of the curve edges of a patch labels all its elements. A patch with no net vote (a zero-sum patch) gets a point query on one element that has a grid area.
 - Every point query in the exact range is exact. A component with no curve edge uses a grid vertex. A zero-sum patch uses the centroid of a triangle, which is a rational point. Both use a ray along +x with the symbolic perturbation of the second operand. The ray reduces to three exact 2D tests and one exact plane test.
-- A zero-sum patch where every element has zero grid area has no side. The boolean removes it. The clean-up would drop its faces in any case.
+- A zero-sum patch where every element has zero grid area has no side. The boolean also removes a zero-sum patch with no exact classification: its polygon does not match its loop, or its triangulation has zero grid area. A component with no loop has no side. The boolean removes it.
+  The clean-up would drop the faces of a zero-area patch in any case. A patch with a loop mismatch is removed, and the result can stay open.
 - Holes of a region sort by the exact area of their loops. The area is an expansion (`CsgExact::LoopAreaExact`). A loop of more than 2^20 points has no exact area and uses a double estimate.
 - The result path has no weld within `epsilon` and no float repair. The kept faces go through an exact clean-up by grid point and id. The clean-up welds ids with equal grid points, removes repeated ids and zero-width spikes, cancels twin faces (two faces that visit the same ids in opposite directions), and splits an edge at the vertices that are exactly on it (T-junctions).
 - The result is closed if every directed edge has an opposite partner. This test is exact and has no crack budget. If the surface is not closed, the result reports `IsClosed()` false.
@@ -72,7 +73,6 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, no sample fails in float mode and 1 sample fails in double mode. In that sample the union is right, but the next boolean on the result fails. Some crossings have no valid corner in their cell: a group of crossings on one edge is near a segment, and only a joint move of the group removes the fold. In the sweep, no closed result has a wrong volume.
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
 - An operand with a coordinate outside of +-8192 units gives an empty solid with `IsOutOfRange()` true.
-- A float point query remains for a polygon that does not match its loop. The loop-mismatch case does not occur in the tests.
 
 ## Benchmark
 
