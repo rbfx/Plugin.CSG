@@ -56,7 +56,10 @@ All exact decisions use an integer grid:
 ### Splitter, classification and result
 
 - The splitter works on rounded grid points. It uses exact 2D grid predicates in the plane of a face and an exact cyclic order of the edges around a vertex.
-- Classification works per patch. Elements that an edge off the curve joins form a patch. The elements use grid-canonical ids: ids with equal grid points count as one id. The sum of the votes of the curve edges of a patch labels all its elements. A patch with no net vote falls back to a point query.
+- Classification works per patch. Elements that an edge off the curve joins form a patch. The elements use grid-canonical ids: ids with equal grid points count as one id. The sum of the votes of the curve edges of a patch labels all its elements. A patch with no net vote (a zero-sum patch) gets a point query on one element that has a grid area.
+- Every point query in the exact range is exact. A component with no curve edge uses a grid vertex. A zero-sum patch uses the centroid of a triangle, which is a rational point. Both use a ray along +x with the symbolic perturbation of the second operand. The ray reduces to three exact 2D tests and one exact plane test.
+- A zero-sum patch where every element has zero grid area has no side. The boolean removes it. The clean-up would drop its faces in any case.
+- Holes of a region sort by the exact area of their loops. The area is an expansion (`CsgExact::LoopAreaExact`). A loop of more than 2^20 points has no exact area and uses a double estimate.
 - The result path has no weld within `epsilon` and no float repair. The kept faces go through an exact clean-up by grid point and id. The clean-up welds ids with equal grid points, removes repeated ids and zero-width spikes, cancels twin faces (two faces that visit the same ids in opposite directions), and splits an edge at the vertices that are exactly on it (T-junctions).
 - The result is closed if every directed edge has an opposite partner. This test is exact and has no crack budget. If the surface is not closed, the result reports `IsClosed()` false.
 - `epsilon` is used for the weld of operand corners, for the bounds of operands and for the point queries. An operand without exact ids (a solid from `FromOperand` or from polygons) also uses it for the crack budget of `IsClosed()`. An epsilon that is not positive gives the default epsilon.
@@ -71,6 +74,7 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
 - `MergeCrossingsOnGrid` (in `CsgCorefine.h`) is a compile-time switch. It is off. With the switch on, crossings that round to one grid point share one id and the splitter closes all its traces. But more samples fail (21 in float mode and 18 in double mode before `ConstrainCrossings`). The open results have coplanar regions that stay twice, because the two operands split them differently. A topology-preserving snap rounding is the next design step.
 - A coordinate outside of +-8192 units gives a result that is not valid.
+- A float point query remains for an operand outside the grid range and for a polygon that does not match its loop. The loop-mismatch case does not occur in the tests.
 
 ## Benchmark
 
