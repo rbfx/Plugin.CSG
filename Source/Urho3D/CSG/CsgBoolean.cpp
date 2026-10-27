@@ -87,7 +87,8 @@ int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
     return element.sourceFace_ >= 0 ? mesh.loops_.loopLength_[element.sourceFace_] : element.idCount_;
 }
 
-/// Classify the elements against the other operand. The result is in the scratch: not zero if inside.
+/// Classify the elements of an operand against the other operand. The result is in the labels of the operand:
+/// not zero if inside.
 ///
 /// Each curve edge of an element decides which side of the curve is inside the other operand:
 /// the element on the left of an oriented segment is inside for the first operand, and on its right for the second.
@@ -96,24 +97,24 @@ int ElementLoopSize(const Mesh& mesh, const CsgBooleanElement& element)
 /// A patch with no net vote falls back to a point query.
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
-void ClassifyElements(
-    const Corefinement& core, const Mesh& mesh, CsgBooleanScratch& s, const CsgSolid& other, bool second, float epsilon)
+void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElements& o, CsgBooleanScratch& s,
+    const CsgSolid& other, bool second, float epsilon)
 {
-    const int elementCount = static_cast<int>(s.elements_.size());
+    const int elementCount = static_cast<int>(o.elements_.size());
 
     // Every element loop in one buffer. An unsplit face reads its loop from the mesh.
     s.edgeStart_.assign(elementCount + 1, 0);
     for (int e = 0; e < elementCount; ++e)
-        s.edgeStart_[e + 1] = s.edgeStart_[e] + ElementLoopSize(mesh, s.elements_[e]);
+        s.edgeStart_[e + 1] = s.edgeStart_[e] + ElementLoopSize(mesh, o.elements_[e]);
     const int edgeTotal = s.edgeStart_[elementCount];
     s.loops_.resize(edgeTotal);
     for (int e = 0; e < elementCount; ++e)
     {
-        const CsgBooleanElement& element = s.elements_[e];
+        const CsgBooleanElement& element = o.elements_[e];
         if (element.sourceFace_ < 0)
         {
             for (int i = 0; i < element.idCount_; ++i)
-                s.loops_[s.edgeStart_[e] + i] = s.elementIds_[element.idStart_ + i];
+                s.loops_[s.edgeStart_[e] + i] = o.elementIds_[element.idStart_ + i];
             continue;
         }
         const unsigned start = mesh.loops_.vertexStart_[element.sourceFace_];
@@ -184,13 +185,13 @@ void ClassifyElements(
 
     // The element across each edge off the curve, or -1 for a curve edge or an unmatched one.
     s.twins_.assign(edgeTotal, -1);
-    s.inside_.assign(elementCount, 0);
+    o.inside_.assign(elementCount, 0);
     s.votes_.assign(elementCount, 0);
     for (int e = 0; e < elementCount; ++e)
     {
         const int* loop = s.loops_.data() + s.edgeStart_[e];
         const int length = s.edgeStart_[e + 1] - s.edgeStart_[e];
-        const bool split = s.elements_[e].split_;
+        const bool split = o.elements_[e].split_;
         int votes = 0;
         for (int i = 0; i < length; ++i)
         {
@@ -257,7 +258,7 @@ void ClassifyElements(
         const int root = find(e);
         if (s.patchVotes_[root] != 0)
             continue;
-        const double area = PolygonArea(*s.elements_[e].polygon_);
+        const double area = PolygonArea(*o.elements_[e].polygon_);
         if (area > s.patchArea_[root])
         {
             s.patchArea_[root] = area;
@@ -270,11 +271,11 @@ void ClassifyElements(
             continue;
         bool reliable = true;
         const bool inside = other.ClassifyPoint(
-            PolygonInteriorPoint(*s.elements_[s.patchBest_[root]].polygon_, s.indices_), epsilon, reliable);
+            PolygonInteriorPoint(*o.elements_[s.patchBest_[root]].polygon_, s.indices_), epsilon, reliable);
         s.patchVotes_[root] = inside ? 1 : -1;
     }
     for (int e = 0; e < elementCount; ++e)
-        s.inside_[e] = s.patchVotes_[find(e)] > 0 ? 1 : 0;
+        o.inside_[e] = s.patchVotes_[find(e)] > 0 ? 1 : 0;
 }
 
 /// Tell if a component that the curve does not reach lies inside the other solid.
@@ -307,21 +308,20 @@ bool ClassifyComponent(const CsgSolid& solid, unsigned component, const CsgSolid
     return other.ContainsPoint(solid.ComponentSample(component), epsilon);
 }
 
-/// Append the kept surface of one operand.
+/// Collect the elements of one operand. This function does not classify.
 ///
-/// Components that the curve does not reach are classified whole and go to the builder.
-/// The other components are split along the curve, grouped into patches between curve edges and classified patch
-/// by patch. The kept patches go to the list of kept faces.
+/// The components that the curve reaches are split along the curve. Their faces, or the regions of their split
+/// triangles, are the elements. ClassifyElements groups the elements into patches between curve edges and labels them.
+/// The components that the curve does not reach are not elements. ClassifyAndEmit classifies them whole.
 ///
 /// A triangle that is collapsed is left out of a face that the curve reaches. The reference leaves out only
 /// triangles with welded corners. Here a triangle with a corner that is not finite is left out too, because
 /// a result vertex that is not finite has no meaning for the later steps.
 /// A face that the curve does not reach is kept as it is, also with a corner that is not finite.
-void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentLists& segments, const CsgSplitResult& split,
-    const CsgSolid& other, CsgOperation operation, bool second, CsgSolid::Builder& result, CsgBooleanScratch& s)
+void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentLists& segments,
+    const CsgSplitResult& split, CsgOperandElements& o, CsgBooleanScratch& s)
 {
     const CsgSolid& solid = mesh.solid_;
-    const bool flip = second && operation == CsgOperation::DifferenceAB;
     const unsigned componentCount = solid.ComponentCount();
     const auto faceComponents = solid.GetFaceComponents();
     const auto triangleStart = solid.GetTriangleStart();
@@ -329,7 +329,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
     const auto componentStart = solid.GetComponentStart();
     const auto componentFaces = solid.GetComponentFaces();
 
-    s.touched_.assign(componentCount, 0);
+    o.touched_.assign(componentCount, 0);
     s.frontier_.assign(solid.FaceCount(), 0);
     for (unsigned t = 0; t < mesh.triangleFace_.size(); ++t)
     {
@@ -337,24 +337,14 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
             continue;
         const int face = mesh.triangleFace_[t];
         s.frontier_[face] = 1;
-        s.touched_[faceComponents[face]] = 1;
+        o.touched_[faceComponents[face]] = 1;
     }
 
-    const float epsilon = core.epsilon_;
+    o.elements_.clear();
+    o.elementIds_.clear();
     for (unsigned component = 0; component < componentCount; ++component)
     {
-        if (s.touched_[component])
-            continue;
-        const bool inside = ClassifyComponent(solid, component, other, epsilon);
-        if (CsgSolid::Keep(inside, operation, second))
-            result.AppendComponent(solid, component, flip);
-    }
-
-    s.elements_.clear();
-    s.elementIds_.clear();
-    for (unsigned component = 0; component < componentCount; ++component)
-    {
-        if (!s.touched_[component])
+        if (!o.touched_[component])
             continue;
         for (unsigned c = componentStart[component]; c < componentStart[component + 1]; ++c)
         {
@@ -363,7 +353,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                 continue;
             if (!s.frontier_[face])
             {
-                CsgBooleanElement& element = s.elements_.emplace_back();
+                CsgBooleanElement& element = o.elements_.emplace_back();
                 element.polygon_ = solid.GetFace(face);
                 element.sourceFace_ = face;
                 continue;
@@ -377,8 +367,8 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                     continue;
                 if (split.GetState(static_cast<int>(t)) == CsgSplitResult::State::Split)
                 {
-                    const size_t elementMark = s.elements_.size();
-                    const size_t idMark = s.elementIds_.size();
+                    const size_t elementMark = o.elements_.size();
+                    const size_t idMark = o.elementIds_.size();
                     bool ok = true;
                     for (int r = split.triangleRegionStart_[t]; r < split.triangleRegionStart_[t + 1]; ++r)
                     {
@@ -388,30 +378,30 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                             ok = false;
                             break;
                         }
-                        CsgBooleanElement& element = s.elements_.emplace_back();
+                        CsgBooleanElement& element = o.elements_.emplace_back();
                         element.polygon_ = ea::make_shared<CsgPolygon>(ea::move(polygon));
-                        element.idStart_ = static_cast<int>(s.elementIds_.size());
+                        element.idStart_ = static_cast<int>(o.elementIds_.size());
                         element.idCount_ = split.RegionSize(r);
                         element.split_ = true;
-                        s.elementIds_.insert(s.elementIds_.end(), split.RegionIds(r),
+                        o.elementIds_.insert(o.elementIds_.end(), split.RegionIds(r),
                             split.RegionIds(r) + split.RegionSize(r));
                     }
                     if (ok)
                         continue;
                     // A region does not fit its face. The triangle stays whole, as for a failed split.
-                    s.elements_.resize(elementMark);
-                    s.elementIds_.resize(idMark);
+                    o.elements_.resize(elementMark);
+                    o.elementIds_.resize(idMark);
                 }
 
                 ea::vector<ModelVertex> corners;
                 corners.reserve(3);
-                CsgBooleanElement& element = s.elements_.emplace_back();
-                element.idStart_ = static_cast<int>(s.elementIds_.size());
+                CsgBooleanElement& element = o.elements_.emplace_back();
+                element.idStart_ = static_cast<int>(o.elementIds_.size());
                 element.idCount_ = 3;
                 for (unsigned k = 0; k < 3; ++k)
                 {
                     corners.push_back(source.vertices_[triangleVertices[t * 3 + k]]);
-                    s.elementIds_.push_back(core.Global(mesh, mesh.triangleIds_[t * 3 + k]));
+                    o.elementIds_.push_back(core.Global(mesh, mesh.triangleIds_[t * 3 + k]));
                 }
                 auto polygon = ea::make_shared<CsgPolygon>(ea::move(corners), source.shared_);
                 polygon->plane_ = source.plane_;
@@ -419,27 +409,38 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
             }
         }
     }
-    if (s.elements_.empty())
-        return;
+    o.inside_.clear();
+}
 
-    ClassifyElements(core, mesh, s, other, second, epsilon);
-    for (unsigned i = 0; i < s.elements_.size(); ++i)
+/// Make the list of kept faces from the labels of both operands. The first operand goes first.
+/// The faces of a flipped operand get the flipped polygon and the reversed ids.
+void BuildKeptSet(CsgOperation operation, CsgBooleanScratch& s)
+{
+    s.kept_.clear();
+    s.keptIds_.clear();
+    for (int index = 0; index < 2; ++index)
     {
-        if (!CsgSolid::Keep(s.inside_[i] != 0, operation, second))
-            continue;
-        const CsgBooleanElement& element = s.elements_[i];
-        CsgKeptFace& kept = s.kept_.emplace_back();
-        kept.polygon_ = flip ? CsgSolid::Flipped(*element.polygon_) : element.polygon_;
-        kept.sourceFace_ = element.sourceFace_;
-        kept.second_ = second;
-        kept.flip_ = flip;
-        if (element.sourceFace_ >= 0)
-            continue;
-        kept.idStart_ = static_cast<int>(s.keptIds_.size());
-        kept.idCount_ = element.idCount_;
-        const int* ids = s.elementIds_.data() + element.idStart_;
-        for (int k = 0; k < element.idCount_; ++k)
-            s.keptIds_.push_back(ids[flip ? element.idCount_ - 1 - k : k]);
+        const bool second = index != 0;
+        const bool flip = second && operation == CsgOperation::DifferenceAB;
+        const CsgOperandElements& o = s.operands_[index];
+        for (unsigned i = 0; i < o.elements_.size(); ++i)
+        {
+            if (!CsgSolid::Keep(o.inside_[i] != 0, operation, second))
+                continue;
+            const CsgBooleanElement& element = o.elements_[i];
+            CsgKeptFace& kept = s.kept_.emplace_back();
+            kept.polygon_ = flip ? CsgSolid::Flipped(*element.polygon_) : element.polygon_;
+            kept.sourceFace_ = element.sourceFace_;
+            kept.second_ = second;
+            kept.flip_ = flip;
+            if (element.sourceFace_ >= 0)
+                continue;
+            kept.idStart_ = static_cast<int>(s.keptIds_.size());
+            kept.idCount_ = element.idCount_;
+            const int* ids = o.elementIds_.data() + element.idStart_;
+            for (int k = 0; k < element.idCount_; ++k)
+                s.keptIds_.push_back(ids[flip ? element.idCount_ - 1 - k : k]);
+        }
     }
 }
 
@@ -649,12 +650,54 @@ int64_t PlaceOnSegment(const CsgGridPoint& u, const CsgGridPoint& v, const CsgGr
     return place > 0 && place < length ? place : 0;
 }
 
-/// Build the solid of the kept faces. A split region reads its exact ids from the scratch.
-/// An unsplit face reads its ids from its solid, offset like the mesh.
+/// A loop of a cleaned face. The loop owns the corners [start_, start_ + count_) in loopIds_ and loopCorners_.
+struct CsgCleanLoop
+{
+    /// The index of the kept face of the loop.
+    unsigned face_;
+    unsigned start_;
+    unsigned count_;
+    uint64_t hash_;
+};
+
+/// An edge of the cleaned faces that has no opposite partner. The winding is the sum of the directions of its uses.
+struct CsgOpenEdge
+{
+    /// The ids of the ends, with from_ < to_.
+    int from_;
+    int to_;
+    int winding_;
+};
+
+/// The result of Clean: the cleaned loops of the kept faces. Emit builds the solid from it.
+/// A caller can read the open edges and then call Clean again with another list of kept faces.
+struct CsgRegionClean
+{
+    /// The ids and the grid points of the corners of each kept face, in the order of its polygon.
+    ea::vector<int> cornerIds_;
+    ea::vector<CsgGridPoint> cornerGrid_;
+    /// Face f owns the corners [cornerStart_[f], cornerStart_[f + 1]).
+    ea::vector<unsigned> cornerStart_;
+    /// The cleaned loops. A loop that a T-split replaces stays here, marked removed.
+    ea::vector<CsgCleanLoop> loops_;
+    ea::vector<int> loopIds_;
+    ea::vector<LoopCorner> loopCorners_;
+    ea::vector<uint8_t> removed_;
+    /// The number of loops before the T-split. The loops from this index on are the replacements.
+    unsigned cleanCount_{};
+    /// For each loop before the T-split, the range of its replacement loops. It is empty if no loop split.
+    ea::vector<ea::pair<unsigned, unsigned>> replacements_;
+    /// The edges with a winding that is not zero, before the T-split. It is empty if a coordinate is out of range.
+    ea::vector<CsgOpenEdge> openEdges_;
+};
+
+/// Clean the kept faces and write the loops to the result. The result is reset first. No solid is built.
+/// A split region reads its exact ids from the ids of the kept faces. An unsplit face reads its ids from its solid,
+/// offset like the mesh.
 /// Each corner gets the grid point of its id: a crossing gives its rounded grid point, a kept vertex the grid
 /// point that its solid stores. So the result keeps the grid points and does not snap a position.
 ///
-/// The faces are welded and cleaned exactly, by grid point and id, before the build:
+/// The faces are welded and cleaned exactly, by grid point and id:
 /// - ids with equal grid points become one id, the first id with that grid point;
 /// - a loop loses its repeated ids and its zero-width spikes;
 /// - a loop that passes twice through one id splits into two loops at that id;
@@ -662,16 +705,30 @@ int64_t PlaceOnSegment(const CsgGridPoint& u, const CsgGridPoint& v, const CsgGr
 /// - two faces that visit the same ids in opposite directions cancel;
 /// - an edge without a partner splits at the vertices exactly on it. Then its loop is cleaned again,
 ///   and the twins cancel again, because a twin pair can show only after the split.
-/// A face that loses or gets a corner gets a new polygon and is triangulated again.
 /// If a coordinate is out of the range of the grid, the grid points are clamped. Then only the ids weld.
-SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanScratch& s,
-    const ea::vector<CsgKeptFace>& kept, const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
-    float epsilon)
+void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const ea::vector<int>& keptIds,
+    CsgRegionClean& out)
 {
+    using Loop = CsgCleanLoop;
+    ea::vector<int>& cornerIds = out.cornerIds_;
+    ea::vector<CsgGridPoint>& cornerGrid = out.cornerGrid_;
+    ea::vector<unsigned>& cornerStart = out.cornerStart_;
+    ea::vector<Loop>& loops = out.loops_;
+    ea::vector<int>& loopIds = out.loopIds_;
+    ea::vector<LoopCorner>& loopCorners = out.loopCorners_;
+    ea::vector<uint8_t>& removed = out.removed_;
+    ea::vector<ea::pair<unsigned, unsigned>>& replacements = out.replacements_;
+    cornerIds.clear();
+    cornerGrid.clear();
+    cornerStart.clear();
+    loops.clear();
+    loopIds.clear();
+    loopCorners.clear();
+    removed.clear();
+    replacements.clear();
+    out.openEdges_.clear();
+
     // The ids and the grid points of the corners of each kept face, in the order of its polygon.
-    ea::vector<int> cornerIds;
-    ea::vector<CsgGridPoint> cornerGrid;
-    ea::vector<unsigned> cornerStart;
     cornerStart.reserve(kept.size() + 1);
     for (const CsgKeptFace& face : kept)
     {
@@ -692,7 +749,7 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
         {
             for (int k = face.idStart_; k < face.idStart_ + face.idCount_; ++k)
             {
-                const int id = s.keptIds_[k];
+                const int id = keptIds[k];
                 cornerIds.push_back(id);
                 cornerGrid.push_back(PointGrid(core, id));
             }
@@ -723,20 +780,9 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
     }
 
     // Clean the loops. A loop with no surface is left out, and a loop that is not simple splits.
-    struct Loop
-    {
-        unsigned face_;
-        unsigned start_;
-        unsigned count_;
-        uint64_t hash_;
-    };
-    ea::vector<Loop> loops;
     loops.reserve(kept.size());
-    ea::vector<int> loopIds;
-    ea::vector<LoopCorner> loopCorners;
     loopIds.reserve(cornerIds.size());
     loopCorners.reserve(cornerIds.size());
-    ea::vector<uint8_t> removed;
     removed.reserve(kept.size());
     ea::vector<LoopCorner> piece;
     ea::vector<LoopCorner> pool;
@@ -843,7 +889,7 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
     // The loops that replace a split loop. The result keeps them at the place of that loop, so the face order
     // does not change.
     const unsigned cleanCount = loops.size();
-    ea::vector<ea::pair<unsigned, unsigned>> replacements;
+    out.cleanCount_ = cleanCount;
 
     // An edge without an opposite partner can pass exactly through a vertex of another loop: a T-junction.
     // The edge is split at such vertices. The test is exact on the grid points, and only the ends of the edges
@@ -867,6 +913,14 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
                 if (!existed)
                     sum = 0;
                 sum += from < to ? 1 : -1;
+            }
+        }
+        for (const auto& entry : winding)
+        {
+            if (entry.value_ != 0)
+            {
+                out.openEdges_.push_back(
+                    {static_cast<int>(entry.key_ >> 32), static_cast<int>(entry.key_ & 0xFFFFFFFFu), entry.value_});
             }
         }
         const auto isOpen = [&](int from, int to) { return *winding.Find(CsgUndirectedKey(from, to)) != 0; };
@@ -955,6 +1009,23 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
             cancelTwins();
     }
 
+}
+
+/// Build the solid from the cleaned faces. A face that loses or gets a corner gets a new polygon and is
+/// triangulated again. Give the same kept faces as the last call to Clean.
+SharedPtr<CsgSolid> Emit(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const CsgRegionClean& clean,
+    const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b, float epsilon)
+{
+    using Loop = CsgCleanLoop;
+    const ea::vector<CsgGridPoint>& cornerGrid = clean.cornerGrid_;
+    const ea::vector<unsigned>& cornerStart = clean.cornerStart_;
+    const ea::vector<Loop>& loops = clean.loops_;
+    const ea::vector<int>& loopIds = clean.loopIds_;
+    const ea::vector<LoopCorner>& loopCorners = clean.loopCorners_;
+    const ea::vector<uint8_t>& removed = clean.removed_;
+    const ea::vector<ea::pair<unsigned, unsigned>>& replacements = clean.replacements_;
+    const unsigned cleanCount = clean.cleanCount_;
+
     ea::vector<CsgSharedPolygon> faces;
     ea::vector<CsgFaceOrigin> origins;
     ea::vector<int> exactIds;
@@ -1032,6 +1103,56 @@ SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanS
     return CsgSolid::FromKeptFaces(ea::move(faces), epsilon, origins, exactIds, idSpace, exactGrid);
 }
 
+/// Build the solid of the kept faces: the exact clean-up and then the build.
+SharedPtr<CsgSolid> BuildRegionSolid(const Corefinement& core, const CsgBooleanScratch& s,
+    const ea::vector<CsgKeptFace>& kept, const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    float epsilon)
+{
+    CsgRegionClean clean;
+    Clean(core, kept, s.keptIds_, clean);
+    return Emit(core, kept, clean, a, b, epsilon);
+}
+
+/// Label the elements of both operands, make the kept set and build the result.
+///
+/// A component that the curve does not reach is classified whole. A kept component goes to the builder. The first
+/// operand goes first. The elements of the other components get the labels of ClassifyElements. The kept faces then go through
+/// the exact clean-up. The result path has no float repair. If the exact surface is not closed, the result reports
+/// IsClosed() false.
+void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon, CsgSolid::Builder& result, CsgBooleanScratch& s)
+{
+    for (int index = 0; index < 2; ++index)
+    {
+        const bool second = index != 0;
+        const Mesh& mesh = second ? core.b_ : core.a_;
+        const CsgSolid& solid = mesh.solid_;
+        const CsgSolid& other = second ? *a : *b;
+        CsgOperandElements& o = s.operands_[index];
+        const bool flip = second && operation == CsgOperation::DifferenceAB;
+        for (unsigned component = 0; component < solid.ComponentCount(); ++component)
+        {
+            if (o.touched_[component])
+                continue;
+            const bool inside = ClassifyComponent(solid, component, other, epsilon);
+            if (CsgSolid::Keep(inside, operation, second))
+                result.AppendComponent(solid, component, flip);
+        }
+        if (!o.elements_.empty())
+            ClassifyElements(core, mesh, o, s, other, second, epsilon);
+    }
+
+    BuildKeptSet(operation, s);
+    if (s.kept_.empty())
+        return;
+    CancelOpposites(s);
+
+    // The exact clean-up of the region solid gives the result: a weld by grid point, a cancel of twin faces
+    // and a closed test on the grid. This holds for operands in the grid range.
+    SharedPtr<CsgSolid> regionSolid = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
+    result.AppendSolid(*regionSolid);
+}
+
 } // namespace
 
 SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
@@ -1055,19 +1176,9 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
         a->GetTrianglePositions().size() + b->GetTrianglePositions().size(), epsilon);
     CsgBooleanScratch& s = scratch.boolean_;
-    AppendOperand(core, core.a_, core.segmentsA_, core.splitA_, *b, operation, false, result, s);
-    AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, *a, operation, true, result, s);
-
-    if (!s.kept_.empty())
-    {
-        CancelOpposites(s);
-
-        // The exact clean-up of the region solid gives the result: a weld by grid point, a cancel of twin faces
-        // and a closed test on the grid. This holds for operands in the grid range. The result path has no float repair. If the exact surface is not closed,
-        // the result reports IsClosed() false.
-        SharedPtr<CsgSolid> regionSolid = BuildRegionSolid(core, s, s.kept_, a, b, epsilon);
-        result.AppendSolid(*regionSolid);
-    }
+    AppendOperand(core, core.a_, core.segmentsA_, core.splitA_, s.operands_[0], s);
+    AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, s.operands_[1], s);
+    ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
     return result.Finish();
 }
 

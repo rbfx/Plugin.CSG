@@ -338,14 +338,24 @@ struct CsgOppositeCandidate
     int index_{};
 };
 
+/// The elements of one operand of a boolean, collected before the classification.
+struct CsgOperandElements
+{
+    /// One byte for each component of the operand. Not zero if the curve reaches the component.
+    ea::vector<uint8_t> touched_;
+    ea::vector<CsgBooleanElement> elements_;
+    /// The id pool of the elements that have no source face.
+    ea::vector<int> elementIds_;
+    /// The label of each element after the classification: not zero if the element is inside the other operand.
+    ea::vector<uint8_t> inside_;
+};
+
 /// Reusable vectors of the classification and of the assembly of a boolean.
 struct CsgBooleanScratch
 {
-    ea::vector<uint8_t> touched_;
+    /// The elements of the first operand and of the second operand.
+    CsgOperandElements operands_[2];
     ea::vector<uint8_t> frontier_;
-    ea::vector<CsgBooleanElement> elements_;
-    ea::vector<int> elementIds_;
-    ea::vector<uint8_t> inside_;
     ea::vector<CsgKeptFace> kept_;
     ea::vector<int> keptIds_;
     ea::vector<CsgOppositeCandidate> candidates_;
