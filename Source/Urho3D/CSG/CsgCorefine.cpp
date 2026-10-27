@@ -534,6 +534,9 @@ int Corefinement::CompareRecords(int x, int y) const
     const Crossing& cx = Record(x);
     const Crossing& cy = Record(y);
     // Doubles separate all but nearly coincident crossings. Those are ordered exactly.
+    // The value t_ is the quotient of two Approximate() sums of compressed expansions. Its relative error
+    // is about 2^-47, far below the tolerance of 1e-9. A larger gap of t_ then has the sign of the exact gap.
+    // A gap of 1e-9 or less goes to CompareOnEdge. Then the exact tie rule and the ids decide.
     if (std::fabs(cx.t_ - cy.t_) > EDGE_ORDER_TOLERANCE)
         return cx.t_ < cy.t_ ? -1 : 1;
     const int order = CompareOnEdge(cx, cy);
@@ -612,9 +615,9 @@ int CompareMagnitude(const CsgExactMinor& a, const CsgExactMinor& b)
 
 /// Whether the bridge from-to is blocked by the edge pq.
 /// A contact only at an end of the bridge does not block it. A collinear contact blocks it, also at an end.
-/// The callers skip the edges at the end ids, so an edge that touches an end has another id at the same grid
-/// point. Such ids are different points below the grid step. The triangulation uses their float positions, and
-/// there a bridge along such an edge can cross it.
+/// The callers skip the edges at the end ids. An edge that touches an end then has another id at the grid point
+/// of the end. The position of an id is grid / scale of its grid point, so such ids have one position.
+/// The edge between them has zero length. The exact tests treat the ids as one point.
 bool BridgeBlockedBy(const CsgGridPoint2& from, const CsgGridPoint2& to, const CsgGridPoint2& p, const CsgGridPoint2& q)
 {
     if (!CsgExact::SegmentsCross(from, to, p, q))
@@ -914,7 +917,8 @@ private:
     /// Exact sign of the area of a loop. It is positive for the counterclockwise order of the face.
     int AreaSign(int loop) { return CsgExact::LoopAreaSign(LoopPoints(loop), s_.pool_.Count(loop)); }
 
-    /// Magnitude of the area of a loop in double. It orders loops by size only. No topology depends on it.
+    /// Magnitude of the area of a loop in double. It orders loops by size only.
+    /// The choice of the smallest region that contains a hole uses it, so it can change the topology.
     double AreaMagnitude(int loop)
     {
         const CsgGridPoint2* points = LoopPoints(loop);
@@ -2698,6 +2702,8 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
         const CsgGridPoint& low = edges.grid_[key.low_];
         const CsgGridPoint& high = edges.grid_[key.high_];
         // The double estimate of the exact point decides a crossing that is far from its grid point.
+        // The error of t_ is about 2^-44. The edge delta is below 2^30 grid units. So the estimate error is
+        // about 2^-14 grid units, far below the 1e-3 test. The exact CrossingCell decides the other crossings.
         const double dx = low.x_ + crossing.t_ * (static_cast<double>(high.x_) - low.x_) - crossing.grid_.x_;
         const double dy = low.y_ + crossing.t_ * (static_cast<double>(high.y_) - low.y_) - crossing.grid_.y_;
         const double dz = low.z_ + crossing.t_ * (static_cast<double>(high.z_) - low.z_) - crossing.grid_.z_;

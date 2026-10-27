@@ -1174,6 +1174,102 @@ TEST_CASE("Exact filter", "[exact]")
     }
 }
 
+TEST_CASE("Filter and Orient decide the sign of near coplanar points with large differences", "[exact][filter]")
+{
+    std::mt19937_64 random(777001);
+    const int64_t limit = CsgGridIntegerLimit - 1;
+    std::uniform_int_distribution<int64_t> coordinate(-limit, limit);
+    std::uniform_int_distribution<int> factor(-1, 2);
+    std::uniform_int_distribution<int> axisPick(0, 2);
+    std::uniform_int_distribution<int> signPick(0, 1);
+    std::uniform_int_distribution<int> bitsPick(0, CsgGridBits - 1);
+    std::uniform_int_distribution<int> maskPick(0, 15);
+    const int64_t differenceLimit = int64_t{1} << (CsgGridBits + 1);
+
+    int64_t largestDifference = 0;
+    int decidedCount = 0;
+    int undecidedCount = 0;
+    int zeroCount = 0;
+    int tested = 0;
+    // The position is rejected when it is outside the range of the grid.
+    const auto inRange = [limit](int64_t x, int64_t y, int64_t z)
+    { return std::abs(x) <= limit && std::abs(y) <= limit && std::abs(z) <= limit; };
+    while (tested < 100000)
+    {
+        const CsgGridPoint a = P(coordinate(random), coordinate(random), coordinate(random));
+        const CsgGridPoint b = P(coordinate(random), coordinate(random), coordinate(random));
+        const CsgGridPoint c = P(coordinate(random), coordinate(random), coordinate(random));
+        // Coplanar point d = a + s (b - a) + t (c - a).
+        const int s = factor(random);
+        const int t = factor(random);
+        int64_t dx = a.x_ + s * (int64_t{b.x_} - a.x_) + t * (int64_t{c.x_} - a.x_);
+        int64_t dy = a.y_ + s * (int64_t{b.y_} - a.y_) + t * (int64_t{c.y_} - a.y_);
+        int64_t dz = a.z_ + s * (int64_t{b.z_} - a.z_) + t * (int64_t{c.z_} - a.z_);
+        if (!inRange(dx, dy, dz))
+            continue;
+        // Move d off the plane by a random amount: one unit on one axis or up to 2^bits on all axes.
+        if (tested % 3 != 0)
+        {
+            const int64_t amount = (int64_t{1} << bitsPick(random)) * (signPick(random) == 0 ? -1 : 1);
+            if (tested % 3 == 1)
+            {
+                const int axis = axisPick(random);
+                (axis == 0 ? dx : (axis == 1 ? dy : dz)) += signPick(random) == 0 ? -1 : 1;
+            }
+            else
+            {
+                dx += amount;
+                dy -= amount / 2;
+                dz += amount / 4;
+            }
+            if (!inRange(dx, dy, dz))
+                continue;
+        }
+        const CsgGridPoint d = P(dx, dy, dz);
+        ++tested;
+
+        const int64_t differences[9] = {int64_t{b.x_} - a.x_, int64_t{b.y_} - a.y_, int64_t{b.z_} - a.z_,
+            int64_t{c.x_} - a.x_, int64_t{c.y_} - a.y_, int64_t{c.z_} - a.z_, int64_t{d.x_} - a.x_,
+            int64_t{d.y_} - a.y_, int64_t{d.z_} - a.z_};
+        for (const int64_t difference : differences)
+        {
+            REQUIRE(std::abs(difference) < differenceLimit);
+            largestDifference = std::max(largestDifference, std::abs(difference));
+        }
+
+        const int oracle = CsgTest::Sign(CsgTest::ReferenceVolume(a, b, c, d));
+        zeroCount += oracle == 0 ? 1 : 0;
+
+        // The filter path: a decided lane has the sign of the oracle.
+        const auto lane = [&](int i) { return CsgFloat4::Splat(static_cast<float>(differences[i])); };
+        CsgFloat4 det;
+        const int decided = CsgInternal::Filter(lane(0), lane(1), lane(2), lane(3), lane(4), lane(5), lane(6), lane(7),
+            lane(8), det);
+        if ((decided & 1) != 0)
+        {
+            ++decidedCount;
+            REQUIRE(oracle != 0);
+            REQUIRE((det.Get(0) > 0.0f ? 1 : -1) == oracle);
+        }
+        else
+        {
+            ++undecidedCount;
+        }
+
+        // The public path with and without the symbolic displacement.
+        REQUIRE(CsgExact::Orient(a, b, c, d, 0) == CsgTest::ReferenceOrient(a, b, c, d, 0));
+        if (oracle != 0)
+            REQUIRE(CsgExact::Orient(a, b, c, d, 0) == oracle);
+        const int mask = maskPick(random);
+        REQUIRE(CsgExact::Orient(a, b, c, d, mask) == CsgTest::ReferenceOrient(a, b, c, d, mask));
+    }
+    // The test reaches differences above the exact range of a float, and all three outcomes happen.
+    REQUIRE(largestDifference > (int64_t{1} << (CsgGridBits - 1)));
+    REQUIRE(decidedCount > 1000);
+    REQUIRE(undecidedCount > 1000);
+    REQUIRE(zeroCount > 1000);
+}
+
 TEST_CASE("Simd float vector", "[exact]")
 {
     const CsgFloat4 a = CsgFloat4::Create(1.0f, -2.0f, 3.0f, -4.0f);
