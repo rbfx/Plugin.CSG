@@ -384,6 +384,9 @@ struct CsgOppositeCandidate
     int index_{};
 };
 
+/// The label of an element in a patch with zero exact area.
+constexpr uint8_t CSG_ELEMENT_REMOVED = 2;
+
 /// The elements of one operand of a boolean, collected before the classification.
 struct CsgOperandElements
 {
@@ -392,7 +395,8 @@ struct CsgOperandElements
     ea::vector<CsgBooleanElement> elements_;
     /// The id pool of the elements that have no source face.
     ea::vector<int> elementIds_;
-    /// The label of each element after the classification: not zero if the element is inside the other operand.
+    /// The label of each element after the classification: 0 if outside the other operand, 1 if inside,
+    /// CSG_ELEMENT_REMOVED if the element belongs to a patch with zero exact area. The boolean keeps no such element.
     ea::vector<uint8_t> inside_;
 };
 
@@ -419,6 +423,8 @@ struct CsgBooleanScratch
     ea::vector<int> patchVotes_;
     ea::vector<int> patchBest_;
     ea::vector<double> patchArea_;
+    /// Not zero if the best element of the patch has three grid points that are not on one line.
+    ea::vector<uint8_t> patchExact_;
     ea::vector<unsigned> indices_;
 };
 
@@ -768,10 +774,11 @@ struct CsgBooleanDiagnostics
     std::atomic<int> patches_{};
     std::atomic<int> mixedVotePatches_{};
     std::atomic<int> zeroSumPatches_{};
-    /// Zero sum patches in the exact range that use the float point query because the polygon does not match its loop.
+    /// Zero sum patches in the exact range that use the float point query. The polygon does not match its loop,
+    /// or its triangulation has zero exact area.
     std::atomic<int> zeroSumFloatFallbacks_{};
-    /// Zero sum patches in the exact range where every triangle of the best element has zero exact area.
-    /// These patches use the float point query too.
+    /// Zero sum patches in the exact range where every element has zero exact area.
+    /// The boolean removes these patches.
     std::atomic<int> zeroSumDegeneratePatches_{};
     std::atomic<int> mergedCrossings_{};
     std::atomic<int> lobeSplits_{};

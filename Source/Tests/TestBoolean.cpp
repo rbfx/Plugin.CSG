@@ -1342,13 +1342,15 @@ namespace
 {
 
 /// Checks at the end of a test that no zero sum patch used the float point query because of a mismatch.
-/// The operands are in the exact range. A patch with zero exact area uses the float query too. Its answer does not
-/// change the volume. The counter zeroSumDegeneratePatches_ counts these patches. The test does not check it.
+/// The operands are in the exact range. A patch with zero exact area has no side, so the boolean removes it
+/// and does not use the float query. The counter zeroSumDegeneratePatches_ counts these patches.
 struct NoZeroSumFloatFallback
 {
 #ifdef CSG_DIAGNOSTICS
     NoZeroSumFloatFallback() { g_csgDiagnostics.Reset(); }
     ~NoZeroSumFloatFallback() { CHECK(g_csgDiagnostics.zeroSumFloatFallbacks_.load() == 0); }
+    /// The number of zero sum patches with zero exact area that the booleans removed.
+    static int RemovedPatches() { return g_csgDiagnostics.zeroSumDegeneratePatches_.load(); }
 #endif
 };
 
@@ -1452,6 +1454,10 @@ TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boo
             CHECK(Volume(differenceAB) == Catch::Approx(volumeBox - 0.5 * volumePlate).margin(VOLUME_TOLERANCE));
         }
     }
+#ifdef CSG_DIAGNOSTICS
+    // The patches with zero exact area are removed, not classified with the float query.
+    CHECK(NoZeroSumFloatFallback::RemovedPatches() > 0);
+#endif
 }
 
 TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[boolean][zerosum]")
@@ -1465,4 +1471,8 @@ TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[bool
     const auto unionAB = Run(a, b, CsgOperation::Union);
     CheckClosed(unionAB);
     CHECK(Volume(unionAB) == Catch::Approx(Volume(a) + Volume(b) - 4.0).margin(GridVolumeTolerance(2 * BOX_AREA)));
+#ifdef CSG_DIAGNOSTICS
+    // The patches with zero exact area are removed, not classified with the float query.
+    CHECK(NoZeroSumFloatFallback::RemovedPatches() > 0);
+#endif
 }

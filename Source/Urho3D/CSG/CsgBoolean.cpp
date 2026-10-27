@@ -101,6 +101,26 @@ bool HasExactArea(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoi
     return aby * acz - abz * acy != 0 || abz * acx - abx * acz != 0 || abx * acy - aby * acx != 0;
 }
 
+/// Tell if the loop of an element has three grid points that are not on one line.
+/// The function reads the loop of the element in s.loops_.
+bool HasGridArea(const Corefinement& core, const CsgBooleanScratch& s, int element)
+{
+    const int* loop = s.loops_.data() + s.edgeStart_[element];
+    const int length = s.edgeStart_[element + 1] - s.edgeStart_[element];
+    if (length < 3)
+        return false;
+    const CsgGridPoint& first = PointGrid(core, loop[0]);
+    int second = 1;
+    while (second < length && PointGrid(core, loop[second]) == first)
+        ++second;
+    for (int i = second + 1; i < length; ++i)
+    {
+        if (HasExactArea(first, PointGrid(core, loop[second]), PointGrid(core, loop[i])))
+            return true;
+    }
+    return false;
+}
+
 /// The result of the exact classification of an element.
 enum class ExactResult
 {
@@ -177,6 +197,8 @@ ExactResult ClassifyElementExact(const Corefinement& core, CsgBooleanScratch& s,
 /// the sign of the sum of the votes of all curve edges of the patch.
 /// A patch with no net vote gets a point query on its largest element. If the operands are in the range of the
 /// exact math, the query is the exact ray test of the centroid of a triangle. Else it is the float query.
+/// In the exact range, the query uses an element with an exact area. A patch with no such element has no side.
+/// The patch is removed.
 /// The perturbation of the crossing step keeps the curve off the edges of both operands.
 /// Because of this only regions of split triangles have curve edges.
 void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElements& o, CsgBooleanScratch& s,
@@ -332,17 +354,21 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
     for (int e = 0; e < elementCount; ++e)
         s.patchVotes_[find(e)] += s.votes_[e];
 
-    // A patch with a zero sum gets a point query on its largest element.
+    // A patch with a zero sum gets a point query on one element. In the exact range, an element with an exact area
+    // goes before an element with none. The float area of the polygon decides between equal elements.
     s.patchBest_.assign(elementCount, -1);
     s.patchArea_.assign(elementCount, -1.0);
+    s.patchExact_.assign(elementCount, 0);
     for (int e = 0; e < elementCount; ++e)
     {
         const int root = find(e);
         if (s.patchVotes_[root] != 0)
             continue;
+        const bool exact = !core.outOfRange_ && HasGridArea(core, s, e);
         const double area = PolygonArea(*o.elements_[e].polygon_);
-        if (area > s.patchArea_[root])
+        if ((exact && !s.patchExact_[root]) || (exact == (s.patchExact_[root] != 0) && area > s.patchArea_[root]))
         {
+            s.patchExact_[root] = exact ? 1 : 0;
             s.patchArea_[root] = area;
             s.patchBest_[root] = e;
         }
@@ -367,21 +393,28 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         }
     }
 #endif
+    constexpr int PATCH_REMOVED = -2;
     for (int root = 0; root < elementCount; ++root)
     {
         if (s.patchBest_[root] < 0)
             continue;
         const int best = s.patchBest_[root];
+        if (!core.outOfRange_ && !s.patchExact_[root])
+        {
+            // No element of the patch has an exact area, so no side of the other operand is right for the patch.
+            // The patch is removed. It leaves no kept face. Its curve edges have no net vote and no twin.
+            CSG_DIAG_COUNT(zeroSumDegeneratePatches_);
+            s.patchBest_[root] = PATCH_REMOVED;
+            continue;
+        }
         bool inside = false;
         ExactResult result = ExactResult::OutOfRange;
         if (!core.outOfRange_)
             result = ClassifyElementExact(core, s, best, *o.elements_[best].polygon_, otherMesh, second, inside);
         if (result != ExactResult::Done)
         {
-            // An element with zero exact area, or a polygon that does not match its loop, has no exact test.
-            if (result == ExactResult::ZeroArea)
-                CSG_DIAG_COUNT(zeroSumDegeneratePatches_);
-            else if (result == ExactResult::Mismatch)
+            // A polygon that does not match its loop, or a triangulation with zero exact area, has no exact test.
+            if (result == ExactResult::ZeroArea || result == ExactResult::Mismatch)
                 CSG_DIAG_COUNT(zeroSumFloatFallbacks_);
             bool reliable = true;
             inside = other.ClassifyPoint(PolygonInteriorPoint(*o.elements_[best].polygon_, s.indices_), epsilon, reliable);
@@ -389,7 +422,13 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
         s.patchVotes_[root] = inside ? 1 : -1;
     }
     for (int e = 0; e < elementCount; ++e)
-        o.inside_[e] = s.patchVotes_[find(e)] > 0 ? 1 : 0;
+    {
+        const int root = find(e);
+        if (s.patchBest_[root] == PATCH_REMOVED)
+            o.inside_[e] = CSG_ELEMENT_REMOVED;
+        else
+            o.inside_[e] = s.patchVotes_[root] > 0 ? 1 : 0;
+    }
 }
 
 bool ClassifyGridPoint(const Mesh& other, const CsgGridPoint& p, int second);
@@ -571,7 +610,7 @@ void BuildKeptSet(CsgOperation operation, CsgBooleanScratch& s)
         const CsgOperandElements& o = s.operands_[index];
         for (unsigned i = 0; i < o.elements_.size(); ++i)
         {
-            if (!CsgSolid::Keep(o.inside_[i] != 0, operation, second))
+            if (o.inside_[i] == CSG_ELEMENT_REMOVED || !CsgSolid::Keep(o.inside_[i] != 0, operation, second))
                 continue;
             const CsgBooleanElement& element = o.elements_[i];
             CsgKeptFace& kept = s.kept_.emplace_back();
