@@ -419,6 +419,8 @@ struct SweepStats
     unsigned samples_{};
     unsigned failures_{};
     unsigned unionWrong_{};
+    /// Closed results of A, B and C with a volume that is not the exact volume of the union.
+    unsigned volumeWrong_{};
     std::vector<std::string> list_;
 };
 
@@ -441,6 +443,13 @@ void SweepSample(const Vector3& axis, float angle, SweepStats& stats)
     const bool associative = std::abs(Volume(left) - Volume(right)) <= GridVolumeTolerance(3.0 * BOX_AREA)
         && IsClosed(left) && IsClosed(right);
 
+    // The union of the three boxes has the same volume at all rotations.
+    constexpr double unionVolume = 16.051433;
+    for (const auto* result : {&left, &right})
+    {
+        if (IsClosed(*result) && std::abs(Volume(*result) - unionVolume) > GridVolumeTolerance(3.0 * BOX_AREA))
+            ++stats.volumeWrong_;
+    }
     ++stats.samples_;
     if (unionRight && associative)
         return;
@@ -468,7 +477,9 @@ void RunSweep(float step, unsigned maxFailures)
     }
     for (const std::string& line : stats.list_)
         UNSCOPED_INFO(line);
-    INFO("samples " << stats.samples_ << ", failures " << stats.failures_ << ", wrong unions " << stats.unionWrong_);
+    INFO("samples " << stats.samples_ << ", failures " << stats.failures_ << ", wrong unions " << stats.unionWrong_
+                    << ", closed with a wrong volume " << stats.volumeWrong_);
+    CHECK(stats.volumeWrong_ == 0);
     CHECK(stats.failures_ <= maxFailures);
 }
 
@@ -476,16 +487,18 @@ void RunSweep(float step, unsigned maxFailures)
 
 // The sweep covers rotations of the coplanar contact: 4 axes and 257 angles from 0.3 to 179.5 degrees.
 // The grid step is 2^-10 units. The exact tests snap the corners of rotated boxes one by one.
-// The snapped corners do not stay coplanar. The measured count of failed samples is 22 of 1028.
+// The snapped corners do not stay coplanar. The measured count of failed samples is 9 of 1028.
 // In all of them the union of A and B is right. The next boolean fails because the result has an open edge.
-// The failed samples are about the axis (1, 1, 1) (19), the z axis (2) and the x axis (1).
-// The test fails if more than 48 samples fail. It is a known limit, so the failure is expected.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 34 samples fail: the axis (1, 1, 1) (31), the x axis (2)
+// The failed samples are about the axis (1, 1, 1) (6), the z axis (2) and the x axis (1).
+// A closed result must have the exact volume of the union. The test checks this in all samples.
+// The [!mayfail] tag means that a failed check reports but does not fail the run.
+// The test fails if more than 16 samples fail. It is a known limit, so the failure is expected.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 12 samples fail: the axis (1, 1, 1) (9), the x axis (2)
 // and the z axis (1). The union of A and B is right in all of them. The test also fails in double mode.
 TEST_CASE("known limit: union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep][!mayfail]")
 {
-    RunSweep(0.7f, 48);
+    RunSweep(0.7f, 16);
 }
 
 // A rotation about the axis (1, 1, 1) keeps the corner (1, 1, 1) of A. The corner lies at the middle of an edge of B.

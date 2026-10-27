@@ -611,22 +611,34 @@ public:
             s_.boundaryOut_.Add(from, to);
             s_.boundaryEdges_.Insert(DirectedEdgeKey(from, to));
         }
+        // The planar map is a simple graph. Two triangle pairs can give the same segment. A segment can be
+        // a piece of the boundary. Such a segment adds no edge. Without this, the trace visits fewer edges than counted.
+        s_.curveKeys_.Clear();
+        s_.curveEnds_.clear();
         for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
         {
             const CsgSegment& segment = segments.At(node);
-            s_.curve_.Add(segment.p_, segment.q_);
-            s_.curve_.Add(segment.q_, segment.p_);
+            const int p = segment.p_;
+            const int q = segment.q_;
+            if (p == q || s_.boundaryEdges_.Contains(DirectedEdgeKey(p, q))
+                || s_.boundaryEdges_.Contains(DirectedEdgeKey(q, p)))
+                continue;
+            if (!s_.curveKeys_.Insert(DirectedEdgeKey(ea::min(p, q), ea::max(p, q))))
+                continue;
+            s_.curve_.Add(p, q);
+            s_.curve_.Add(q, p);
+            s_.curveEnds_.push_back(p);
+            s_.curveEnds_.push_back(q);
         }
 
         ChooseProjection(face, triangle);
-        edgeCount_ = static_cast<int>(s_.boundaryEdges_.Size()) + segments.Count(triangle) * 2;
+        edgeCount_ = static_cast<int>(s_.boundaryEdges_.Size() + s_.curveEnds_.size());
         for (int i = 0; i < boundaryCount; ++i)
             Trace(s_.boundary_[i], s_.boundary_[(i + 1) % boundaryCount]);
-        for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+        for (unsigned i = 0; i < s_.curveEnds_.size(); i += 2)
         {
-            const CsgSegment& segment = segments.At(node);
-            Trace(segment.p_, segment.q_);
-            Trace(segment.q_, segment.p_);
+            Trace(s_.curveEnds_[i], s_.curveEnds_[i + 1]);
+            Trace(s_.curveEnds_[i + 1], s_.curveEnds_[i]);
         }
         if (failed_ || static_cast<int>(s_.visited_.Size()) != edgeCount_)
             return false;

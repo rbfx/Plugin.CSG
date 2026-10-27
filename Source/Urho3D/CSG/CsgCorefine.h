@@ -224,6 +224,10 @@ struct CsgSplitScratch
     CsgAdjacency curve_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> boundaryEdges_;
     CsgFlatSet<uint64_t, CsgPackedKeyHash> visited_;
+    /// Undirected keys of the curve edges of one triangle. Each edge of the curve graph is in it once.
+    CsgFlatSet<uint64_t, CsgPackedKeyHash> curveKeys_;
+    /// Ends of the curve edges of one triangle, two entries for each edge.
+    ea::vector<int> curveEnds_;
     /// All the loops of one triangle. The lists below hold loop indices.
     CsgLoopPool pool_;
     ea::vector<int> cycles_;
