@@ -340,6 +340,53 @@ CsgGridPoint CsgExact::RoundCrossing(const CsgGridPoint& low, const CsgGridPoint
 namespace
 {
 
+/// Sign of x - g for x = low + (high - low) * n / d with d > 0, in exact arithmetic.
+int SignAgainstGrid(CsgGridInt low, CsgGridInt high, CsgGridInt g, const CsgExactVolume& n, const CsgExactVolume& d)
+{
+    const int64_t span = static_cast<int64_t>(high) - low;
+    const int64_t offset = static_cast<int64_t>(g) - low;
+    if (span == 0)
+        return offset == 0 ? 0 : (offset > 0 ? -1 : 1);
+    const int numeratorSign = n.Sign();
+    if (offset == 0)
+        return (span > 0 ? 1 : -1) * numeratorSign;
+    if (numeratorSign == 0)
+        return offset > 0 ? -1 : 1;
+    // d * (x - g) = span * n - offset * d
+    const CsgReal spanReal = static_cast<CsgReal>(span);
+    const CsgReal offsetReal = static_cast<CsgReal>(offset);
+    return CsgExpansionProductDifferenceSign(1, &spanReal, n.count_, n.terms_, 1, &offsetReal, d.count_, d.terms_);
+}
+
+} // namespace
+
+void CsgExact::CrossingCell(const CsgGridPoint& low, const CsgGridPoint& high, const CsgExactVolume& lowVolume,
+    const CsgExactVolume& difference, const CsgGridPoint& rounded, CsgGridPoint& lower, CsgGridPoint& upper)
+{
+    const int differenceSign = difference.Sign();
+    URHO3D_ASSERT(differenceSign != 0);
+    const bool flip = differenceSign < 0;
+    const CsgExactVolume n = flip ? Negate(lowVolume) : lowVolume;
+    const CsgExactVolume d = flip ? Negate(difference) : difference;
+    lower = rounded;
+    upper = rounded;
+    // The rounding is floor(x + 1/2), so x is in [rounded - 1/2, rounded + 1/2).
+    const auto cell = [&](CsgGridInt CsgGridPoint::*axis)
+    {
+        const int sign = SignAgainstGrid(low.*axis, high.*axis, rounded.*axis, n, d);
+        if (sign < 0)
+            --(lower.*axis);
+        else if (sign > 0)
+            ++(upper.*axis);
+    };
+    cell(&CsgGridPoint::x_);
+    cell(&CsgGridPoint::y_);
+    cell(&CsgGridPoint::z_);
+}
+
+namespace
+{
+
 /// Sign of a compressed expansion of a difference or a sum.
 int ExpansionSign(const CsgExactMinor& value)
 {

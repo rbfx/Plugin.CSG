@@ -769,3 +769,335 @@ TEST_CASE("Corefine handles crossings of one edge that round to one grid point",
         CHECK(segment.p_ != segment.q_);
     CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
 }
+
+namespace
+{
+
+/// A point given in grid units. The position is grid / scale. This is exact, so the grid point is the same
+/// in the float mode and in the double mode.
+struct GridInts
+{
+    int x_;
+    int y_;
+    int z_;
+};
+
+Vector3 GridPosition(const GridInts& p)
+{
+    const float step = static_cast<float>(1.0 / CsgGridScale);
+    return Vector3(static_cast<float>(p.x_) * step, static_cast<float>(p.y_) * step, static_cast<float>(p.z_) * step);
+}
+
+CsgGridPoint GridPointOf(const GridInts& p)
+{
+    CsgGridPoint result;
+    result.x_ = p.x_;
+    result.y_ = p.y_;
+    result.z_ = p.z_;
+    return result;
+}
+
+CsgPolygon GridPolygon(unsigned shared, std::initializer_list<GridInts> corners)
+{
+    ea::vector<ModelVertex> vertices;
+    for (const GridInts& corner : corners)
+    {
+        ModelVertex vertex;
+        vertex.SetPosition(GridPosition(corner));
+        vertices.push_back(vertex);
+    }
+    return CsgPolygon(ea::move(vertices), shared);
+}
+
+/// A prism with a triangle above and below. The top triangle is counterclockwise seen from above.
+ea::vector<CsgPolygon> MakeGridPrism(const GridInts (&top)[3], int zTop, int zBottom, unsigned shared)
+{
+    GridInts up[3];
+    GridInts down[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        up[i] = GridInts{top[i].x_, top[i].y_, zTop};
+        down[i] = GridInts{top[i].x_, top[i].y_, zBottom};
+    }
+    ea::vector<CsgPolygon> polygons;
+    polygons.push_back(GridPolygon(shared, {up[0], up[1], up[2]}));
+    polygons.push_back(GridPolygon(shared, {down[0], down[2], down[1]}));
+    for (int i = 0; i < 3; ++i)
+    {
+        const int j = (i + 1) % 3;
+        polygons.push_back(GridPolygon(shared, {down[i], down[j], up[j], up[i]}));
+    }
+    return polygons;
+}
+
+/// A pyramid with the apex above its base. The base is counterclockwise seen from above.
+ea::vector<CsgPolygon> MakeGridPyramid(const ea::vector<GridInts>& base, const GridInts& apex, unsigned shared)
+{
+    ea::vector<CsgPolygon> polygons;
+    for (unsigned i = 0; i < base.size(); ++i)
+        polygons.push_back(GridPolygon(shared, {base[i], base[(i + 1) % base.size()], apex}));
+    ea::vector<ModelVertex> vertices;
+    for (unsigned i = base.size(); i > 0; --i)
+    {
+        ModelVertex vertex;
+        vertex.SetPosition(GridPosition(base[i - 1]));
+        vertices.push_back(vertex);
+    }
+    polygons.push_back(CsgPolygon(ea::move(vertices), shared));
+    return polygons;
+}
+
+/// Find the crossing of the edge between two grid points of the second operand. The first operand is crossed.
+const Crossing* FindEdgeCrossing(const Corefinement& core, const GridInts& end0, const GridInts& end1)
+{
+    const CsgGridPoint p0 = GridPointOf(end0);
+    const CsgGridPoint p1 = GridPointOf(end1);
+    for (const Crossing& crossing : core.crossings_)
+    {
+        if (!crossing.key_.edgeInSecond_)
+            continue;
+        const CsgGridPoint& low = core.b_.grid_[crossing.key_.low_];
+        const CsgGridPoint& high = core.b_.grid_[crossing.key_.high_];
+        if ((low == p0 && high == p1) || (low == p1 && high == p0))
+            return &crossing;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("Mesh finds the triangles of each edge", "[corefine][adjacency]")
+{
+    // A box is a closed surface. Each edge has two different triangles that both have the edge.
+    const CsgSolid box(MakeBoxPolygons(Vector3::ZERO, Vector3(1.0f, 1.0f, 1.0f), 1));
+    Mesh mesh(box, false, 0);
+    CHECK(!mesh.HasEdgeTriangles());
+    mesh.BuildEdgeTriangles();
+    CHECK(mesh.HasEdgeTriangles());
+    // A second call changes nothing.
+    mesh.BuildEdgeTriangles();
+    const int triangleCount = static_cast<int>(mesh.triangleFace_.size());
+    REQUIRE(triangleCount == 12);
+    // 12 box edges and 6 diagonals.
+    CHECK(mesh.edgeTriangles_.Size() == 18);
+    const auto hasEdge = [&](int triangle, int u, int v)
+    {
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int a = mesh.triangleIds_[triangle * 3 + corner];
+            const int b = mesh.triangleIds_[triangle * 3 + (corner + 1) % 3];
+            if ((a == u && b == v) || (a == v && b == u))
+                return true;
+        }
+        return false;
+    };
+    for (int triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int u = mesh.triangleIds_[triangle * 3 + corner];
+            const int v = mesh.triangleIds_[triangle * 3 + (corner + 1) % 3];
+            const CsgEdgeTriangles* pair = mesh.FindEdgeTriangles(u, v);
+            REQUIRE(pair != nullptr);
+            CHECK(mesh.FindEdgeTriangles(v, u) == pair);
+            REQUIRE(pair->first_ >= 0);
+            REQUIRE(pair->second_ >= 0);
+            CHECK(pair->first_ != pair->second_);
+            CHECK(hasEdge(pair->first_, u, v));
+            CHECK(hasEdge(pair->second_, u, v));
+            CHECK((pair->first_ == triangle || pair->second_ == triangle));
+        }
+    }
+    // Two ids that share no edge have no entry.
+    CHECK(mesh.FindEdgeTriangles(0, 0) == nullptr);
+}
+
+TEST_CASE("Mesh finds one triangle on a boundary edge", "[corefine][adjacency]")
+{
+    // An open quad has two triangles. The diagonal has both. The four sides of the quad have one each.
+    ea::vector<CsgPolygon> polygons;
+    polygons.push_back(GridPolygon(1, {{0, 0, 0}, {100, 0, 0}, {100, 100, 0}, {0, 100, 0}}));
+    const CsgSolid quad(polygons, 0.0f);
+    Mesh mesh(quad, false, 0);
+    mesh.BuildEdgeTriangles();
+    REQUIRE(mesh.triangleFace_.size() == 2);
+    CHECK(mesh.edgeTriangles_.Size() == 5);
+    int shared = 0;
+    int boundary = 0;
+    for (const auto& entry : mesh.edgeTriangles_)
+    {
+        REQUIRE(entry.value_.first_ >= 0);
+        if (entry.value_.second_ >= 0)
+            ++shared;
+        else
+            ++boundary;
+    }
+    CHECK(shared == 1);
+    CHECK(boundary == 4);
+}
+
+TEST_CASE("Crossing validity: a rounded crossing outside its triangle is invalid", "[corefine][validity]")
+{
+    // A is a prism. Its top triangle has the slanted side 3x + 5y = 3000 (grid units) at the height 100.
+    // B is a needle. Its edge from (448, 328, 0) to (450, 336, 300) crosses the top at (448.67, 330.67, 100).
+    // The exact point has 3x + 5y = 2999.33, so it is inside. The rounded point (449, 331) has 3002. It is
+    // 0.34 grid steps outside of the side.
+    const GridInts top[3] = {{0, 0, 0}, {1000, 0, 0}, {0, 600, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts low{448, 328, 0};
+    const GridInts apex{450, 336, 300};
+    const CsgSolid b(MakeGridPyramid({low, {430, 330, 0}, {450, 310, 0}}, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    core.a_.BuildEdgeTriangles();
+    core.b_.BuildEdgeTriangles();
+    const Crossing* crossing = FindEdgeCrossing(core, low, apex);
+    REQUIRE(crossing != nullptr);
+
+    // The rounded crossing is the outside point.
+    const CsgGridPoint rounded = GridPointOf({449, 331, 100});
+    REQUIRE(crossing->grid_ == rounded);
+    CHECK(3 * rounded.x_ + 5 * rounded.y_ == 3002);
+    CHECK(!core.CrossingIsValid(*crossing, rounded));
+    CHECK(!core.CrossingIsValid(*crossing, rounded, scratch));
+    CHECK((core.CrossingInvalidRules(*crossing, rounded, scratch) & CsgRuleInside) != 0);
+
+    // The corners of the grid cell of the exact point, in the plane of the top. The nearest corner that is inside
+    // of the side is valid.
+    const double exactX = 448.0 + 2.0 / 3.0;
+    const double exactY = 328.0 + 8.0 / 3.0;
+    double bestDistance = 1e30;
+    CsgGridPoint best;
+    for (int dx = 0; dx < 2; ++dx)
+    {
+        for (int dy = 0; dy < 2; ++dy)
+        {
+            const int x = 448 + dx;
+            const int y = 330 + dy;
+            const double distance = (x - exactX) * (x - exactX) + (y - exactY) * (y - exactY);
+            if (3 * x + 5 * y < 3000 && distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = GridPointOf({x, y, 100});
+            }
+        }
+    }
+    REQUIRE(bestDistance < 1e29);
+    CHECK(core.CrossingInvalidRules(*crossing, best, scratch) == 0);
+    CHECK(core.CrossingIsValid(*crossing, best, scratch));
+    CHECK(core.CrossingIsValid(*crossing, best));
+    // A point on the side is not strictly inside.
+    CHECK((core.CrossingInvalidRules(*crossing, GridPointOf({500, 300, 100}), scratch) & CsgRuleInside) != 0);
+    // The corner of the top triangle is not allowed.
+    CHECK((core.CrossingInvalidRules(*crossing, GridPointOf({0, 0, 100}), scratch) & CsgRuleCorner) != 0);
+}
+
+TEST_CASE("Crossing validity: a valid crossing, and a move that crosses segments", "[corefine][validity]")
+{
+    // B is a square pyramid with the apex above the top of A. Its four edges to the base cross the top at the four
+    // corners of a square, and the four sides of the pyramid make the four segments of the square.
+    const GridInts top[3] = {{0, 0, 0}, {1000, 0, 0}, {0, 600, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts apex{200, 150, 300};
+    const ea::vector<GridInts> base = {{170, 120, 0}, {230, 120, 0}, {230, 180, 0}, {170, 180, 0}};
+    const CsgSolid b(MakeGridPyramid(base, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    core.a_.BuildEdgeTriangles();
+    core.b_.BuildEdgeTriangles();
+    REQUIRE(core.crossings_.size() == 4);
+    CHECK(core.segmentsA_.TotalCount() == 4);
+
+    // The crossing of the edge from base[0] to the apex is at (180, 130, 100). It is valid.
+    const Crossing* crossing = FindEdgeCrossing(core, base[0], apex);
+    REQUIRE(crossing != nullptr);
+    REQUIRE(crossing->grid_ == GridPointOf({180, 130, 100}));
+    CHECK(core.CrossingInvalidRules(*crossing, crossing->grid_, scratch) == 0);
+    CHECK(core.CrossingIsValid(*crossing, crossing->grid_));
+    // A near point is valid too.
+    CHECK(core.CrossingIsValid(*crossing, GridPointOf({181, 130, 100}), scratch));
+    CHECK(core.CrossingIsValid(*crossing, GridPointOf({180, 131, 100}), scratch));
+    // The counter agrees: all four crossings are valid.
+    int perRule[4];
+    CHECK(core.CountInvalidCrossings(scratch, perRule) == 0);
+
+    // Move the crossing to the right of the square, at (230, 150). The two segments at the crossing
+    // then cross the opposite side of the square at x = 220.
+    const unsigned rules = core.CrossingInvalidRules(*crossing, GridPointOf({230, 150, 100}), scratch);
+    CHECK((rules & CsgRuleSegments) != 0);
+    CHECK(!core.CrossingIsValid(*crossing, GridPointOf({230, 150, 100}), scratch));
+    // The point is inside the top triangle, so the other rules hold.
+    CHECK((rules & CsgRuleInside) == 0);
+    CHECK((rules & CsgRuleCorner) == 0);
+    // The move to a point beyond the square along the edge of the pyramid does not cross a segment.
+    CHECK(core.CrossingIsValid(*crossing, GridPointOf({179, 129, 100}), scratch));
+}
+
+TEST_CASE("Constrain crossings: a crossing that rounds outside its triangle moves inside", "[corefine][constrain]")
+{
+    // The same needle and prism as in the validity test. The rounded crossing (449, 331, 100) is outside the side
+    // 3x + 5y = 3000 of the top triangle. The exact crossing is (448.67, 330.67, 100).
+    const GridInts top[3] = {{0, 0, 0}, {1000, 0, 0}, {0, 600, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts low{448, 328, 0};
+    const GridInts apex{450, 336, 300};
+    const CsgSolid b(MakeGridPyramid({low, {430, 330, 0}, {450, 310, 0}}, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    const Crossing* crossing = FindEdgeCrossing(core, low, apex);
+    REQUIRE(crossing != nullptr);
+    REQUIRE(crossing->grid_ == GridPointOf({449, 331, 100}));
+
+    // The cell of the exact crossing: x in [448, 449], y in [330, 331], z exactly 100.
+    CsgGridPoint lower;
+    CsgGridPoint upper;
+    const CsgGridPoint lowEnd = core.b_.grid_[crossing->key_.low_];
+    const CsgGridPoint highEnd = core.b_.grid_[crossing->key_.high_];
+    CsgExact::CrossingCell(lowEnd, highEnd, crossing->lowVolume_, crossing->difference_, crossing->grid_, lower, upper);
+    CHECK(lower == GridPointOf({448, 330, 100}));
+    CHECK(upper == GridPointOf({449, 331, 100}));
+
+    g_csgDiagnostics.Reset();
+    core.ConstrainCrossings(scratch);
+    CHECK(g_csgDiagnostics.constrainedCrossings_.load() == 1);
+    CHECK(g_csgDiagnostics.unconstrainableCrossings_.load() == 0);
+
+    // The first flipped corner is valid: the x axis flips and the point (448, 331, 100) has 3x + 5y = 2999.
+    CHECK(crossing->grid_ == GridPointOf({448, 331, 100}));
+    CHECK(crossing->position_ == crossing->grid_.ToPosition());
+    CHECK(core.CrossingIsValid(*crossing, crossing->grid_, scratch));
+    int perRule[4];
+    CHECK(core.CountInvalidCrossings(scratch, perRule, false) == 0);
+}
+
+TEST_CASE("Constrain crossings: a valid crossing does not move", "[corefine][constrain]")
+{
+    // The square pyramid of the validity test: all four crossings are valid.
+    const GridInts top[3] = {{0, 0, 0}, {1000, 0, 0}, {0, 600, 0}};
+    const CsgSolid a(MakeGridPrism(top, 100, -100, 1), 0.0f);
+    const GridInts apex{200, 150, 300};
+    const ea::vector<GridInts> base = {{170, 120, 0}, {230, 120, 0}, {230, 180, 0}, {170, 180, 0}};
+    const CsgSolid b(MakeGridPyramid(base, apex, 2), 0.0f);
+
+    Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch);
+    REQUIRE(core.crossings_.size() == 4);
+    const ea::vector<Crossing> before = core.crossings_;
+
+    g_csgDiagnostics.Reset();
+    core.ConstrainCrossings(scratch);
+    CHECK(g_csgDiagnostics.constrainedCrossings_.load() == 0);
+    CHECK(g_csgDiagnostics.unconstrainableCrossings_.load() == 0);
+    for (size_t i = 0; i < before.size(); ++i)
+    {
+        CHECK(core.crossings_[i].grid_ == before[i].grid_);
+        CHECK(core.crossings_[i].position_ == before[i].position_);
+    }
+}

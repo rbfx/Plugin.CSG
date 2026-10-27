@@ -12,6 +12,9 @@
 #include <EASTL/sort.h>
 #include <EASTL/unique_ptr.h>
 
+#ifdef CSG_CHECK_SUSPECTS
+#include <cstdio>
+#endif
 #include <cmath>
 #include <limits>
 
@@ -199,6 +202,42 @@ bool Mesh::IsCollapsed(int triangle) const
     if (a == b || b == c || c == a)
         return true;
     return !invalid_.empty() && (invalid_[a] || invalid_[b] || invalid_[c]);
+}
+
+void Mesh::BuildEdgeTriangles(const ea::vector<uint8_t>* vertexFilter)
+{
+    if (edgeTrianglesBuilt_)
+        return;
+    edgeTrianglesBuilt_ = true;
+    const int triangleCount = static_cast<int>(triangleFace_.size());
+    if (!vertexFilter)
+        edgeTriangles_.Reserve(static_cast<size_t>(triangleCount) * 3 / 2 + 3);
+    for (int triangle = 0; triangle < triangleCount; ++triangle)
+    {
+        // A collapsed triangle has no area. It has no crossing and no part in a triangle map.
+        if (IsCollapsed(triangle))
+            continue;
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int u = triangleIds_[triangle * 3 + corner];
+            const int v = triangleIds_[triangle * 3 + (corner + 1) % 3];
+            if (vertexFilter && ((*vertexFilter)[u] == 0 || (*vertexFilter)[v] == 0))
+                continue;
+            bool existed = false;
+            CsgEdgeTriangles& entry = edgeTriangles_.FindOrAdd(
+                CsgUndirectedKey(static_cast<unsigned>(ea::min(u, v)), static_cast<unsigned>(ea::max(u, v))), existed);
+            if (entry.first_ < 0)
+                entry.first_ = triangle;
+            else if (entry.second_ < 0)
+                entry.second_ = triangle;
+        }
+    }
+}
+
+const CsgEdgeTriangles* Mesh::FindEdgeTriangles(int a, int b) const
+{
+    return edgeTriangles_.Find(
+        CsgUndirectedKey(static_cast<unsigned>(ea::min(a, b)), static_cast<unsigned>(ea::max(a, b))));
 }
 
 Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
@@ -490,6 +529,21 @@ int Corefinement::CrossingId(
     return id;
 }
 
+int Corefinement::CompareRecords(int x, int y) const
+{
+    const Crossing& cx = Record(x);
+    const Crossing& cy = Record(y);
+    // Doubles separate all but nearly coincident crossings. Those are ordered exactly.
+    if (std::fabs(cx.t_ - cy.t_) > EDGE_ORDER_TOLERANCE)
+        return cx.t_ < cy.t_ ? -1 : 1;
+    const int order = CompareOnEdge(cx, cy);
+    if (order != 0)
+        return order;
+    const int idX = RecordId(x);
+    const int idY = RecordId(y);
+    return idX < idY ? -1 : (idX > idY ? 1 : 0);
+}
+
 void Corefinement::EdgeCrossings(
     const Mesh& mesh, int from, int to, CsgScratch& scratch, ea::vector<int>& output) const
 {
@@ -502,21 +556,7 @@ void Corefinement::EdgeCrossings(
     for (int node = list->head_; node >= 0; node = edgeNodes_[node].next_)
         output.push_back(edgeNodes_[node].record_);
 
-    SortIds(output, scratch.merge_,
-        [this](int x, int y)
-        {
-            const Crossing& cx = Record(x);
-            const Crossing& cy = Record(y);
-            // Doubles separate all but nearly coincident crossings. Those are ordered exactly.
-            if (std::fabs(cx.t_ - cy.t_) > EDGE_ORDER_TOLERANCE)
-                return cx.t_ < cy.t_ ? -1 : 1;
-            const int order = CompareOnEdge(cx, cy);
-            if (order != 0)
-                return order;
-            const int idX = RecordId(x);
-            const int idY = RecordId(y);
-            return idX < idY ? -1 : (idX > idY ? 1 : 0);
-        });
+    SortIds(output, scratch.merge_, [this](int x, int y) { return CompareRecords(x, y); });
     // Crossings of one edge that round to one grid point have one id. They are next to each other.
     int kept = 0;
     for (int i = 0; i < static_cast<int>(output.size()); ++i)
@@ -611,6 +651,45 @@ float ClampFloat(float value, float min, float max)
     if (value > max)
         return max;
     return value;
+}
+
+/// Set the projection from the exact normal of the grid corners of a triangle. Return false if the normal is zero.
+/// Then the outputs stay unchanged.
+bool SetTriangleProjection(const Mesh& mesh, int triangle, int& dropAxis, bool& flip)
+{
+    const CsgNormal normal = CsgExact::Normal(mesh.grid_[mesh.triangleIds_[triangle * 3]],
+        mesh.grid_[mesh.triangleIds_[triangle * 3 + 1]], mesh.grid_[mesh.triangleIds_[triangle * 3 + 2]]);
+    const CsgExactMinor* components[3] = {&normal.x_, &normal.y_, &normal.z_};
+    int best = 0;
+    for (int axis = 1; axis < 3; ++axis)
+    {
+        if (CompareMagnitude(*components[axis], *components[best]) > 0)
+            best = axis;
+    }
+    const int sign = components[best]->Sign();
+    if (sign == 0)
+        return false;
+    dropAxis = best;
+    flip = sign < 0;
+    return true;
+}
+
+/// Choose the projection of the triangle to a coordinate plane. Drop the axis of the largest exact normal
+/// component. Flip the projection if that component is negative, so the face order is counterclockwise.
+/// If the corners of the triangle are collinear on the grid, use the first triangle of the face with a normal
+/// that is not zero. If all the triangles of the face are collinear on the grid, drop the z axis.
+void ChooseTriangleProjection(const Mesh& mesh, int face, int triangle, int& dropAxis, bool& flip)
+{
+    dropAxis = 2;
+    flip = false;
+    if (SetTriangleProjection(mesh, triangle, dropAxis, flip))
+        return;
+    const auto starts = mesh.solid_.GetTriangleStart();
+    for (unsigned other = starts[face]; other < starts[face + 1]; ++other)
+    {
+        if (static_cast<int>(other) != triangle && SetTriangleProjection(mesh, static_cast<int>(other), dropAxis, flip))
+            return;
+    }
 }
 
 /// Divides one triangle along its curve segments into regions of global ids.
@@ -798,43 +877,8 @@ private:
         return dropAxis_ == 0 ? p.x_ : (dropAxis_ == 1 ? p.y_ : p.z_);
     }
 
-    /// Choose the projection of the triangle to a coordinate plane. Drop the axis of the largest exact normal
-    /// component. Flip the projection if that component is negative, so the face order is counterclockwise.
-    /// If the corners of the triangle are collinear on the grid, use the first triangle of the face with a normal
-    /// that is not zero. If all the triangles of the face are collinear on the grid, drop the z axis.
-    void ChooseProjection(int face, int triangle)
-    {
-        dropAxis_ = 2;
-        flip_ = false;
-        if (ProjectionOf(triangle))
-            return;
-        const auto starts = mesh_.solid_.GetTriangleStart();
-        for (unsigned other = starts[face]; other < starts[face + 1]; ++other)
-        {
-            if (static_cast<int>(other) != triangle && ProjectionOf(static_cast<int>(other)))
-                return;
-        }
-    }
-
-    /// Set the projection from the exact normal of the grid corners of a triangle. Return false if the normal is zero.
-    bool ProjectionOf(int triangle)
-    {
-        const CsgNormal normal = CsgExact::Normal(mesh_.grid_[mesh_.triangleIds_[triangle * 3]],
-            mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 1]], mesh_.grid_[mesh_.triangleIds_[triangle * 3 + 2]]);
-        const CsgExactMinor* components[3] = {&normal.x_, &normal.y_, &normal.z_};
-        int best = 0;
-        for (int axis = 1; axis < 3; ++axis)
-        {
-            if (CompareMagnitude(*components[axis], *components[best]) > 0)
-                best = axis;
-        }
-        const int sign = components[best]->Sign();
-        if (sign == 0)
-            return false;
-        dropAxis_ = best;
-        flip_ = sign < 0;
-        return true;
-    }
+    /// Choose the projection of the triangle to a coordinate plane, see ChooseTriangleProjection.
+    void ChooseProjection(int face, int triangle) { ChooseTriangleProjection(mesh_, face, triangle, dropAxis_, flip_); }
 
     /// Direction from one id to another in the plane. It is never zero.
     /// Two ids at one point of the plane get a symbolic direction: the projection is moved by a tiny tilt.
@@ -1930,8 +1974,684 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
     return true;
 }
 
+namespace
+{
+
+/// Whether the point p is strictly between the ends of the segment ab: on its line and not at an end.
+bool StrictlyInside(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& p)
+{
+    return CsgExact::Orient2(a, b, p) == 0
+        && CsgExact::Dot2(CsgExact::Difference(p, a), CsgExact::Difference(p, b)) < 0;
+}
+
+/// Whether the segments ab and cd cross. They cross if they have a point in common that is not an end of both,
+/// or if they overlap along a line. A common end point is not a crossing. A segment with equal ends never crosses.
+/// If strict is false, only a proper crossing counts: the segments cross at a point inside both of them.
+bool SegmentsConflict(const CsgGridPoint2& a, const CsgGridPoint2& b, const CsgGridPoint2& c, const CsgGridPoint2& d,
+    bool strict)
+{
+    if (a == b || c == d)
+        return false;
+    const int o1 = CsgExact::Orient2(a, b, c);
+    const int o2 = CsgExact::Orient2(a, b, d);
+    if (o1 * o2 > 0)
+        return false;
+    const int o3 = CsgExact::Orient2(c, d, a);
+    const int o4 = CsgExact::Orient2(c, d, b);
+    if (o3 * o4 > 0)
+        return false;
+    if (o1 * o2 < 0 && o3 * o4 < 0)
+        return true;
+    if (!strict)
+        return false;
+    if ((o1 == 0 && StrictlyInside(a, b, c)) || (o2 == 0 && StrictlyInside(a, b, d))
+        || (o3 == 0 && StrictlyInside(c, d, a)) || (o4 == 0 && StrictlyInside(c, d, b)))
+        return true;
+    // Equal collinear segments overlap, and no end point is strictly inside the other segment.
+    return (a == c && b == d) || (a == d && b == c);
+}
+
+/// Same as ChooseTriangleProjection. It uses the cache of the validity scratch if the cache is on.
+void CachedTriangleProjection(
+    const Mesh& mesh, int triangle, CsgScratch& scratch, int& dropAxis, bool& flip)
+{
+    ea::vector<uint8_t>& cache = scratch.validity_.projection_[mesh.isSecond_ ? 1 : 0];
+    if (cache.empty())
+    {
+        ChooseTriangleProjection(mesh, mesh.triangleFace_[triangle], triangle, dropAxis, flip);
+        return;
+    }
+    uint8_t& entry = cache[triangle];
+    if (entry == 0)
+    {
+        ChooseTriangleProjection(mesh, mesh.triangleFace_[triangle], triangle, dropAxis, flip);
+        entry = static_cast<uint8_t>(1 + 2 * dropAxis + (flip ? 1 : 0));
+        return;
+    }
+    dropAxis = (entry - 1) / 2;
+    flip = ((entry - 1) & 1) != 0;
+}
+
+/// Fill the items of the map of the triangle in the validity scratch: the chain edges of the boundary first, then the
+/// curve segments. The function returns false if the map has no area.
+bool BuildMapItems(const Corefinement& core, const Mesh& mesh, int triangle, CsgScratch& scratch)
+{
+    CsgValidityScratch& v = scratch.validity_;
+    v.chain_.clear();
+    const auto addChainId = [&v](int id)
+    {
+        if (v.chain_.empty() || v.chain_.back() != id)
+            v.chain_.push_back(id);
+    };
+    for (int i = 0; i < 3; ++i)
+    {
+        const int from = mesh.triangleIds_[triangle * 3 + i];
+        const int to = mesh.triangleIds_[triangle * 3 + (i + 1) % 3];
+        addChainId(core.Global(mesh, from));
+        core.EdgeCrossings(mesh, from, to, scratch, v.edgePoints_);
+        for (const int id : v.edgePoints_)
+            addChainId(id);
+    }
+    while (v.chain_.size() > 1 && v.chain_.back() == v.chain_.front())
+        v.chain_.pop_back();
+    const int chainCount = static_cast<int>(v.chain_.size());
+    if (chainCount < 3)
+        return false;
+
+    v.items_.clear();
+    for (int i = 0; i < chainCount; ++i)
+    {
+        v.items_.push_back(v.chain_[i]);
+        v.items_.push_back(v.chain_[(i + 1) % chainCount]);
+    }
+    const CsgSegmentLists& segments = mesh.isSecond_ ? core.segmentsB_ : core.segmentsA_;
+    for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
+    {
+        v.items_.push_back(segments.At(node).p_);
+        v.items_.push_back(segments.At(node).q_);
+    }
+    return true;
+}
+
+/// Whether the items m and k of the map have a conflict. See SegmentsConflict.
+bool ItemsConflict(const ea::vector<int>& items, const ea::vector<CsgGridPoint2>& points, int m, int k, bool strict)
+{
+    const int a = items[m * 2];
+    const int b = items[m * 2 + 1];
+    const int c = items[k * 2];
+    const int d = items[k * 2 + 1];
+    // The same item twice, such as a segment on a chain edge, is not a crossing.
+    if (k == m || (a == c && b == d) || (a == d && b == c))
+        return false;
+    // Two items with a common end point have no proper crossing.
+    if (!strict && (a == c || a == d || b == c || b == d))
+        return false;
+    const CsgGridPoint2 pa = points[m * 2];
+    const CsgGridPoint2 pb = points[m * 2 + 1];
+    const CsgGridPoint2 pc = points[k * 2];
+    const CsgGridPoint2 pd = points[k * 2 + 1];
+    // Boxes that do not touch cannot have a common point.
+    if (ea::max(pc.u_, pd.u_) < ea::min(pa.u_, pb.u_) || ea::min(pc.u_, pd.u_) > ea::max(pa.u_, pb.u_)
+        || ea::max(pc.v_, pd.v_) < ea::min(pa.v_, pb.v_) || ea::min(pc.v_, pd.v_) > ea::max(pa.v_, pb.v_))
+        return false;
+    return SegmentsConflict(pa, pb, pc, pd, strict);
+}
+
+/// Prepare the cache of the map of a triangle for one crossing: the items, the projected end points and the items
+/// at the crossing. The function returns false if the map has no area.
+bool PrepareMapCache(const Corefinement& core, const Mesh& mesh, int triangle, int crossingId, CsgScratch& scratch,
+    CsgMapCache& cache)
+{
+    if (!BuildMapItems(core, mesh, triangle, scratch))
+    {
+        cache.items_.clear();
+        return false;
+    }
+    const CsgValidityScratch& v = scratch.validity_;
+    CachedTriangleProjection(mesh, triangle, scratch, cache.dropAxis_, cache.flip_);
+    cache.items_ = v.items_;
+    const int count = static_cast<int>(cache.items_.size());
+    cache.points_.resize(count);
+    cache.ends_.clear();
+    cache.incident_.clear();
+    for (int i = 0; i < count; ++i)
+    {
+        const int id = cache.items_[i];
+        cache.points_[i] = CsgExact::Project(PointGrid(core, id), cache.dropAxis_, cache.flip_);
+        if (id == crossingId)
+        {
+            cache.ends_.push_back(i);
+            if (cache.incident_.empty() || cache.incident_.back() != i / 2)
+                cache.incident_.push_back(i / 2);
+        }
+    }
+    return true;
+}
+
+/// Whether the items at the crossing in a prepared map cross another item when the crossing is at the candidate.
+bool CachedMapHasConflict(CsgMapCache& cache, const CsgGridPoint& candidate)
+{
+    if (cache.incident_.empty())
+        return false;
+    const CsgGridPoint2 moved = CsgExact::Project(candidate, cache.dropAxis_, cache.flip_);
+    for (const int end : cache.ends_)
+        cache.points_[end] = moved;
+    const int count = static_cast<int>(cache.items_.size() / 2);
+    for (const int m : cache.incident_)
+    {
+        for (int k = 0; k < count; ++k)
+        {
+            if (ItemsConflict(cache.items_, cache.points_, m, k, false))
+                return true;
+        }
+    }
+    return false;
+}
+
+/// Flag each crossing at an end of two items of a prepared map that conflict (not strict). Only the pairs with an
+/// item at the moved crossing can change. See MarkMapConflicts.
+void MarkCacheConflicts(const CsgMapCache& cache, int base, ea::vector<uint8_t>& suspects)
+{
+    const int count = static_cast<int>(cache.items_.size() / 2);
+    for (const int m : cache.incident_)
+    {
+        for (int k = 0; k < count; ++k)
+        {
+            if (!ItemsConflict(cache.items_, cache.points_, m, k, false))
+                continue;
+            for (const int item : {m, k})
+            {
+                for (int end = 0; end < 2; ++end)
+                {
+                    const int id = cache.items_[item * 2 + end];
+                    if (id >= base)
+                        suspects[id - base] = 1;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a segment or a chain edge at the crossing crosses another item of the map of the triangle.
+/// The map has the boundary chain of the triangle and the curve segments on it. The crossing moves to the candidate.
+bool MapHasConflict(const Corefinement& core, const Mesh& mesh, int triangle, int dropAxis, bool flip, int crossingId,
+    const CsgGridPoint& candidate, CsgScratch& scratch, bool strict)
+{
+    if (!BuildMapItems(core, mesh, triangle, scratch))
+        return false;
+    CsgValidityScratch& v = scratch.validity_;
+    const int count = static_cast<int>(v.items_.size() / 2);
+    // The projected end points of the items. The crossing takes the candidate position.
+    v.points_.resize(count * 2);
+    for (int i = 0; i < count * 2; ++i)
+    {
+        const int id = v.items_[i];
+        v.points_[i] = CsgExact::Project(id == crossingId ? candidate : PointGrid(core, id), dropAxis, flip);
+    }
+    for (int m = 0; m < count; ++m)
+    {
+        if (v.items_[m * 2] != crossingId && v.items_[m * 2 + 1] != crossingId)
+            continue;
+        for (int k = 0; k < count; ++k)
+        {
+            if (ItemsConflict(v.items_, v.points_, m, k, strict))
+                return true;
+        }
+    }
+    return false;
+}
+
+/// Flag each crossing at an end of two items of the map that conflict (not strict) at the current positions.
+/// The flag is 1 at the index of the crossing. A crossing without a flag has no segment rule failure in this map.
+void MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, CsgScratch& scratch,
+    ea::vector<uint8_t>& suspects)
+{
+    if (!BuildMapItems(core, mesh, triangle, scratch))
+        return;
+    CsgValidityScratch& v = scratch.validity_;
+    int dropAxis = 0;
+    bool flip = false;
+    CachedTriangleProjection(mesh, triangle, scratch, dropAxis, flip);
+    const int count = static_cast<int>(v.items_.size() / 2);
+    v.points_.resize(count * 2);
+    for (int i = 0; i < count * 2; ++i)
+        v.points_[i] = CsgExact::Project(PointGrid(core, v.items_[i]), dropAxis, flip);
+    const int base = core.CrossingBase();
+    const auto mark = [&](int item)
+    {
+        for (int end = 0; end < 2; ++end)
+        {
+            const int id = v.items_[item * 2 + end];
+            if (id >= base)
+                suspects[id - base] = 1;
+        }
+    };
+    for (int m = 0; m < count; ++m)
+    {
+        for (int k = m + 1; k < count; ++k)
+        {
+            if (ItemsConflict(v.items_, v.points_, m, k, false))
+            {
+                mark(m);
+                mark(k);
+            }
+        }
+    }
+}
+
+} // namespace
+
+unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
+    bool stopAtFirst, bool strict, bool segmentRule) const
+{
+    URHO3D_ASSERT(a_.HasEdgeTriangles() && b_.HasEdgeTriangles(), "CsgCorefine: build the edge triangles first");
+    // The test supports the crossings of crossings_. An alias record (MergeCrossingsOnGrid) is not supported.
+    const ptrdiff_t index = &record - crossings_.data();
+    URHO3D_ASSERT(index >= 0 && index < static_cast<ptrdiff_t>(crossings_.size()), "CsgCorefine: unknown crossing");
+    const int crossingId = CrossingBase() + static_cast<int>(index);
+    const CsgCrossingKey& key = record.key_;
+    const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+    const Mesh& other = key.edgeInSecond_ ? a_ : b_;
+
+    // The maps of three triangles hold the crossing: the crossed triangle, then the triangles on the edge.
+    struct View
+    {
+        const Mesh* mesh_;
+        int triangle_;
+        int dropAxis_;
+        bool flip_;
+    };
+    View views[3];
+    int viewCount = 0;
+    const auto addView = [&](const Mesh& mesh, int triangle)
+    {
+        View& view = views[viewCount++];
+        view.mesh_ = &mesh;
+        view.triangle_ = triangle;
+        CachedTriangleProjection(mesh, triangle, scratch, view.dropAxis_, view.flip_);
+    };
+    addView(other, key.triangle_);
+    if (const CsgEdgeTriangles* sides = edges.FindEdgeTriangles(key.low_, key.high_))
+    {
+        if (sides->first_ >= 0)
+            addView(edges, sides->first_);
+        if (sides->second_ >= 0)
+            addView(edges, sides->second_);
+    }
+
+    unsigned rules = 0;
+    const auto finished = [&]() { return stopAtFirst && rules != 0; };
+
+    // Rule d: the position is not a corner of the three triangles.
+    for (int i = 0; i < viewCount && strict; ++i)
+    {
+        const View& view = views[i];
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            if (view.mesh_->grid_[view.mesh_->triangleIds_[view.triangle_ * 3 + corner]] == candidate)
+                rules |= CsgRuleCorner;
+        }
+    }
+    if (finished())
+        return rules;
+
+    // Rule a: the position is strictly inside the projected crossed triangle.
+    {
+        const View& view = views[0];
+        const auto corner = [&](int i)
+        {
+            return CsgExact::Project(view.mesh_->grid_[view.mesh_->triangleIds_[view.triangle_ * 3 + i]],
+                view.dropAxis_, view.flip_);
+        };
+        const CsgGridPoint2 p0 = corner(0);
+        const CsgGridPoint2 p1 = corner(1);
+        const CsgGridPoint2 p2 = corner(2);
+        const CsgGridPoint2 q = CsgExact::Project(candidate, view.dropAxis_, view.flip_);
+        const int side = CsgExact::Orient2(p0, p1, p2);
+        // A position on the boundary counts as inside if strict is false.
+        const int q0 = CsgExact::Orient2(p0, p1, q);
+        const int q1 = CsgExact::Orient2(p1, p2, q);
+        const int q2 = CsgExact::Orient2(p2, p0, q);
+        const bool outside = strict ? (q0 != side || q1 != side || q2 != side)
+                                    : (q0 == -side || q1 == -side || q2 == -side);
+        if (side == 0 || outside)
+            rules |= CsgRuleInside;
+    }
+    if (finished())
+        return rules;
+
+    // Rule b: the position keeps the strict order along the edge, against the neighbors in the order of the sort.
+    if (viewCount > 1)
+    {
+        const EdgeList* list = edgeCrossings_[key.edgeInSecond_ ? 1 : 0].Find(
+            CsgDirectedKey(static_cast<unsigned>(key.low_), static_cast<unsigned>(key.high_)));
+        int before = -1;
+        int after = -1;
+        for (int node = list ? list->head_ : -1; node >= 0; node = edgeNodes_[node].next_)
+        {
+            const int item = edgeNodes_[node].record_;
+            if (item == static_cast<int>(index))
+                continue;
+            if (CompareRecords(item, static_cast<int>(index)) < 0)
+            {
+                if (before < 0 || CompareRecords(item, before) > 0)
+                    before = item;
+            }
+            else if (after < 0 || CompareRecords(item, after) < 0)
+                after = item;
+        }
+        const CsgGridPoint& beforeGrid = before >= 0 ? PointGrid(*this, RecordId(before)) : edges.grid_[key.low_];
+        const CsgGridPoint& afterGrid = after >= 0 ? PointGrid(*this, RecordId(after)) : edges.grid_[key.high_];
+        for (int i = 1; i < viewCount; ++i)
+        {
+            const View& view = views[i];
+            const auto project = [&](const CsgGridPoint& p) { return CsgExact::Project(p, view.dropAxis_, view.flip_); };
+            const CsgGridPoint2 direction =
+                CsgExact::Difference(project(edges.grid_[key.high_]), project(edges.grid_[key.low_]));
+            const CsgGridPoint2 q = project(candidate);
+            // The order may keep equal positions if strict is false. Only a reversed order breaks the rule.
+            const int limit = strict ? 1 : 0;
+            if (CsgExact::Dot2(CsgExact::Difference(q, project(beforeGrid)), direction) < limit
+                || CsgExact::Dot2(CsgExact::Difference(project(afterGrid), q), direction) < limit)
+                rules |= CsgRuleEdgeOrder;
+        }
+    }
+    if (finished())
+        return rules;
+
+    // Rule c: the items at the crossing cross no other item in the three maps.
+    for (int i = 0; i < viewCount && segmentRule; ++i)
+    {
+        const View& view = views[i];
+        if (MapHasConflict(*this, *view.mesh_, view.triangle_, view.dropAxis_, view.flip_, crossingId, candidate, scratch, strict))
+        {
+            rules |= CsgRuleSegments;
+            break;
+        }
+    }
+    return rules;
+}
+
+bool Corefinement::CrossingIsValid(const Crossing& record, const CsgGridPoint& candidate) const
+{
+    CsgScratch scratch;
+    return CrossingIsValid(record, candidate, scratch);
+}
+
+int Corefinement::CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], bool strict) const
+{
+    for (int& count : perRule)
+        count = 0;
+    int invalid = 0;
+    for (const Crossing& crossing : crossings_)
+    {
+        const unsigned rules = CrossingInvalidRules(crossing, crossing.grid_, scratch, false, strict);
+        if (rules == 0)
+            continue;
+        ++invalid;
+        for (int bit = 0; bit < 4; ++bit)
+            perRule[bit] += (rules >> bit) & 1;
+    }
+    return invalid;
+}
+
+void Corefinement::ConstrainCrossings(CsgScratch& scratch)
+{
+    if constexpr (!ConstrainCrossingsOnGrid || MergeCrossingsOnGrid)
+        return;
+    if (crossings_.empty())
+        return;
+    // The edge triangles are needed for the ends of the crossing edges only.
+    {
+        ea::vector<uint8_t> filterA(a_.VertexCount(), 0);
+        ea::vector<uint8_t> filterB(b_.VertexCount(), 0);
+        for (const Crossing& crossing : crossings_)
+        {
+            ea::vector<uint8_t>& filter = crossing.key_.edgeInSecond_ ? filterB : filterA;
+            filter[crossing.key_.low_] = 1;
+            filter[crossing.key_.high_] = 1;
+        }
+        a_.BuildEdgeTriangles(&filterA);
+        b_.BuildEdgeTriangles(&filterB);
+    }
+
+    // 0: not a fold, 1: moved to a valid corner, 2: no valid corner, the nearest rounding stays.
+    ea::vector<uint8_t> state;
+    // Masks of the axes that a candidate flips: none, one axis, two axes, three axes.
+    static constexpr int FlipMasks[8] = {0, 1, 2, 4, 3, 5, 6, 7};
+
+    CsgValidityScratch& cache = scratch.validity_;
+    cache.projection_[0].assign(a_.triangleIds_.size() / 3, 0);
+    cache.projection_[1].assign(b_.triangleIds_.size() / 3, 0);
+
+    // A crossing is a suspect if it is at an end of two conflicting items of a map. Only a suspect gets the segment rule.
+    // A cheap pass finds the conflicts once for each map. A move of a crossing marks the conflicts of its maps again.
+    ea::vector<uint8_t> suspects(crossings_.size(), 0);
+    const auto forEachMap = [&](const Crossing& record, const auto& function)
+    {
+        const CsgCrossingKey& key = record.key_;
+        const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+        const Mesh& other = key.edgeInSecond_ ? a_ : b_;
+        function(other, key.triangle_);
+        if (const CsgEdgeTriangles* sides = edges.FindEdgeTriangles(key.low_, key.high_))
+        {
+            if (sides->first_ >= 0)
+                function(edges, sides->first_);
+            if (sides->second_ >= 0)
+                function(edges, sides->second_);
+        }
+    };
+    // A crossing that is exactly on the grid never moves. Only the maps of the other crossings need the cheap pass.
+    ea::vector<uint8_t> inexact(crossings_.size(), 0);
+    for (size_t index = 0; index < crossings_.size(); ++index)
+    {
+        const Crossing& crossing = crossings_[index];
+        if (crossing.difference_.Sign() == 0)
+            continue;
+        const CsgCrossingKey& key = crossing.key_;
+        const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+        const CsgGridPoint& low = edges.grid_[key.low_];
+        const CsgGridPoint& high = edges.grid_[key.high_];
+        // The double estimate of the exact point decides a crossing that is far from its grid point.
+        const double dx = low.x_ + crossing.t_ * (static_cast<double>(high.x_) - low.x_) - crossing.grid_.x_;
+        const double dy = low.y_ + crossing.t_ * (static_cast<double>(high.y_) - low.y_) - crossing.grid_.y_;
+        const double dz = low.z_ + crossing.t_ * (static_cast<double>(high.z_) - low.z_) - crossing.grid_.z_;
+        if (std::abs(dx) > 1e-3 || std::abs(dy) > 1e-3 || std::abs(dz) > 1e-3)
+        {
+            inexact[index] = 1;
+            continue;
+        }
+        CsgGridPoint lower;
+        CsgGridPoint upper;
+        CsgExact::CrossingCell(low, high, crossing.lowVolume_, crossing.difference_, crossing.grid_, lower, upper);
+        inexact[index] = lower == upper ? 0 : 1;
+    }
+    {
+        ea::vector<uint8_t> doneA(a_.triangleIds_.size() / 3, 0);
+        ea::vector<uint8_t> doneB(b_.triangleIds_.size() / 3, 0);
+        for (size_t index = 0; index < crossings_.size(); ++index)
+        {
+            if (!inexact[index])
+                continue;
+            forEachMap(crossings_[index],
+                [&](const Mesh& mesh, int triangle)
+                {
+                    uint8_t& done = (mesh.isSecond_ ? doneB : doneA)[triangle];
+                    if (done)
+                        return;
+                    done = 1;
+                    MarkMapConflicts(*this, mesh, triangle, scratch, suspects);
+                });
+        }
+    }
+
+    for (size_t index = 0; index < crossings_.size(); ++index)
+    {
+        Crossing& crossing = crossings_[index];
+        const CsgCrossingKey& key = crossing.key_;
+        const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+        const Mesh& other = key.edgeInSecond_ ? a_ : b_;
+        const CsgGridPoint& lowGrid = edges.grid_[key.low_];
+        const CsgGridPoint& highGrid = edges.grid_[key.high_];
+        if (!inexact[index])
+            continue;
+        const CsgGridPoint nearest = crossing.grid_;
+        const int crossingId = CrossingBase() + static_cast<int>(index);
+        // Prepare the maps of the crossing. The tests of the segment rule use them for each candidate.
+        int mapCount = 0;
+        bool prepared = false;
+        const auto prepare = [&]()
+        {
+            prepared = true;
+            mapCount = 0;
+            forEachMap(crossing,
+                [&](const Mesh& mesh, int triangle)
+                {
+                    if (PrepareMapCache(*this, mesh, triangle, crossingId, scratch, cache.maps_[mapCount]))
+                        ++mapCount;
+                });
+        };
+        const auto segmentsConflict = [&](const CsgGridPoint& candidate)
+        {
+            if (!prepared)
+                prepare();
+            for (int i = 0; i < mapCount; ++i)
+            {
+                if (CachedMapHasConflict(cache.maps_[i], candidate))
+                    return true;
+            }
+            return false;
+        };
+        // The cheap rules decide for a crossing that is no suspect.
+        if (CrossingInvalidRules(crossing, nearest, scratch, true, false, false) == 0
+            && (!suspects[index] || !segmentsConflict(nearest)))
+        {
+#ifdef CSG_CHECK_SUSPECTS
+            // Debug check: the full test must not find a fold in a crossing that is no suspect.
+            if (!suspects[index] && CrossingInvalidRules(crossing, nearest, scratch, true, false) != 0)
+                fprintf(stderr, "SUSPECT MISS crossing %d\n", static_cast<int>(index));
+#endif
+            continue;
+        }
+        // A crossing exactly on the grid has no other corner to move to.
+        CsgGridPoint lower;
+        CsgGridPoint upper;
+        CsgExact::CrossingCell(lowGrid, highGrid, crossing.lowVolume_, crossing.difference_, nearest, lower, upper);
+        if (lower == upper)
+            continue;
+        if (state.empty())
+            state.resize(crossings_.size(), 0);
+
+        // The grid points of the three triangles of the maps and of the ends of the edge.
+        CsgGridPoint corners[11];
+        int cornerCount = 0;
+        corners[cornerCount++] = lowGrid;
+        corners[cornerCount++] = highGrid;
+        for (int corner = 0; corner < 3; ++corner)
+            corners[cornerCount++] = other.grid_[other.triangleIds_[key.triangle_ * 3 + corner]];
+        if (const CsgEdgeTriangles* sides = edges.FindEdgeTriangles(key.low_, key.high_))
+        {
+            for (const int triangle : {sides->first_, sides->second_})
+            {
+                if (triangle < 0)
+                    continue;
+                for (int corner = 0; corner < 3 && cornerCount < 11; ++corner)
+                    corners[cornerCount++] = edges.grid_[edges.triangleIds_[triangle * 3 + corner]];
+            }
+        }
+
+        const CsgGridInt nearestAxis[3] = {nearest.x_, nearest.y_, nearest.z_};
+        const CsgGridInt otherAxis[3] = {nearest.x_ == lower.x_ ? upper.x_ : lower.x_,
+            nearest.y_ == lower.y_ ? upper.y_ : lower.y_, nearest.z_ == lower.z_ ? upper.z_ : lower.z_};
+        bool found = false;
+        for (const int mask : FlipMasks)
+        {
+            if (mask == 0)
+                continue;
+            CsgGridInt axes[3];
+            bool usable = true;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const bool flipAxis = ((mask >> axis) & 1) != 0;
+                axes[axis] = flipAxis ? otherAxis[axis] : nearestAxis[axis];
+                usable = usable && (!flipAxis || otherAxis[axis] != nearestAxis[axis]);
+            }
+            if (!usable)
+                continue;
+            CsgGridPoint candidate;
+            candidate.x_ = axes[0];
+            candidate.y_ = axes[1];
+            candidate.z_ = axes[2];
+            if (!InGridRange(candidate))
+                continue;
+            bool atCorner = false;
+            for (int k = 0; k < cornerCount; ++k)
+                atCorner = atCorner || corners[k] == candidate;
+            if (atCorner)
+                continue;
+            if (CrossingInvalidRules(crossing, candidate, scratch, true, false, false) != 0
+                || segmentsConflict(candidate))
+                continue;
+            crossing.grid_ = candidate;
+            if (!outOfRange_)
+                crossing.position_ = candidate.ToPosition();
+            found = true;
+            break;
+        }
+        if (found)
+        {
+            // The caches hold the winner as the position of the crossing.
+            for (int i = 0; i < mapCount; ++i)
+                MarkCacheConflicts(cache.maps_[i], CrossingBase(), suspects);
+        }
+        state[index] = found ? 1 : 2;
+    }
+
+    cache.projection_[0].clear();
+    cache.projection_[1].clear();
+
+#ifdef CSG_DIAGNOSTICS
+    // A later move can fix a crossing that found no corner. Then it is no fold and it does not count.
+    for (size_t index = 0; index < state.size(); ++index)
+    {
+        if (state[index] == 2
+            && CrossingInvalidRules(crossings_[index], crossings_[index].grid_, scratch, true, false) == 0)
+            state[index] = 0;
+    }
+    int moved = 0;
+    int stuck = 0;
+    for (const uint8_t value : state)
+    {
+        moved += value == 1 ? 1 : 0;
+        stuck += value == 2 ? 1 : 0;
+    }
+    g_csgDiagnostics.constrainedCrossings_.fetch_add(moved, std::memory_order_relaxed);
+    g_csgDiagnostics.unconstrainableCrossings_.fetch_add(stuck, std::memory_order_relaxed);
+#endif
+}
+
 void Corefinement::SplitFaces(CsgScratch& scratch)
 {
+#ifdef CSG_DIAGNOSTICS
+    if (g_csgDiagnostics.countInvalid_.load(std::memory_order_relaxed))
+    {
+        a_.BuildEdgeTriangles();
+        b_.BuildEdgeTriangles();
+        int perRule[4];
+        const int invalid = CountInvalidCrossings(scratch, perRule);
+        g_csgDiagnostics.checkedCrossings_.fetch_add(static_cast<int>(crossings_.size()), std::memory_order_relaxed);
+        g_csgDiagnostics.invalidCrossings_.fetch_add(invalid, std::memory_order_relaxed);
+        g_csgDiagnostics.invalidInside_.fetch_add(perRule[0], std::memory_order_relaxed);
+        g_csgDiagnostics.invalidOrder_.fetch_add(perRule[1], std::memory_order_relaxed);
+        g_csgDiagnostics.invalidSegments_.fetch_add(perRule[2], std::memory_order_relaxed);
+        g_csgDiagnostics.invalidCorner_.fetch_add(perRule[3], std::memory_order_relaxed);
+        const int fold = CountInvalidCrossings(scratch, perRule, false);
+        g_csgDiagnostics.foldCrossings_.fetch_add(fold, std::memory_order_relaxed);
+        g_csgDiagnostics.foldInside_.fetch_add(perRule[0], std::memory_order_relaxed);
+        g_csgDiagnostics.foldOrder_.fetch_add(perRule[1], std::memory_order_relaxed);
+        g_csgDiagnostics.foldSegments_.fetch_add(perRule[2], std::memory_order_relaxed);
+    }
+#endif
     SplitOperand(a_, segmentsA_, scratch, splitA_);
     SplitOperand(b_, segmentsB_, scratch, splitB_);
 }
@@ -2072,6 +2792,7 @@ CsgSplitTestResult CsgCorefineSplitForTest(const CsgSolid& a, const CsgSolid& b)
     Corefinement core(a, b, CSG_DEFAULT_EPSILON);
     CsgScratch scratch;
     core.CollectCrossings(scratch);
+    core.ConstrainCrossings(scratch);
     core.SplitFaces(scratch);
 
     result.outOfRange_ = core.outOfRange_;

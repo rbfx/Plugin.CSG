@@ -374,6 +374,13 @@ public:
     /// The denominator is n . (low - high) = difference. Both come from Dot, as in the crossing data.
     static CsgGridPoint RoundCrossing(const CsgGridPoint& low, const CsgGridPoint& high,
         const CsgExactVolume& lowVolume, const CsgExactVolume& difference);
+
+    /// Give the cell of the exact crossing x of the edge (low, high) with a plane: lower <= x <= upper on each axis.
+    /// The rounded point must be the result of RoundCrossing for the same data. An axis has upper - lower equal to 1,
+    /// or equal to 0 if x is exactly on the grid. The rounded point is on both ends of the cell.
+    /// The tests use exact signs and no floating point. The difference must not be zero.
+    static void CrossingCell(const CsgGridPoint& low, const CsgGridPoint& high, const CsgExactVolume& lowVolume,
+        const CsgExactVolume& difference, const CsgGridPoint& rounded, CsgGridPoint& lower, CsgGridPoint& upper);
 };
 
 } // namespace Urho3D

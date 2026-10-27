@@ -523,6 +523,22 @@ struct DiagCounters
     int mergedCrossings_{};
     int lobeSplits_{};
     int lobeHoleKept_{};
+    /// Crossings with a rounded position that breaks a rule of the validity test, and all crossings.
+    int invalid_{};
+    int checked_{};
+    /// The invalid crossings by rule: inside, order on the edge, segments, corner.
+    int invalidInside_{};
+    int invalidOrder_{};
+    int invalidSegments_{};
+    int invalidCorner_{};
+    /// The crossings that fold (the non strict form of the rules), and the folds by rule.
+    int fold_{};
+    int foldInside_{};
+    int foldOrder_{};
+    int foldSegments_{};
+    /// The crossings that ConstrainCrossings moved, and the ones for which it found no valid corner.
+    int constrained_{};
+    int unconstrainable_{};
 
     static DiagCounters Read()
     {
@@ -537,6 +553,18 @@ struct DiagCounters
         c.mergedCrossings_ = d.mergedCrossings_.load();
         c.lobeSplits_ = d.lobeSplits_.load();
         c.lobeHoleKept_ = d.lobeHoleKept_.load();
+        c.invalid_ = d.invalidCrossings_.load();
+        c.checked_ = d.checkedCrossings_.load();
+        c.invalidInside_ = d.invalidInside_.load();
+        c.invalidOrder_ = d.invalidOrder_.load();
+        c.invalidSegments_ = d.invalidSegments_.load();
+        c.invalidCorner_ = d.invalidCorner_.load();
+        c.fold_ = d.foldCrossings_.load();
+        c.foldInside_ = d.foldInside_.load();
+        c.foldOrder_ = d.foldOrder_.load();
+        c.foldSegments_ = d.foldSegments_.load();
+        c.constrained_ = d.constrainedCrossings_.load();
+        c.unconstrainable_ = d.unconstrainableCrossings_.load();
         return c;
     }
 
@@ -551,6 +579,18 @@ struct DiagCounters
         mergedCrossings_ += o.mergedCrossings_;
         lobeSplits_ += o.lobeSplits_;
         lobeHoleKept_ += o.lobeHoleKept_;
+        invalid_ += o.invalid_;
+        checked_ += o.checked_;
+        invalidInside_ += o.invalidInside_;
+        invalidOrder_ += o.invalidOrder_;
+        invalidSegments_ += o.invalidSegments_;
+        invalidCorner_ += o.invalidCorner_;
+        fold_ += o.fold_;
+        foldInside_ += o.foldInside_;
+        foldOrder_ += o.foldOrder_;
+        foldSegments_ += o.foldSegments_;
+        constrained_ += o.constrained_;
+        unconstrainable_ += o.unconstrainable_;
     }
 };
 
@@ -639,17 +679,35 @@ const char* AxisName(const Vector3& axis)
 // mix: patches with votes of both signs. zero: zero-sum patches that use the point query. patch: all patches.
 // merge: crossings merged to an existing grid point. lobe: cycles split in two lobes. hole: cycles with a lobe of
 // negative area that stay whole. split: Split triangles.
+// inv: for each of the four steps ab/left/bc/right, the number of crossings with a rounded position that breaks a rule
+// of Corefinement::CrossingInvalidRules (strict form). fold: the same count for the non strict form, which finds a
+// fold only. prod: the fold count added over the producer steps of the failure (ab for an open ab or left, bc for an
+// open bc or right). rules: the fold crossings of the producer steps by the broken rule, inside/order/segments.
+// A crossing can break more than one rule. con and unc: for each of the four steps, the crossings that
+// Corefinement::ConstrainCrossings moved, and the folds for which it found no valid corner of the grid cell. The fold
+// and inv columns count after that pass.
 TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
 {
+    g_csgDiagnostics.countInvalid_.store(true);
     const Vector3 axes[] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD, Vector3::ONE};
     DiagCounters passing;
     int passingSteps = 0;
     int samples = 0;
     int failures = 0;
+    // Steps by name: ab, left, bc, right. The sums are for the passing samples and for the failed samples.
+    DiagCounters passingByStep[4];
+    DiagCounters failedByStep[4];
+    DiagCounters failedProducer;
+    int failedProducerSteps = 0;
+    int passingProducerSteps = 0;
+    int passingFoldSteps = 0;
+    int passingFoldSamples = 0;
+    DiagCounters passingProducer;
     std::ostringstream table;
-    char line[256];
-    std::snprintf(line, sizeof(line), "%-5s %7s %-30s %5s %4s %4s %5s %5s %5s %6s %5s %5s\n", "axis", "angle",
-        "open steps (solid/quant/exact)", "fail", "fit", "mix", "zero", "patch", "merge", "split", "lobe", "hole");
+    char line[400];
+    std::snprintf(line, sizeof(line), "%-5s %7s %-30s %5s %4s %4s %5s %5s %5s %6s %5s %5s %-13s %-13s %5s %-9s %-13s %-13s\n", "axis",
+        "angle", "open steps (solid/quant/exact)", "fail", "fit", "mix", "zero", "patch", "merge", "split", "lobe",
+        "hole", "inv ab/l/bc/r", "fold ab/l/bc/r", "prod", "rules i/o/s", "con ab/l/bc/r", "unc ab/l/bc/r");
     table << line;
     for (const Vector3& axis : axes)
     {
@@ -675,36 +733,79 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
             const bool associative = std::abs(Volume(left) - Volume(right)) <= GridVolumeTolerance(3.0 * BOX_AREA)
                 && IsClosed(left) && IsClosed(right);
             ++samples;
+            const DiagCounters* steps4[4] = {&cAb, &cLeft, &cBc, &cRight};
             if (unionRight && associative)
             {
-                for (const DiagCounters* step : {&cAb, &cLeft, &cBc, &cRight})
+                for (const DiagCounters* step : steps4)
                     passing.Add(*step);
+                for (int k = 0; k < 4; ++k)
+                    passingByStep[k].Add(*steps4[k]);
+                passingProducer.Add(cAb);
+                passingProducer.Add(cBc);
+                passingFoldSteps += (cAb.fold_ > 0 ? 1 : 0) + (cBc.fold_ > 0 ? 1 : 0);
+                passingFoldSamples += (cAb.fold_ > 0 || cBc.fold_ > 0) ? 1 : 0;
+                passingProducerSteps += 2;
                 passingSteps += 4;
                 continue;
             }
             ++failures;
+            for (int k = 0; k < 4; ++k)
+                failedByStep[k].Add(*steps4[k]);
 
             DiagCounters sum;
+            DiagCounters producer;
+            bool producerAb = false;
+            bool producerBc = false;
             std::string steps;
             const auto note = [&](const char* name, const SolidPtr& result, const DiagCounters& counters)
             {
                 if (IsClosed(result) && !result->HasOpenEdges())
-                    return;
+                    return false;
                 sum.Add(counters);
                 steps += std::string(steps.empty() ? "" : " ") + name + "(" + std::to_string(result->OpenEdgeCount())
                     + "/" + std::to_string(CountQuantizedOpen(result)) + "/" + std::to_string(CountExactOpen(result))
                     + ")";
+                return true;
             };
-            note("ab", ab, cAb);
-            note("left", left, cLeft);
-            note("bc", bc, cBc);
-            note("right", right, cRight);
+            const bool openAb = note("ab", ab, cAb);
+            const bool openLeft = note("left", left, cLeft);
+            const bool openBc = note("bc", bc, cBc);
+            const bool openRight = note("right", right, cRight);
+            producerAb = openAb || openLeft;
+            producerBc = openBc || openRight;
+            if (producerAb)
+            {
+                producer.Add(cAb);
+                failedProducer.Add(cAb);
+                ++failedProducerSteps;
+            }
+            if (producerBc)
+            {
+                producer.Add(cBc);
+                failedProducer.Add(cBc);
+                ++failedProducerSteps;
+            }
             if (steps.empty())
                 steps = "volume only";
-            std::snprintf(line, sizeof(line), "%-5s %7.1f %-30s %5d %4d %4d %5d %5d %5d %6d %5d %5d\n", AxisName(axis),
-                angle, steps.c_str(), sum.failedSplits_, sum.failedRegionFits_, sum.mixedVotePatches_,
-                sum.zeroSumPatches_, sum.patches_, sum.mergedCrossings_, sum.splitTriangles_, sum.lobeSplits_,
-                sum.lobeHoleKept_);
+            char invalid[48];
+            std::snprintf(invalid, sizeof(invalid), "%d/%d/%d/%d", cAb.invalid_, cLeft.invalid_, cBc.invalid_,
+                cRight.invalid_);
+            char fold[48];
+            std::snprintf(fold, sizeof(fold), "%d/%d/%d/%d", cAb.fold_, cLeft.fold_, cBc.fold_, cRight.fold_);
+            char rules[48];
+            std::snprintf(rules, sizeof(rules), "%d/%d/%d", producer.foldInside_, producer.foldOrder_,
+                producer.foldSegments_);
+            char constrained[48];
+            std::snprintf(constrained, sizeof(constrained), "%d/%d/%d/%d", cAb.constrained_, cLeft.constrained_,
+                cBc.constrained_, cRight.constrained_);
+            char unconstrainable[48];
+            std::snprintf(unconstrainable, sizeof(unconstrainable), "%d/%d/%d/%d", cAb.unconstrainable_,
+                cLeft.unconstrainable_, cBc.unconstrainable_, cRight.unconstrainable_);
+            std::snprintf(line, sizeof(line),
+                "%-5s %7.1f %-30s %5d %4d %4d %5d %5d %5d %6d %5d %5d %-13s %-13s %5d %-9s %-13s %-13s\n", AxisName(axis), angle,
+                steps.c_str(), sum.failedSplits_, sum.failedRegionFits_, sum.mixedVotePatches_, sum.zeroSumPatches_,
+                sum.patches_, sum.mergedCrossings_, sum.splitTriangles_, sum.lobeSplits_, sum.lobeHoleKept_, invalid,
+                fold, producer.fold_, rules, constrained, unconstrainable);
             table << line;
         }
     }
@@ -717,7 +818,39 @@ TEST_CASE("Diagnose the failed samples of the sweep", "[.diagnose]")
         passing.zeroSumPatches_ / n, passing.patches_ / n, passing.mergedCrossings_ / n, passing.splitTriangles_ / n,
         passing.lobeSplits_ / n, passing.lobeHoleKept_ / n);
     table << line;
+
+    // Rounded crossings that break a rule, by step: the mean for each step of the passing samples and of the failed
+    // samples. strict: all rules. fold (i/o/s): the non strict form, by rule inside/order/segments.
+    const int passingSamples = samples - failures;
+    const char* stepNames[4] = {"ab", "left", "bc", "right"};
+    for (int k = 0; k < 4; ++k)
+    {
+        const double np = std::max(1, passingSamples);
+        const double nf = std::max(1, failures);
+        std::snprintf(line, sizeof(line),
+            "step %-5s: passing: crossings %.1f strict %.3f fold %.3f (i/o/s %.3f/%.3f/%.3f); failed: crossings %.1f "
+            "strict %.3f fold %.3f (i/o/s %.3f/%.3f/%.3f)\n",
+            stepNames[k], passingByStep[k].checked_ / np, passingByStep[k].invalid_ / np, passingByStep[k].fold_ / np,
+            passingByStep[k].foldInside_ / np, passingByStep[k].foldOrder_ / np, passingByStep[k].foldSegments_ / np,
+            failedByStep[k].checked_ / nf, failedByStep[k].invalid_ / nf, failedByStep[k].fold_ / nf,
+            failedByStep[k].foldInside_ / nf, failedByStep[k].foldOrder_ / nf, failedByStep[k].foldSegments_ / nf);
+        table << line;
+    }
+    {
+        const double np = std::max(1, passingProducerSteps);
+        const double nf = std::max(1, failedProducerSteps);
+        std::snprintf(line, sizeof(line),
+            "producer steps (ab, bc): fold mean %.3f over %d steps of passing samples, %.3f over %d producer steps of "
+            "failed samples\n",
+            passingProducer.fold_ / np, passingProducerSteps, failedProducer.fold_ / nf, failedProducerSteps);
+        table << line;
+        std::snprintf(line, sizeof(line),
+            "passing samples with a fold in a producer step: %d of %d samples (%d of %d producer steps)\n",
+            passingFoldSamples, passingSamples, passingFoldSteps, passingProducerSteps);
+        table << line;
+    }
     std::printf("%s", table.str().c_str());
+    g_csgDiagnostics.countInvalid_.store(false);
     SUCCEED();
 }
 

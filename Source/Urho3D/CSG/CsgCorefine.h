@@ -34,6 +34,9 @@ constexpr float CSG_EXACT_COORDINATE_LIMIT = CsgGridCoordinateLimit;
 /// The open results have coplanar regions that stay twice, because the two operands split them differently.
 constexpr bool MergeCrossingsOnGrid = false;
 
+/// Whether Corefinement::ConstrainCrossings moves a rounded crossing that folds the planar map of a triangle.
+constexpr bool ConstrainCrossingsOnGrid = true;
+
 /// Crossing of an edge of one operand through a triangle of the other.
 struct Crossing
 {
@@ -60,6 +63,14 @@ struct Crossing
 /// The order is exact. The displacement of the second operand breaks the ties. Return -1, 0 or 1.
 int CompareOnEdge(const Crossing& x, const Crossing& y);
 
+/// The triangles on one undirected edge of a mesh. A closed surface has two triangles on an edge.
+/// A boundary edge has one. An entry that is not used is -1.
+struct CsgEdgeTriangles
+{
+    int first_{-1};
+    int second_{-1};
+};
+
 /// Welded view of an operand: ids for each triangle corner and grid positions of the ids.
 /// The grid points are the ones that the solid stores. The mesh does not snap a position.
 class Mesh
@@ -71,6 +82,16 @@ public:
     int VertexCount() const { return static_cast<int>(grid_.size()); }
     /// Return true if the triangle has no area because corners weld together, or if a corner is not finite.
     bool IsCollapsed(int triangle) const;
+
+    /// Fill edgeTriangles_ in one pass over triangleIds_. The mesh does not build it, because only the check of the
+    /// crossings uses it. A second call does nothing. An edge with a repeated welded id is not in the map.
+    /// If an edge has more than two triangles, the map keeps the first two.
+    /// If vertexFilter is not null, it has one flag for each welded id, and the map keeps only the edges with
+    /// two flagged ends. This is faster for a mesh that has few crossings.
+    void BuildEdgeTriangles(const ea::vector<uint8_t>* vertexFilter = nullptr);
+    bool HasEdgeTriangles() const { return edgeTrianglesBuilt_; }
+    /// Return the triangles on the undirected edge between two welded ids, or null. Call BuildEdgeTriangles first.
+    const CsgEdgeTriangles* FindEdgeTriangles(int a, int b) const;
 
     const CsgSolid& solid_;
     /// Welded loops of the solid. The spans stay valid as long as the solid lives.
@@ -87,6 +108,9 @@ public:
     ea::vector<uint8_t> invalid_;
     /// True if a position is not finite or has a coordinate outside the range of the exact math.
     bool outOfRange_{};
+    /// Triangles of each undirected edge, by CsgUndirectedKey of the welded ids. BuildEdgeTriangles fills it.
+    CsgFlatMap<uint64_t, CsgEdgeTriangles, CsgPackedKeyHash> edgeTriangles_;
+    bool edgeTrianglesBuilt_{};
 };
 
 /// One curve segment in a pool list. The ends are global crossing ids.
@@ -384,6 +408,37 @@ struct CsgBooleanScratch
     ea::vector<unsigned> indices_;
 };
 
+/// A triangle map prepared for the tests of one crossing, see ConstrainCrossings.
+struct CsgMapCache
+{
+    /// Items of the map: two global ids for each item.
+    ea::vector<int> items_;
+    /// The projected end points of the items, two for each item.
+    ea::vector<CsgGridPoint2> points_;
+    /// The indices in points_ of the crossing, and the indices of the items that have the crossing as an end.
+    ea::vector<int> ends_;
+    ea::vector<int> incident_;
+    int dropAxis_{0};
+    bool flip_{false};
+};
+
+/// Reusable vectors of the validity test of a crossing.
+struct CsgValidityScratch
+{
+    /// Boundary chain of one triangle map, as global ids.
+    ea::vector<int> chain_;
+    ea::vector<int> edgePoints_;
+    /// Items of one triangle map: the chain edges first, then the curve segments. Two global ids for each item.
+    ea::vector<int> items_;
+    /// The projected end points of the items, two for each item.
+    ea::vector<CsgGridPoint2> points_;
+    /// Cache of the projection of each triangle of the two meshes: 0 is unknown, else 1 + 2 * dropAxis + flip.
+    /// ConstrainCrossings fills it. It is empty in the other uses.
+    ea::vector<uint8_t> projection_[2];
+    /// The prepared maps of the three triangles of one crossing.
+    CsgMapCache maps_[3];
+};
+
 /// Reusable vectors. A boolean makes one scratch and passes it to every step.
 struct CsgScratch
 {
@@ -394,6 +449,20 @@ struct CsgScratch
     /// Merge buffer for the sort of the crossings of an edge.
     ea::vector<int> merge_;
     CsgSplitScratch split_;
+    CsgValidityScratch validity_;
+};
+
+/// Rules of the validity test of a crossing position. Corefinement::CrossingInvalidRules returns the failed rules.
+enum CsgCrossingRule : unsigned
+{
+    /// The position is not strictly inside the projected crossed triangle.
+    CsgRuleInside = 1,
+    /// The position does not keep the strict order on the edge of the crossing.
+    CsgRuleEdgeOrder = 2,
+    /// A segment or a chain edge that moves with the crossing crosses another segment or chain edge.
+    CsgRuleSegments = 4,
+    /// The position is equal to a corner of the crossed triangle or of the two triangles on the edge.
+    CsgRuleCorner = 8
 };
 
 /// The intersection of two operands: crossing vertices and the curve segments on each triangle.
@@ -442,6 +511,38 @@ public:
     /// Write the crossings on an edge of the mesh to the output, ordered from the vertex from to the vertex to.
     /// The ids are local welded ids of the mesh.
     void EdgeCrossings(const Mesh& mesh, int from, int to, CsgScratch& scratch, ea::vector<int>& output) const;
+    /// Return the rules that the grid position candidate breaks for the crossing. Zero means that it is valid.
+    /// The record must be an element of crossings_. The function uses grid arithmetic only and changes nothing.
+    /// The rules are: the position is strictly inside the projected crossed triangle; it is strictly between its
+    /// neighbors on the edge of the crossing, in the projection of each triangle on the edge; the segments and
+    /// the chain edges that end at the crossing cross no other segment and no other chain edge in the maps of the
+    /// three triangles (the crossed one and the two on the edge); it is not a corner of these triangles.
+    /// Call BuildEdgeTriangles of both meshes before. If stopAtFirst is true, the function returns at the first
+    /// broken rule and the result has that rule only.
+    /// If strict is false, the rules only find a fold: the position may be on the boundary of the crossed triangle,
+    /// may be equal to a neighbor on the edge or to a corner, and a segment must cross at a point inside both.
+    /// The diagnostic counters use this form to tell a fold from an exact contact.
+    /// If segmentRule is false, the function skips the test of the segments (the costly rule).
+    unsigned CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
+        bool stopAtFirst = false, bool strict = true, bool segmentRule = true) const;
+    /// Return true if the candidate position breaks no rule of CrossingInvalidRules.
+    bool CrossingIsValid(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch) const
+    {
+        return CrossingInvalidRules(record, candidate, scratch, true) == 0;
+    }
+    /// Same as above with a temporary scratch. The first form is faster for many calls.
+    bool CrossingIsValid(const Crossing& record, const CsgGridPoint& candidate) const;
+    /// Count the crossings whose rounded position breaks a rule. The counts for the single rules are in perRule,
+    /// in the order of CsgCrossingRule. Build the edge triangles of both meshes first.
+    int CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], bool strict = true) const;
+    /// Move each rounded crossing that is a fold (the non strict rules of CrossingInvalidRules) to a valid grid
+    /// point of the cell of its exact position. The candidates are the corners of the cell: first the nearest
+    /// rounding, then the corners with one, two and three axes flipped. The first valid corner wins. The order of
+    /// the crossings is the order of the ids and each test sees the current positions of the other crossings.
+    /// A corner that equals a corner of the crossed triangle or of the triangles on the edge does not count.
+    /// If no corner is valid, the crossing keeps the nearest rounding. Call this after CollectCrossings and
+    /// before SplitFaces. It builds the edge triangles of both meshes.
+    void ConstrainCrossings(CsgScratch& scratch);
     /// Split every triangle of both operands that has curve segments into regions. Fill splitA_ and splitB_.
     /// Call this after CollectCrossings.
     void SplitFaces(CsgScratch& scratch);
@@ -488,6 +589,9 @@ private:
         int (&found)[6], bool (&entering)[6], int count);
     int CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0, const CsgGridPoint& t1,
         const CsgGridPoint& t2);
+
+    /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
+    int CompareRecords(int x, int y) const;
 
     /// Order data of an edge list record: a crossing or an alias.
     const Crossing& Record(int record) const { return record >= 0 ? crossings_[record] : aliases_[-record - 1]; }
@@ -624,11 +728,32 @@ struct CsgBooleanDiagnostics
     std::atomic<int> mergedCrossings_{};
     std::atomic<int> lobeSplits_{};
     std::atomic<int> lobeHoleKept_{};
+    /// Crossings with a rounded position that breaks a rule of the validity test. The counters are for the rules
+    /// in the order of CsgCrossingRule. They count only if countInvalid_ is true.
+    std::atomic<int> invalidCrossings_{};
+    std::atomic<int> invalidInside_{};
+    std::atomic<int> invalidOrder_{};
+    std::atomic<int> invalidSegments_{};
+    std::atomic<int> invalidCorner_{};
+    std::atomic<int> checkedCrossings_{};
+    /// Crossings that break a rule in the non strict form: a fold. The counters by rule are for inside, order, segments.
+    std::atomic<int> foldCrossings_{};
+    std::atomic<int> foldInside_{};
+    std::atomic<int> foldOrder_{};
+    std::atomic<int> foldSegments_{};
+    /// Crossings that ConstrainCrossings moved to another grid point, and crossings that it could not move.
+    std::atomic<int> constrainedCrossings_{};
+    std::atomic<int> unconstrainableCrossings_{};
+    /// Switch of the validity count. A test sets it. Reset does not change it.
+    std::atomic<bool> countInvalid_{false};
 
     void Reset()
     {
         for (auto* counter : {&failedSplits_, &failedRegionFits_, &splitTriangles_, &patches_, &mixedVotePatches_,
-                 &zeroSumPatches_, &mergedCrossings_, &lobeSplits_, &lobeHoleKept_})
+                 &zeroSumPatches_, &mergedCrossings_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
+                 &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
+                 &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
+                 &unconstrainableCrossings_})
             counter->store(0, std::memory_order_relaxed);
     }
 };

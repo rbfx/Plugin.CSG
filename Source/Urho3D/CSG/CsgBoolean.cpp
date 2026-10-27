@@ -1193,6 +1193,7 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     Corefinement core(*a, *b, epsilon);
     CsgScratch scratch;
     core.CollectCrossings(scratch, parallel);
+    core.ConstrainCrossings(scratch);
     core.SplitFaces(scratch);
 
     CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
