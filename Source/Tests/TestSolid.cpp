@@ -723,6 +723,25 @@ TEST_CASE("Solid ContainsPoint equals the exact classifier on random points", "[
 
     for (const CsgSolid* solid : solids)
     {
+        // The third reference visits all triangles of the exact loops. It has no BVH and no box filter.
+        const CsgExactLoops loops = solid->GetExactLoops();
+        const ea::span<const unsigned> triangleStart = solid->GetTriangleStart();
+        const ea::span<const unsigned> triangleVertices = solid->GetTriangleVertices();
+        const auto bruteForce = [&](const CsgGridPoint& p)
+        {
+            bool parity = false;
+            for (unsigned face = 0; face < solid->FaceCount(); ++face)
+            {
+                for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+                {
+                    const auto corner = [&](unsigned k) -> const CsgGridPoint&
+                    { return loops.grid_[loops.ids_[loops.vertexStart_[face] + triangleVertices[t * 3 + k]]]; };
+                    parity ^= CsgExact::AxisRayCrossesTriangle(p, corner(0), corner(1), corner(2), 0b0111);
+                }
+            }
+            return parity;
+        };
+
         unsigned inside = 0;
         constexpr unsigned count = 600;
         for (unsigned i = 0; i < count; ++i)
@@ -730,6 +749,7 @@ TEST_CASE("Solid ContainsPoint equals the exact classifier on random points", "[
             const Vector3 point(-2.0f + next() * 4.0f, -2.0f + next() * 4.0f, -2.0f + next() * 4.0f);
             const bool contains = solid->ContainsPoint(point);
             CHECK(contains == CsgInternal::CsgClassifyGridPointForTest(*solid, CsgGridPoint::From(point), 0b0111));
+            CHECK(contains == bruteForce(CsgGridPoint::From(point)));
             inside += contains ? 1 : 0;
         }
         CHECK(inside > 10);

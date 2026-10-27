@@ -208,6 +208,8 @@ public:
     /// Then it counts the crossings of an exact ray along +x with the grid triangles and uses the parity.
     /// A point that is not finite, or that is outside the range of the grid, is outside.
     /// A point on the surface has a fixed answer from the symbolic displacement of the exact predicates.
+    /// Build a solid from polygons with FromOperand or with the polygon constructor. Both repair the faces.
+    /// A solid that is not closed can have a crack of one grid step. A ray through the crack gives a wrong parity.
     bool ContainsPoint(const Vector3& point) const;
 
     /// Return a copy of the face with the winding, the normals and the plane reversed.

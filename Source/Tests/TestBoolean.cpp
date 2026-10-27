@@ -8,6 +8,7 @@
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include "TestGeometry.h"
+#include "TestInt128.h"
 
 #include <Urho3D/Math/Quaternion.h>
 
@@ -75,6 +76,40 @@ bool IsClosed(const SolidPtr& solid)
 {
     const auto polygons = solid->ToPolygons();
     return IsEdgeClosed(polygons, GRID_TOLERANCE);
+}
+
+/// Return the six-fold volume of a solid as an exact integer. It is the sum of the triple products of the
+/// grid points of all triangles. The coordinates are below 2^29, so the sum fits in 128 bits.
+CsgTest::Int128 ExactVolume6(const SolidPtr& solid)
+{
+    const CsgExactLoops loops = solid->GetExactLoops();
+    const ea::span<const unsigned> triangleStart = solid->GetTriangleStart();
+    const ea::span<const unsigned> triangleVertices = solid->GetTriangleVertices();
+    CsgTest::Int128 volume6 = 0;
+    for (unsigned face = 0; face < solid->FaceCount(); ++face)
+    {
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+        {
+            const auto corner = [&](unsigned k) -> const CsgGridPoint&
+            { return loops.grid_[loops.ids_[loops.vertexStart_[face] + triangleVertices[3 * t + k]]]; };
+            const CsgGridPoint& a = corner(0);
+            const CsgGridPoint& b = corner(1);
+            const CsgGridPoint& c = corner(2);
+            const int64_t cx = int64_t{b.y_} * c.z_ - int64_t{b.z_} * c.y_;
+            const int64_t cy = int64_t{b.z_} * c.x_ - int64_t{b.x_} * c.z_;
+            const int64_t cz = int64_t{b.x_} * c.y_ - int64_t{b.y_} * c.x_;
+            volume6 += CsgTest::Mul64<CsgTest::Int128>(a.x_, cx) + CsgTest::Mul64<CsgTest::Int128>(a.y_, cy)
+                + CsgTest::Mul64<CsgTest::Int128>(a.z_, cz);
+        }
+    }
+    return volume6;
+}
+
+/// Return the number of triangles of a solid.
+unsigned TriangleCount(const SolidPtr& solid)
+{
+    const ea::span<const unsigned> triangleStart = solid->GetTriangleStart();
+    return triangleStart.empty() ? 0u : triangleStart.back();
 }
 
 /// Check that the result is a closed mesh without open edges.
@@ -1495,6 +1530,78 @@ TEST_CASE("Boolean of a box with a needle that has a collapsed chord", "[boolean
 #ifdef CSG_DIAGNOSTICS
     CHECK(NoZeroSumUnclassifiedPatch::RemovedComponents() > 0);
 #endif
+}
+
+TEST_CASE("Boolean of a box with a collapsed needle obeys the exact volume identity", "[boolean][zerosum]")
+{
+    // The tetrahedron of the needle test. Its base is below a fifth of a grid step wide.
+    const auto box = MakeBox(Vector3::ZERO, 1);
+    const float w = 0.2f / CsgGridScale;
+    const Vector3 corners[4] = {Vector3(0.25f, 0.0f, 0.5f), Vector3(0.25f + w, 0.0f, 0.5f),
+        Vector3(0.25f, 0.0f, 0.5f + w), Vector3(0.25f, 2.0f, 0.5f)};
+    const auto needle = MakeTetrahedron(corners, 2);
+
+    // The three base corners share one grid point.
+    const CsgGridPoint base = CsgGridPoint::From(corners[0]);
+    for (unsigned i = 1; i < 3; ++i)
+    {
+        const CsgGridPoint other = CsgGridPoint::From(corners[i]);
+        CHECK((other.x_ == base.x_ && other.y_ == base.y_ && other.z_ == base.z_));
+    }
+
+    // All grid points of the needle lie on one line.
+    {
+        const CsgExactLoops loops = needle->GetExactLoops();
+        REQUIRE(!loops.ids_.empty());
+        const CsgGridPoint first = loops.grid_[loops.ids_[0]];
+        int64_t direction[3] = {0, 0, 0};
+        bool hasDirection = false;
+        bool collinear = true;
+        unsigned distinct = 0;
+        for (const int id : loops.ids_)
+        {
+            const CsgGridPoint& g = loops.grid_[id];
+            const int64_t d[3] = {int64_t{g.x_} - first.x_, int64_t{g.y_} - first.y_, int64_t{g.z_} - first.z_};
+            if (d[0] == 0 && d[1] == 0 && d[2] == 0)
+                continue;
+            ++distinct;
+            if (!hasDirection)
+            {
+                direction[0] = d[0];
+                direction[1] = d[1];
+                direction[2] = d[2];
+                hasDirection = true;
+                continue;
+            }
+            // The cross product of the two vectors is exactly zero. Each term is below 2^60.
+            const int64_t cx = d[1] * direction[2] - d[2] * direction[1];
+            const int64_t cy = d[2] * direction[0] - d[0] * direction[2];
+            const int64_t cz = d[0] * direction[1] - d[1] * direction[0];
+            collinear = collinear && cx == 0 && cy == 0 && cz == 0;
+        }
+        CHECK(collinear);
+        CHECK(hasDirection);
+        CHECK(distinct >= 1);
+    }
+    CHECK(ExactVolume6(needle) == 0);
+
+    const auto unionAB = Run(box, needle, CsgOperation::Union);
+    const auto differenceAB = Run(box, needle, CsgOperation::DifferenceAB);
+    const auto intersection = Run(box, needle, CsgOperation::Intersection);
+    const auto differenceBA = Run(needle, box, CsgOperation::DifferenceAB);
+
+    // The volume of A-B and of A intersect B add up to the volume of A.
+    CHECK(ExactVolume6(differenceAB) + ExactVolume6(intersection) == ExactVolume6(box));
+    CHECK(intersection->FaceCount() == 0);
+    CHECK(differenceBA->FaceCount() == 0);
+    CHECK(ExactVolume6(unionAB) == ExactVolume6(differenceAB));
+    CHECK(unionAB->FaceCount() == differenceAB->FaceCount());
+    CHECK(TriangleCount(unionAB) == TriangleCount(differenceAB));
+    for (const SolidPtr& result : {unionAB, differenceAB, intersection, differenceBA})
+    {
+        CHECK(result->IsClosed());
+        CHECK_FALSE(result->IsOutOfRange());
+    }
 }
 
 TEST_CASE("Boolean of a box with a thin plate that has a cancelled chord", "[boolean][zerosum]")
