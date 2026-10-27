@@ -552,6 +552,19 @@ int CsgExact::LoopAreaSignExact(const CsgGridPoint2* points, int count)
 {
     CsgReal area[CsgLoopAreaMaxTerms];
     const int areaCount = LoopAreaExact(points, count, area);
+    if (areaCount < 0)
+    {
+        // The loop is too long for the expansion. Use the sign of the double sum.
+        double sum = 0.0;
+        for (int i = 1; i < count - 1; ++i)
+        {
+            const CsgGridPoint2 d0 = Difference(points[i], points[0]);
+            const CsgGridPoint2 d1 = Difference(points[i + 1], points[0]);
+            sum += static_cast<double>(d0.u_) * static_cast<double>(d1.v_)
+                - static_cast<double>(d0.v_) * static_cast<double>(d1.u_);
+        }
+        return sum > 0.0 ? 1 : (sum < 0.0 ? -1 : 0);
+    }
     return CsgExpansionSign(areaCount, area);
 }
 
@@ -559,6 +572,8 @@ int CsgExact::LoopAreaExact(const CsgGridPoint2* points, int count, CsgReal* out
 {
     if (count < 3)
         return 0;
+    if (count > CsgLoopAreaMaxPoints)
+        return -1;
     constexpr int Capacity = CsgLoopAreaMaxTerms;
     CsgReal bufferA[Capacity + 4];
     CsgReal bufferB[Capacity + 4];
@@ -573,6 +588,9 @@ int CsgExact::LoopAreaExact(const CsgGridPoint2* points, int count, CsgReal* out
         int nextCount = CsgExpansionSum(currentCount, current, term.count_, term.terms_, next);
         nextCount = CsgCompress(nextCount, next);
         URHO3D_ASSERT(nextCount <= Capacity);
+        // The bound on the terms makes this impossible. The check keeps the buffers safe in a release build.
+        if (nextCount > Capacity)
+            return -1;
         std::swap(current, next);
         currentCount = nextCount;
     }
@@ -583,7 +601,9 @@ int CsgExact::LoopAreaExact(const CsgGridPoint2* points, int count, CsgReal* out
 
 int CsgExact::CompareLoopAreaMagnitude(int countA, const CsgReal* a, int countB, const CsgReal* b)
 {
-    URHO3D_ASSERT(countA <= CsgLoopAreaMaxTerms && countB <= CsgLoopAreaMaxTerms);
+    // An input over the limit is not a valid area. The compare then gives equal and does not overflow the buffers.
+    if (countA < 0 || countB < 0 || countA > CsgLoopAreaMaxTerms || countB > CsgLoopAreaMaxTerms)
+        return 0;
     const int signA = CsgExpansionSign(countA, a);
     const int signB = CsgExpansionSign(countB, b);
     if (signA == 0 || signB == 0)

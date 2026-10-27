@@ -2582,6 +2582,45 @@ TEST_CASE("LoopAreaExact has the sign of the int128 oracle", "[exact][planar]")
     REQUIRE(CsgExact::LoopAreaExact(nullptr, 0, terms) == 0);
 }
 
+TEST_CASE("LoopAreaExact stays in the term limit and rejects long loops", "[exact][planar]")
+{
+    static_assert(CsgLoopAreaMaxTerms >= CsgExactPlanarBits + CsgLoopAreaPointBits, "The term limit covers the bound.");
+    const CsgGridInt extreme = static_cast<CsgGridInt>(CsgGridIntegerLimit - 1);
+    std::mt19937_64 random(1040);
+    std::vector<CsgGridPoint2> loop;
+    CsgReal terms[CsgLoopAreaMaxTerms];
+    for (int trial = 0; trial < 4; ++trial)
+    {
+        // The longest allowed loop with the largest coordinates and many random corner signs.
+        loop.clear();
+        for (int j = 0; j < CsgLoopAreaMaxPoints; ++j)
+        {
+            const uint64_t bits = random();
+            CsgGridPoint2 p;
+            p.u_ = (bits & 1) ? extreme : -extreme;
+            p.v_ = (bits & 2) ? extreme : -extreme;
+            if (trial >= 2 && (bits & 4))
+                p.u_ = static_cast<CsgGridInt>(random() % (2 * extreme + 1)) - extreme;
+            loop.push_back(p);
+        }
+        const int count = static_cast<int>(loop.size());
+        const int termCount = CsgExact::LoopAreaExact(loop.data(), count, terms);
+        REQUIRE(termCount >= 0);
+        REQUIRE(termCount <= CsgLoopAreaMaxTerms);
+        REQUIRE(CsgExpansionSign(termCount, terms) == RefLoopAreaSign(loop.data(), count));
+        REQUIRE(CsgExact::LoopAreaSignExact(loop.data(), count) == RefLoopAreaSign(loop.data(), count));
+
+        // One more point is over the limit. There is no exact area, and the sign still has a value.
+        loop.push_back(loop.front());
+        const int longCount = static_cast<int>(loop.size());
+        REQUIRE(CsgExact::LoopAreaExact(loop.data(), longCount, terms) == -1);
+        const int sign = CsgExact::LoopAreaSignExact(loop.data(), longCount);
+        REQUIRE(sign >= -1);
+        REQUIRE(sign <= 1);
+        REQUIRE(CsgExact::CompareLoopAreaMagnitude(-1, terms, termCount, terms) == 0);
+    }
+}
+
 TEST_CASE("CompareLoopAreaMagnitude matches the int128 oracle", "[exact][planar]")
 {
     std::mt19937_64 random(1021);

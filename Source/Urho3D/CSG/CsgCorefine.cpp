@@ -962,6 +962,9 @@ private:
 
         const int startA = ExactArea(a);
         const int startB = ExactArea(b);
+        // A loop that is too long has no exact area. Use the order of the double magnitudes.
+        if (s_.loopAreas_[a].termCount_ < 0 || s_.loopAreas_[b].termCount_ < 0)
+            return (entryA.magnitude_ > entryB.magnitude_) - (entryA.magnitude_ < entryB.magnitude_);
         return CsgExact::CompareLoopAreaMagnitude(
             s_.loopAreas_[a].termCount_, s_.areaTerms_.data() + startA, s_.loopAreas_[b].termCount_,
             s_.areaTerms_.data() + startB);
@@ -976,7 +979,9 @@ private:
         CsgReal terms[CsgLoopAreaMaxTerms];
         const int termCount = CsgExact::LoopAreaExact(points, s_.pool_.Count(loop), terms);
         const int start = static_cast<int>(s_.areaTerms_.size());
-        s_.areaTerms_.insert(s_.areaTerms_.end(), terms, terms + termCount);
+        // The count -1 means that the loop is too long for the expansion. The cache keeps the count.
+        if (termCount > 0)
+            s_.areaTerms_.insert(s_.areaTerms_.end(), terms, terms + termCount);
         s_.loopAreas_[loop].termStart_ = start;
         s_.loopAreas_[loop].termCount_ = termCount;
         return start;

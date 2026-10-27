@@ -61,9 +61,19 @@ constexpr double CsgGridScale = static_cast<double>(int64_t{1} << CsgGridScaleBi
 /// Grid coordinates have an absolute value below this limit.
 constexpr int64_t CsgGridIntegerLimit = int64_t{1} << CsgGridBits;
 
-/// Capacity of the expansion of a loop area. The sum has a magnitude below 2^CsgExactPlanarBits times the number of terms.
-/// A compressed expansion of such an integer has fewer than 64 terms.
-constexpr int CsgLoopAreaMaxTerms = 64;
+/// Bits that count the fan triangles of a loop in the exact area. A loop has at most 2^CsgLoopAreaPointBits + 2 points.
+constexpr int CsgLoopAreaPointBits = 20;
+/// Largest number of points of a loop that the exact area accepts. A longer loop gets no exact area.
+constexpr int CsgLoopAreaMaxPoints = (1 << CsgLoopAreaPointBits) + 2;
+/// Capacity of the expansion of a loop area.
+/// Each term of the sum is an integer with a magnitude below 2^CsgExactPlanarBits. The sum has at most
+/// CsgLoopAreaMaxPoints - 2 = 2^CsgLoopAreaPointBits terms, so each partial sum is an integer with a magnitude
+/// below 2^(CsgExactPlanarBits + CsgLoopAreaPointBits). A compressed expansion is nonoverlapping.
+/// Compress keeps the largest component within one ulp of the sum, and the smaller components add up to less than
+/// that ulp. All components are integers, so the count is at most the bit count of the sum.
+/// The limit is 69 in float mode and 81 in double mode.
+constexpr int CsgLoopAreaMaxTerms = CsgExactPlanarBits + CsgLoopAreaPointBits;
+static_assert(CsgLoopAreaMaxPoints - 2 == (1 << CsgLoopAreaPointBits), "The bound uses the fan triangle count.");
 
 /// Coordinates with an absolute value of this limit or more are outside the range of the grid.
 constexpr float CsgGridCoordinateLimit = static_cast<float>(int64_t{1} << CsgGridCoordinateBits);
@@ -345,14 +355,17 @@ public:
     static int LoopAreaSign(const CsgGridPoint2* points, int count);
 
     /// Same as LoopAreaSign. Always uses the exact expansion arithmetic.
+    /// A loop with more than CsgLoopAreaMaxPoints points gets the sign of the double sum. This sum can be wrong.
     static int LoopAreaSignExact(const CsgGridPoint2* points, int count);
 
     /// Write the doubled signed area of the loop as a compressed expansion. This is the sum of LoopAreaSign.
     /// The out buffer needs CsgLoopAreaMaxTerms entries. Return the number of terms. A loop of fewer than 3 points gives 0.
+    /// Return -1 and write nothing if the loop has more than CsgLoopAreaMaxPoints points.
     static int LoopAreaExact(const CsgGridPoint2* points, int count, CsgReal* out);
 
     /// Return the sign of |A| - |B|. A and B are expansions from LoopAreaExact.
     /// Each count is at most CsgLoopAreaMaxTerms. The result is exact for all such inputs.
+    /// A count below 0 or above CsgLoopAreaMaxTerms gives 0.
     static int CompareLoopAreaMagnitude(int countA, const CsgReal* a, int countB, const CsgReal* b);
 
     /// Exact a * b - c * d as an expansion. The inputs must be exact differences of grid coordinates.
