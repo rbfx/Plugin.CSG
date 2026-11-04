@@ -2221,3 +2221,52 @@ TEST_CASE("Boolean of boxes that touch with coincident faces leaves no sheet wit
         }
     }
 }
+
+TEST_CASE("Boolean of boxes with faces that differ by a fraction of epsilon keeps the volume identities",
+    "[boolean][classify][micro]")
+{
+    // A face of B lies a fraction of epsilon off a face of A. The cut of the other faces of B gives curve edges
+    // shorter than epsilon. Such an edge has no vote, so it cannot outvote the real edges of its patch.
+    // This is a regression guard. A sweep of shifted and tilted boxes did not fail without the rule.
+    // In float mode the grid step is larger than epsilon. The shifts snap to the same grid line there.
+    // The shifts reach near-coincident cuts only in double mode (CSG_EXACT_USE_DOUBLE).
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const float eps = CSG_DEFAULT_EPSILON;
+    struct Case
+    {
+        Vector3 center_;
+        Vector3 halfSize_;
+    };
+    ea::vector<Case> cases;
+    for (const float shift : {0.25f * eps, -0.25f * eps, 0.1f * eps, -0.1f * eps, 0.5f * eps, -0.5f * eps})
+    {
+        // B face x=1 moves by shift. B covers part of the face of A.
+        cases.push_back({Vector3(1.0f + shift - 0.5f, 0.3f, 0.2f), Vector3(0.5f, 0.4f, 0.5f)});
+        // B edge and face both lie a fraction off the edge of A.
+        cases.push_back({Vector3(1.0f + shift - 0.5f, 1.0f + shift - 0.5f, 0.2f), Vector3(0.5f, 0.5f, 0.5f)});
+    }
+    for (const Case& test : cases)
+    {
+        // The result volumes must match the volume of the intersection. The tolerance covers the shift.
+        const auto b = MakeSolid(MakeBoxPolygons(test.center_, test.halfSize_, 2));
+        const double volumeA = 8.0;
+        const double volumeB = test.halfSize_.x_ * test.halfSize_.y_ * test.halfSize_.z_ * 8.0;
+        for (const bool exactOnly : {true, false})
+        {
+            const CsgExactOnlyScope scope(exactOnly);
+            const auto intersection = CsgBooleanOnceForTest(a, b, CsgOperation::Intersection, CSG_DEFAULT_EPSILON);
+            const auto unionAB = CsgBooleanOnceForTest(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+            const auto differenceAB = CsgBooleanOnceForTest(a, b, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+            const auto differenceBA = CsgBooleanOnceForTest(b, a, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+            for (const SolidPtr& result : {intersection, unionAB, differenceAB, differenceBA})
+            {
+                CheckClosed(result);
+                CheckNoEmptyComponent(result);
+            }
+            const double overlap = Volume(intersection);
+            CHECK(Volume(unionAB) == Catch::Approx(volumeA + volumeB - overlap).margin(VOLUME_TOLERANCE));
+            CHECK(Volume(differenceAB) == Catch::Approx(volumeA - overlap).margin(VOLUME_TOLERANCE));
+            CHECK(Volume(differenceBA) == Catch::Approx(volumeB - overlap).margin(VOLUME_TOLERANCE));
+        }
+    }
+}

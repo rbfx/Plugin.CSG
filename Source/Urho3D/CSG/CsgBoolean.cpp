@@ -258,6 +258,10 @@ void ClassifyElements(const Corefinement& core, const Mesh& mesh, CsgOperandElem
             {
                 if (split && segment->first >= 0)
                 {
+                    // A curve edge shorter than epsilon comes from a near-coincident cut. It gets no vote, so it
+                    // cannot outvote the real edges. Its twin stays -1, so the patch does not cross it.
+                    if ((PointPosition(core, to) - PointPosition(core, from)).Length() < core.epsilon_)
+                        continue;
                     const bool forward = segment->first == from && segment->second == to;
                     votes += forward != second ? 1 : -1;
                 }
