@@ -68,6 +68,23 @@ TEST_CASE("Solid from a box", "[solid]")
     CHECK(solid.GetComponentFaces().size() == 6);
 }
 
+TEST_CASE("Solid volume of a unit cube is one", "[solid]")
+{
+    const CsgSolid cube(MakeBoxPolygons(Vector3(0.5f, 0.5f, 0.5f), Vector3(0.5f, 0.5f, 0.5f), 1));
+    REQUIRE(cube.IsClosed());
+    CHECK(cube.Volume() == Catch::Approx(1.0).margin(1e-9));
+
+    // The volume does not depend on the position.
+    const CsgSolid moved(MakeBoxPolygons(Vector3(10.0f, -3.0f, 7.0f), Vector3(0.5f, 0.5f, 0.5f), 1));
+    CHECK(moved.Volume() == Catch::Approx(1.0).margin(1e-6));
+
+    const CsgSolid box(MakeBoxPolygons(Vector3(1.0f, 2.0f, 3.0f), Vector3(0.5f, 1.0f, 1.5f), 1));
+    CHECK(box.Volume() == Catch::Approx(6.0).margin(1e-6));
+
+    const CsgSolid nothing(ea::span<const CsgPolygon>{});
+    CHECK(nothing.Volume() == 0.0);
+}
+
 TEST_CASE("Solid triangles match the face positions", "[solid]")
 {
     const auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1);

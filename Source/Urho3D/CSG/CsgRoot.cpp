@@ -67,6 +67,9 @@ struct CsgRoot::BuildJob
     ea::vector<BrushFingerprint> flatBrushes_;
     /// Final solid of the job. The worker thread sets it.
     SharedPtr<const CsgSolid> resultSolid_;
+    /// Statistics of the job. The worker thread fills it before it posts the main thread task.
+    /// The main thread task adds the model build time. The posted task orders the two writes, so there is no data race.
+    CsgBuildStats stats_;
 };
 
 namespace
@@ -871,6 +874,7 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
     EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
     job->resultSolid_ = solid;
+    const long long booleanUSec = timer.GetUSec(true);
 
     SharedPtr<CsgTriangulatedModel> triangulated;
     if (solid && solid->FaceCount() != 0)
@@ -881,7 +885,20 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
     }
     if (!triangulated)
         triangulated = MakeShared<CsgTriangulatedModel>();
-    URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, timer.GetUSec() / 1000, timer.GetUSec() % 1000);
+    const long long triangulateUSec = timer.GetUSec(false);
+
+    unsigned triangleCount = 0;
+    for (const CsgTriangulatedModel::Geometry& geometry : triangulated->geometries_)
+        triangleCount += geometry.indexData_.size() / 3;
+    job->stats_.booleanMs_ = static_cast<float>(booleanUSec) * 0.001f;
+    job->stats_.triangulateMs_ = static_cast<float>(triangulateUSec) * 0.001f;
+    job->stats_.faceCount_ = solid ? solid->FaceCount() : 0;
+    job->stats_.triangleCount_ = triangleCount;
+    job->stats_.closed_ = solid ? solid->IsClosed() : true;
+    job->stats_.volume_ = solid ? solid->Volume() : 0.0;
+
+    const long long elapsed = booleanUSec + triangulateUSec;
+    URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, elapsed / 1000, elapsed % 1000);
 
     queue->PostDelayedTaskForMainThread([job, triangulated = ea::move(triangulated)](unsigned, WorkQueue*) mutable
     { ApplyBuildJobResultOnMainThread(job, ea::move(triangulated)); });
@@ -909,6 +926,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
 
     ResourceRefList materials;
     SharedPtr<Model> renderableModel;
+    HiresTimer buildModelTimer;
     if (!triangulated)
     {
         // Triangulation failed or resulted in empty output.
@@ -931,6 +949,8 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
             ea::span<const ResourceRefList* const>(sourceMaterials.data(), sourceMaterials.size()), &materials);
     }
 
+    job->stats_.buildModelMs_ = static_cast<float>(buildModelTimer.GetUSec(false)) * 0.001f;
+
     // Acknowledge changes.
     root->AcknowledgeBrushes(job->rootStep_);
 
@@ -946,9 +966,12 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         root->cachedBrushes_ = job->flatBrushes_;
 
     if (root->autoApplyResults_)
+    {
         root->ApplyResultToOutput(renderableModel, materials);
+        root->lastBuildStats_ = job->stats_;
+    }
     else
-        root->pendingResults_.push_back({renderableModel, materials, job->buildId_});
+        root->pendingResults_.push_back({renderableModel, materials, job->buildId_, job->stats_});
 }
 
 bool CsgRoot::ApplyPendingResult()
@@ -959,6 +982,7 @@ bool CsgRoot::ApplyPendingResult()
     const PendingBuildResult result = ea::move(pendingResults_.front());
     pendingResults_.erase(pendingResults_.begin());
     ApplyResultToOutput(result.model_, result.materials_);
+    lastBuildStats_ = result.stats_;
     return true;
 }
 

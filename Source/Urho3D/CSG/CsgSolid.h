@@ -200,6 +200,9 @@ public:
     bool HasOpenEdges() const { return !openEdges_.empty(); }
     /// Return the number of edges that have no partner.
     unsigned OpenEdgeCount() const { return static_cast<unsigned>(openEdges_.size()); }
+    /// Return the signed volume of the solid: the sum of a . (b x c) / 6 over its triangles.
+    /// The sum uses double precision. A closed solid with outward faces has a positive volume.
+    double Volume() const;
     /// Return the total length of the open edges.
     float OpenEdgeLength() const;
     /// Return true if the point is inside the solid. The solid must be closed.

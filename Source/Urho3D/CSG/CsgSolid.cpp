@@ -1275,6 +1275,22 @@ bool CsgSolid::IsCleanOperand() const
     return closed_ && openEdges_.empty() && !NeedsRepair();
 }
 
+double CsgSolid::Volume() const
+{
+    double sum = 0.0;
+    for (unsigned i = 0; i + 2 < trianglePositions_.size(); i += 3)
+    {
+        const Vector3& a = trianglePositions_[i];
+        const Vector3& b = trianglePositions_[i + 1];
+        const Vector3& c = trianglePositions_[i + 2];
+        sum += (static_cast<double>(a.x_) * (static_cast<double>(b.y_) * c.z_ - static_cast<double>(b.z_) * c.y_)
+                   + static_cast<double>(a.y_) * (static_cast<double>(b.z_) * c.x_ - static_cast<double>(b.x_) * c.z_)
+                   + static_cast<double>(a.z_) * (static_cast<double>(b.x_) * c.y_ - static_cast<double>(b.y_) * c.x_))
+            / 6.0;
+    }
+    return sum;
+}
+
 float CsgSolid::OpenEdgeLength() const
 {
     double total = 0.0;

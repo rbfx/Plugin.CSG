@@ -27,6 +27,28 @@ class Model;
 class StaticModel;
 class WorkQueue;
 
+/// Phase times and result sizes of one rebuild. See `CsgRoot::GetLastBuildStats`.
+///
+/// The times are in milliseconds. The size and shape values describe the result solid in the root frame.
+/// A root that has not applied a build has the default value: all numbers are zero and `closed_` is false.
+struct CsgBuildStats
+{
+    /// Time of the boolean operations on the worker thread.
+    float booleanMs_{};
+    /// Time of the triangulation of the result solid on the worker thread.
+    float triangulateMs_{};
+    /// Time to build the output model on the main thread.
+    float buildModelMs_{};
+    /// Number of faces of the result solid.
+    unsigned faceCount_{};
+    /// Number of triangles of the triangulated result.
+    unsigned triangleCount_{};
+    /// True if the result solid is closed. An empty solid is closed.
+    bool closed_{};
+    /// Signed volume of the result solid. See `CsgSolid::Volume`.
+    double volume_{};
+};
+
 /// Root (builder) component for component-based CSG workflow.
 ///
 /// High-level behavior:
@@ -91,6 +113,9 @@ public:
     /// Apply the oldest finished result that the root queued while auto-apply was off.
     /// Return true if the root applied a result.
     bool ApplyPendingResult();
+    /// Get the statistics of the build whose result the root applied last.
+    /// A result that waits in the queue has no effect on the value until ApplyPendingResult applies it.
+    const CsgBuildStats& GetLastBuildStats() const { return lastBuildStats_; }
     /// Fold all applied brushes into the base operand and remove the brush nodes.
     /// Later brushes apply to the baked result, so each one costs one boolean operation.
     /// Baking is permanent and exists only at run time. The root does not serialize the baked geometry.
@@ -150,6 +175,7 @@ private:
         SharedPtr<Model> model_;
         ResourceRefList materials_;
         unsigned revision_{};
+        CsgBuildStats stats_;
     };
 
     /// Result of a bake. It replaces the base operand until the base model or the epsilon changes.
@@ -200,6 +226,7 @@ private:
     bool baking_{};
     bool autoApplyResults_{true};
     ea::vector<PendingBuildResult> pendingResults_;
+    CsgBuildStats lastBuildStats_;
 
     /// Solid of the last applied build. It is the base for an append of brushes.
     SharedPtr<const CsgSolid> cachedSolid_;

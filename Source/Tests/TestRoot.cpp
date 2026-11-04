@@ -588,3 +588,66 @@ TEST_CASE("CsgRoot keeps the baked result for a transformed root", "[root]")
         CHECK(after->GetBoundingBox().max_.Equals(bakedBounds.max_, 1e-3f));
     }
 }
+
+TEST_CASE("CsgRoot reports the statistics of the last build", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Stats");
+
+    // A root that built nothing has the default statistics.
+    const CsgBuildStats& empty = root->GetLastBuildStats();
+    CHECK(empty.booleanMs_ == 0.0f);
+    CHECK(empty.triangulateMs_ == 0.0f);
+    CHECK(empty.buildModelMs_ == 0.0f);
+    CHECK(empty.faceCount_ == 0);
+    CHECK(empty.triangleCount_ == 0);
+    CHECK(!empty.closed_);
+    CHECK(empty.volume_ == 0.0);
+
+    // Box A has the size 2 and box B has the size 2. The overlap is a cube with the size 1.
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+    const CsgBuildStats stats = root->GetLastBuildStats();
+    CHECK(stats.faceCount_ > 0);
+    CHECK(stats.triangleCount_ > 0);
+    CHECK(stats.triangleCount_ * 3 == CountIndices(GetOutput(root)->GetModel()));
+    CHECK(stats.closed_);
+    CHECK(stats.volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(stats.booleanMs_ >= 0.0f);
+    CHECK(stats.triangulateMs_ >= 0.0f);
+    CHECK(stats.buildModelMs_ >= 0.0f);
+}
+
+TEST_CASE("CsgRoot applies the statistics of a queued result with the result", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "PendingStats");
+    root->SetAutoApplyResults(false);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+
+    REQUIRE(root->HasPendingResult());
+    CHECK(root->GetLastBuildStats().faceCount_ == 0);
+    REQUIRE(root->ApplyPendingResult());
+    CHECK(root->GetLastBuildStats().faceCount_ > 0);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+}
