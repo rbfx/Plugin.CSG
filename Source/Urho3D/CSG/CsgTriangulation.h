@@ -86,4 +86,28 @@ PLUGIN_RBFXCSG_API bool CsgTriangulateGeometry(
 PLUGIN_RBFXCSG_API SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(
 	const CsgSolid& solid, float epsilon = CSG_DEFAULT_EPSILON);
 
+/// Defects of a triangulated model that must be a closed surface, and its signed volume.
+/// See `CsgCheckModel`.
+struct CsgModelCheck
+{
+	/// Number of directed edges between two positions that have no opposite edge.
+	unsigned openEdges_{};
+	/// Number of triangles that have the same three positions as an earlier triangle.
+	unsigned duplicates_{};
+	/// Number of triangles with an index twice, two corners on one grid point or three corners on one line.
+	unsigned degenerates_{};
+	/// Signed volume of the triangles. It is positive if the winding is outward.
+	double volume_{};
+};
+
+/// Count the defects of a model that must be a closed surface.
+///
+/// A position is a float triple. A model that has a triangle with a position that is not finite, or that is
+/// too far from the origin for the grid, counts the triangle as degenerate.
+/// An open edge is a directed edge between two positions that has no opposite edge.
+/// A duplicate is a triangle with the same three positions as an earlier one.
+/// A degenerate triangle has an index twice, two corners on one grid point or no exact grid normal.
+/// The grid has the step 2^-24 units. Call the function before the model goes to node space.
+PLUGIN_RBFXCSG_API CsgModelCheck CsgCheckModel(const CsgTriangulatedModel& model);
+
 } // namespace Urho3D

@@ -908,11 +908,17 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         job->resultSolid_ = solid;
         const long long booleanUSec = timer.GetUSec(true);
 
+        CsgModelCheck check;
         if (solid && solid->FaceCount() != 0)
         {
             triangulated = CsgTriangulateSolid(*solid, job->epsilon_);
             if (triangulated)
+            {
+                // The check runs over the triangles that go to the output, so a defect of the triangulation shows too.
+                // It runs before the scale, as the grid of the check (2^-24 units) is the grid of the root frame.
+                check = CsgCheckModel(*triangulated);
                 CsgInternal::ToNodeSpace(*triangulated, job->metricScale_);
+            }
         }
         if (!triangulated)
             triangulated = MakeShared<CsgTriangulatedModel>();
@@ -927,6 +933,12 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         job->stats_.triangleCount_ = triangleCount;
         job->stats_.closed_ = solid ? solid->IsClosed() : true;
         job->stats_.volume_ = solid ? solid->Volume() : 0.0;
+        job->stats_.openEdges_ = check.openEdges_;
+        job->stats_.duplicates_ = check.duplicates_;
+        job->stats_.degenerates_ = check.degenerates_;
+        job->stats_.valid_ = job->stats_.faceCount_ == 0
+            || (job->stats_.closed_ && check.openEdges_ == 0 && check.duplicates_ == 0 && check.degenerates_ == 0
+                && check.volume_ > 0.0);
 
         const long long elapsed = booleanUSec + triangulateUSec;
         URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, elapsed / 1000, elapsed % 1000);
@@ -1015,7 +1027,10 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     root->AcknowledgeBrushes(job->rootStep_);
 
     // Keep the solid as a base for an append only if the tree is flat.
-    root->cachedSolid_ = job->flatBrushes_.size() == job->rootStep_.children_.size() ? job->resultSolid_ : nullptr;
+    // An invalid result is never cached: the next rebuild starts from the brushes again.
+    root->cachedSolid_ = job->stats_.valid_ && job->flatBrushes_.size() == job->rootStep_.children_.size()
+        ? job->resultSolid_
+        : nullptr;
     root->cachedBaseModel_ = job->baseModel_;
     root->cachedEpsilon_ = job->epsilon_;
     root->cachedMetricScale_ = job->metricScale_;

@@ -48,6 +48,16 @@ struct CsgBuildStats
     bool closed_{};
     /// Signed volume of the result solid. See `CsgSolid::Volume`.
     double volume_{};
+    /// Number of open edges of the triangulated result. See `CsgCheckModel`.
+    unsigned openEdges_{};
+    /// Number of duplicate triangles of the triangulated result.
+    unsigned duplicates_{};
+    /// Number of degenerate triangles of the triangulated result.
+    unsigned degenerates_{};
+    /// True if the result is a valid closed model: the solid is closed, the triangulated result has no open edge,
+    /// no duplicate triangle and no degenerate triangle, and its volume is positive. An empty result is valid.
+    /// The root does not cache the solid of an invalid result. The output model still shows the result.
+    bool valid_{};
 };
 
 /// Root (builder) component for component-based CSG workflow.

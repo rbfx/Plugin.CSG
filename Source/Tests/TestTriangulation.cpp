@@ -782,3 +782,176 @@ TEST_CASE("Triangulate random polygons with spikes and duplicate vertices", "[tr
     }
     CHECK(failures == 0);
 }
+
+namespace
+{
+
+/// Make the model of a box with the corners shared. The model has one geometry with 8 vertices and 12 triangles.
+SharedPtr<CsgTriangulatedModel> MakeCheckedBox()
+{
+    const SolidPtr box = MakeBoxSolid(Vector3::ZERO, 7);
+    SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*box);
+    REQUIRE(model);
+    REQUIRE(model->geometries_.size() == 1);
+    REQUIRE(model->geometries_[0].indexData_.size() == 36);
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Check model: a box is valid", "[triangulate][check]")
+{
+    const SharedPtr<CsgTriangulatedModel> model = MakeCheckedBox();
+    const CsgModelCheck check = CsgCheckModel(*model);
+    CHECK(check.openEdges_ == 0);
+    CHECK(check.duplicates_ == 0);
+    CHECK(check.degenerates_ == 0);
+    // The box has the size 2, so the volume is 8.
+    CHECK(check.volume_ == Catch::Approx(8.0).margin(1e-4));
+
+    CHECK(CsgCheckModel(CsgTriangulatedModel()).volume_ == 0.0);
+}
+
+TEST_CASE("Check model: a box with a flipped winding has a negative volume", "[triangulate][check]")
+{
+    const SharedPtr<CsgTriangulatedModel> model = MakeCheckedBox();
+    ea::vector<unsigned>& indices = model->geometries_[0].indexData_;
+    for (unsigned i = 0; i < indices.size(); i += 3)
+        ea::swap(indices[i + 1], indices[i + 2]);
+    const CsgModelCheck check = CsgCheckModel(*model);
+    // The surface is still closed: each edge has its opposite edge.
+    CHECK(check.openEdges_ == 0);
+    CHECK(check.volume_ == Catch::Approx(-8.0).margin(1e-4));
+}
+
+TEST_CASE("Check model: a missing triangle opens the edges", "[triangulate][check]")
+{
+    const SharedPtr<CsgTriangulatedModel> model = MakeCheckedBox();
+    ea::vector<unsigned>& indices = model->geometries_[0].indexData_;
+    indices.resize(indices.size() - 3);
+    const CsgModelCheck check = CsgCheckModel(*model);
+    // The missing triangle has 3 edges. Their opposite edges stay without a partner.
+    CHECK(check.openEdges_ == 3);
+    CHECK(check.duplicates_ == 0);
+    CHECK(check.degenerates_ == 0);
+}
+
+TEST_CASE("Check model: a repeated triangle is a duplicate", "[triangulate][check]")
+{
+    const SharedPtr<CsgTriangulatedModel> model = MakeCheckedBox();
+    ea::vector<unsigned>& indices = model->geometries_[0].indexData_;
+    const unsigned a = indices[0], b = indices[1], c = indices[2];
+    SECTION("same winding")
+    {
+        indices.push_back(a);
+        indices.push_back(b);
+        indices.push_back(c);
+    }
+    SECTION("rotated corners")
+    {
+        indices.push_back(b);
+        indices.push_back(c);
+        indices.push_back(a);
+    }
+    const CsgModelCheck check = CsgCheckModel(*model);
+    CHECK(check.duplicates_ == 1);
+    CHECK(check.degenerates_ == 0);
+    // The repeated edges have one opposite edge for two edges.
+    CHECK(check.openEdges_ == 3);
+}
+
+TEST_CASE("Check model: a triangle that has no area is degenerate", "[triangulate][check]")
+{
+    const SharedPtr<CsgTriangulatedModel> model = MakeCheckedBox();
+    CsgTriangulatedModel::Geometry& geometry = model->geometries_[0];
+    const unsigned a = geometry.indexData_[0], b = geometry.indexData_[1];
+
+    SECTION("an index twice")
+    {
+        geometry.indexData_.push_back(a);
+        geometry.indexData_.push_back(a);
+        geometry.indexData_.push_back(b);
+    }
+    SECTION("two corners on one grid point")
+    {
+        const ModelVertex vertex = geometry.vertices_[a];
+        // A new vertex at the same position: the corners share one grid point.
+        geometry.vertices_.push_back(vertex);
+        geometry.indexData_.push_back(a);
+        geometry.indexData_.push_back(geometry.vertices_.size() - 1);
+        geometry.indexData_.push_back(b);
+    }
+    SECTION("three corners on one line")
+    {
+        ModelVertex middle = geometry.vertices_[a];
+        middle.SetPosition(Vector3::ZERO);
+        ModelVertex end = middle;
+        end.SetPosition(Vector3(0.5f, 0.0f, 0.0f));
+        ModelVertex start = middle;
+        start.SetPosition(Vector3(-0.5f, 0.0f, 0.0f));
+        const unsigned first = geometry.vertices_.size();
+        geometry.vertices_.push_back(start);
+        geometry.vertices_.push_back(middle);
+        geometry.vertices_.push_back(end);
+        geometry.indexData_.push_back(first);
+        geometry.indexData_.push_back(first + 1);
+        geometry.indexData_.push_back(first + 2);
+    }
+    SECTION("a position that is not finite")
+    {
+        ModelVertex vertex = geometry.vertices_[a];
+        vertex.SetPosition(Vector3(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f));
+        geometry.vertices_.push_back(vertex);
+        geometry.indexData_.push_back(a);
+        geometry.indexData_.push_back(b);
+        geometry.indexData_.push_back(geometry.vertices_.size() - 1);
+    }
+    const CsgModelCheck check = CsgCheckModel(*model);
+    CHECK(check.degenerates_ == 1);
+    CHECK(check.duplicates_ == 0);
+}
+
+namespace
+{
+
+/// Make a model with one triangle.
+SharedPtr<CsgTriangulatedModel> MakeTriangleModel(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    auto model = MakeShared<CsgTriangulatedModel>();
+    CsgTriangulatedModel::Geometry geometry;
+    for (const Vector3& position : {a, b, c})
+    {
+        ModelVertex vertex{};
+        vertex.SetPosition(position);
+        geometry.vertices_.push_back(vertex);
+    }
+    geometry.indexData_ = {0, 1, 2};
+    model->geometries_.push_back(ea::move(geometry));
+    return model;
+}
+
+} // namespace
+
+TEST_CASE("Check model: a thin triangle is degenerate only below the grid step of 2^-24", "[triangulate][check]")
+{
+    const Vector3 a(0.0f, 0.0f, 0.0f);
+    const Vector3 b(1.0f, 0.0f, 0.0f);
+
+    // The height is 2^-20: 16 grid steps.
+    CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.0f, std::ldexp(1.0f, -20), 0.0f))).degenerates_ == 0);
+    // The corners are on one line.
+    CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.5f, 0.0f, 0.0f))).degenerates_ == 1);
+    // The height is 2^-26: the corner rounds to the grid point of the first corner.
+    CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.0f, std::ldexp(1.0f, -26), 0.0f))).degenerates_ == 1);
+    // The height is 2^-24: one grid step. The triangle has an area on the grid.
+    CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.0f, std::ldexp(1.0f, -24), 0.0f))).degenerates_ == 0);
+    // The sides are 256 units long: a product on the grid is 2^64, which needs more than 64 bits.
+    CHECK(CsgCheckModel(*MakeTriangleModel(Vector3(0.0f, 0.0f, 0.0f), Vector3(0.0f, 256.0f, 0.0f),
+        Vector3(0.0f, 0.0f, 256.0f))).degenerates_ == 0);
+    // A tie rounds to the even grid value, as in C#. 5 * 2^-25 is the grid value 2.5, so it becomes 2.
+    // The first two corners are then one grid point. Rounding up would make them differ.
+    CHECK(CsgCheckModel(*MakeTriangleModel(Vector3(std::ldexp(1.0f, -23), 0.0f, 0.0f),
+        Vector3(5.0f * std::ldexp(1.0f, -25), 0.0f, 0.0f), Vector3(0.0f, 1.0f, 0.0f))).degenerates_ == 1);
+    // A far position is counted as degenerate, as a position that is not finite.
+    CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.0f, 1e9f, 0.0f))).degenerates_ == 1);
+}

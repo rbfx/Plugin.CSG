@@ -5,12 +5,14 @@
 #include "Urho3D/CSG/CsgTriangulation.h"
 
 #include "Urho3D/CSG/CsgCommon.h"
+#include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Container/Ptr.h>
 #include <Urho3D/Math/MathDefs.h>
 #include <Urho3D/Math/Vector3.h>
 
 #include <EASTL/algorithm.h>
+#include <EASTL/array.h>
 #include <EASTL/hash_map.h>
 #include <EASTL/sort.h>
 
@@ -455,6 +457,189 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float
         AddGeometry(*result, ea::move(geometry));
     }
 
+    return result;
+}
+
+namespace
+{
+
+struct CheckCorner
+{
+    float x_;
+    float y_;
+    float z_;
+    unsigned corner_;
+};
+
+/// The exact grid of C#: a position rounds to a multiple of 2^-24.
+constexpr double CheckGridScale = 16777216.0;
+
+bool IsGridPosition(const Vector3& p)
+{
+    return std::isfinite(p.x_) && std::isfinite(p.y_) && std::isfinite(p.z_) && std::fabs(p.x_) < CsgGridCoordinateLimit
+        && std::fabs(p.y_) < CsgGridCoordinateLimit && std::fabs(p.z_) < CsgGridCoordinateLimit;
+}
+
+struct CheckGridPoint
+{
+    int64_t x_;
+    int64_t y_;
+    int64_t z_;
+
+    static CheckGridPoint From(const Vector3& p)
+    {
+        // llrint rounds a tie to the even value, as Math.Round of C# does. The rounding mode is the default one.
+        return {std::llrint(static_cast<double>(p.x_) * CheckGridScale),
+            std::llrint(static_cast<double>(p.y_) * CheckGridScale),
+            std::llrint(static_cast<double>(p.z_) * CheckGridScale)};
+    }
+
+    friend bool operator==(const CheckGridPoint& a, const CheckGridPoint& b)
+    {
+        return a.x_ == b.x_ && a.y_ == b.y_ && a.z_ == b.z_;
+    }
+};
+
+/// Return true if a * b == c * d. Each input is below 2^38 in magnitude, so a product is below 2^76.
+/// The wrapped difference modulo 2^64 must be zero. A nonzero difference that is a multiple of 2^64 has a magnitude
+/// of at least 2^64. The double estimate has an error below 2^26, so it shows such a difference.
+bool ProductsEqual(int64_t a, int64_t b, int64_t c, int64_t d)
+{
+    const uint64_t wrapped = static_cast<uint64_t>(a) * static_cast<uint64_t>(b)
+        - static_cast<uint64_t>(c) * static_cast<uint64_t>(d);
+    if (wrapped != 0)
+        return false;
+    const double estimate = static_cast<double>(a) * static_cast<double>(b) - static_cast<double>(c) * static_cast<double>(d);
+    return std::fabs(estimate) < 4611686018427387904.0;
+}
+
+/// The three corners are on one line: the cross product of two sides on the grid is zero.
+bool HasNoGridNormal(const CheckGridPoint& a, const CheckGridPoint& b, const CheckGridPoint& c)
+{
+    const int64_t ux = b.x_ - a.x_, uy = b.y_ - a.y_, uz = b.z_ - a.z_;
+    const int64_t vx = c.x_ - a.x_, vy = c.y_ - a.y_, vz = c.z_ - a.z_;
+    return ProductsEqual(uy, vz, uz, vy) && ProductsEqual(uz, vx, ux, vz) && ProductsEqual(ux, vy, uy, vx);
+}
+
+} // namespace
+
+CsgModelCheck CsgCheckModel(const CsgTriangulatedModel& model)
+{
+    CsgModelCheck result;
+
+    // Collect the corners of all triangles. A corner is a triangle number times 3 plus the corner number.
+    ea::vector<CheckCorner> corners;
+    ea::vector<Vector3> positions;
+    ea::vector<unsigned> indexOf;
+    unsigned triangleCount = 0;
+    for (const CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+    {
+        for (unsigned i = 0; i + 2 < geometry.indexData_.size(); i += 3)
+        {
+            for (unsigned k = 0; k < 3; ++k)
+            {
+                const Vector3 p = geometry.vertices_[geometry.indexData_[i + k]].GetPosition();
+                positions.push_back(p);
+                indexOf.push_back(geometry.indexData_[i + k]);
+                // A position that is not finite has no place in the order. The triangle counts as degenerate.
+                const bool finite = std::isfinite(p.x_) && std::isfinite(p.y_) && std::isfinite(p.z_);
+                corners.push_back({finite ? p.x_ : 0.0f, finite ? p.y_ : 0.0f, finite ? p.z_ : 0.0f,
+                    triangleCount * 3 + k});
+            }
+            ++triangleCount;
+        }
+    }
+
+    // Give each distinct position an id. The id order does not matter.
+    ea::sort(corners.begin(), corners.end(),
+        [](const CheckCorner& a, const CheckCorner& b)
+        {
+            if (a.x_ != b.x_)
+                return a.x_ < b.x_;
+            if (a.y_ != b.y_)
+                return a.y_ < b.y_;
+            if (a.z_ != b.z_)
+                return a.z_ < b.z_;
+            return a.corner_ < b.corner_;
+        });
+    ea::vector<unsigned> ids(corners.size());
+    unsigned idCount = 0;
+    for (unsigned i = 0; i < corners.size(); ++i)
+    {
+        if (i != 0 && (corners[i].x_ != corners[i - 1].x_ || corners[i].y_ != corners[i - 1].y_
+                || corners[i].z_ != corners[i - 1].z_))
+            ++idCount;
+        ids[corners[i].corner_] = idCount;
+    }
+
+    ea::vector<unsigned long long> edges;
+    edges.reserve(corners.size());
+    ea::vector<ea::array<unsigned, 3>> sortedTriples;
+    sortedTriples.reserve(triangleCount);
+
+    for (unsigned t = 0; t < triangleCount; ++t)
+    {
+        const unsigned c = t * 3;
+        const unsigned id[3] = {ids[c], ids[c + 1], ids[c + 2]};
+        const Vector3 p[3] = {positions[c], positions[c + 1], positions[c + 2]};
+        for (unsigned k = 0; k < 3; ++k)
+            edges.push_back((static_cast<unsigned long long>(id[k]) << 32) | id[(k + 1) % 3]);
+
+        const double ax = p[0].x_, ay = p[0].y_, az = p[0].z_;
+        const double bx = p[1].x_, by = p[1].y_, bz = p[1].z_;
+        const double cx = p[2].x_, cy = p[2].y_, cz = p[2].z_;
+        result.volume_ += (ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx)) / 6.0;
+
+        bool degenerate = indexOf[c] == indexOf[c + 1] || indexOf[c + 1] == indexOf[c + 2]
+            || indexOf[c + 2] == indexOf[c];
+        if (!degenerate)
+        {
+            if (!IsGridPosition(p[0]) || !IsGridPosition(p[1]) || !IsGridPosition(p[2]))
+                degenerate = true;
+            else
+            {
+                const CheckGridPoint g0 = CheckGridPoint::From(p[0]);
+                const CheckGridPoint g1 = CheckGridPoint::From(p[1]);
+                const CheckGridPoint g2 = CheckGridPoint::From(p[2]);
+                degenerate = g0 == g1 || g1 == g2 || g2 == g0 || HasNoGridNormal(g0, g1, g2);
+            }
+        }
+        if (degenerate)
+        ++result.degenerates_;
+
+        unsigned a = id[0], b = id[1], d = id[2];
+        if (a > b)
+            ea::swap(a, b);
+        if (b > d)
+            ea::swap(b, d);
+        if (a > b)
+            ea::swap(a, b);
+        sortedTriples.push_back({a, b, d});
+    }
+
+    // A triangle after the first one with the same three positions is a duplicate.
+    ea::sort(sortedTriples.begin(), sortedTriples.end());
+    for (unsigned i = 1; i < sortedTriples.size(); ++i)
+    {
+        if (sortedTriples[i] == sortedTriples[i - 1])
+            ++result.duplicates_;
+    }
+
+    // Each directed edge needs one opposite edge. The count is a sum, so the order has no effect.
+    ea::sort(edges.begin(), edges.end());
+    for (unsigned i = 0; i < edges.size();)
+    {
+        unsigned end = i;
+        while (end < edges.size() && edges[end] == edges[i])
+            ++end;
+        const unsigned long long reversed = (edges[i] << 32) | (edges[i] >> 32);
+        const auto range = ea::equal_range(edges.begin(), edges.end(), reversed);
+        const unsigned count = end - i;
+        const unsigned opposite = static_cast<unsigned>(range.second - range.first);
+        if (count > opposite)
+            result.openEdges_ += count - opposite;
+        i = end;
+    }
     return result;
 }
 
