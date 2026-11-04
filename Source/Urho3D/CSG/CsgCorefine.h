@@ -378,6 +378,10 @@ struct CsgOperandElements
     /// The faces of the touched components that lie clear of the other operand and that the boolean keeps whole.
     /// Each entry has the number of elements before the face, so the face keeps its place among the elements.
     ea::vector<ea::pair<unsigned, int>> clearFaces_;
+    /// The faces of the kept components that the curve does not reach. A component is here if one of its faces has a shared loop. They go to the
+    /// kept set whole, so the clean-up can cancel them against faces of the other operand. It is empty if
+    /// g_csgExactOnly is true.
+    ea::vector<int> wholeFaces_;
     /// The id pool of the elements that have no source face.
     ea::vector<int> elementIds_;
     /// The label of each element after the classification: 0 if outside the other operand, 1 if inside,
@@ -507,7 +511,32 @@ public:
 
     /// Global id of the first crossing. Mesh vertices have the ids below it.
     int CrossingBase() const { return a_.VertexCount() + b_.VertexCount(); }
-    int Global(const Mesh& mesh, int id) const { return mesh.offset_ + id; }
+    /// Global id of a vertex of an operand. If g_csgExactOnly is false, a grid point has one id across the two
+    /// operands: a vertex of the second operand on a vertex of the first one takes its id.
+    int Global(const Mesh& mesh, int id) const
+    {
+        return mesh.isSecond_ && !alias_.empty() && alias_[id] >= 0 ? alias_[id] : mesh.offset_ + id;
+    }
+    /// The vertex of an operand that has a global id below CrossingBase(). Return a negative number if the
+    /// global id is not a vertex of the second operand. For the first operand, the caller must check the range.
+    int Local(const Mesh& mesh, int globalId) const
+    {
+        if (!mesh.isSecond_ || globalId >= mesh.offset_ || aliasBack_.empty())
+            return globalId - mesh.offset_;
+        return aliasBack_[globalId];
+    }
+    /// Return true if a vertex of the second operand has the global id of a vertex of the first one.
+    bool IsAlias(const Mesh& mesh, int globalId) const { return mesh.isSecond_ && globalId < mesh.offset_; }
+    /// Return true if a vertex of an operand is on a vertex of the other operand.
+    bool IsShared(const Mesh& mesh, int id) const
+    {
+        const ea::vector<int>& pairs = mesh.isSecond_ ? alias_ : aliasBack_;
+        return !pairs.empty() && pairs[id] >= 0;
+    }
+    /// Return true if each vertex of a whole face is on a vertex of the other operand. Only such a face can
+    /// cancel against a face of the other operand. If loop is not null, it gets the global ids of the face in the
+    /// order of its kept polygon (reversed if flip is true). If the result is false, the loop stays unchanged.
+    bool SharedLoop(const Mesh& mesh, int face, bool flip, ea::vector<int>* loop = nullptr) const;
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
     /// Return the crossing of the id if it satisfies the predicate, or null. A vertex id gives null.
     template <class Predicate> const Crossing* FindRecord(int globalId, const Predicate& predicate) const
@@ -522,6 +551,8 @@ public:
     /// The parallel options only change how the face pairs are found. The order of the pairs stays the same.
     /// A caller inside a work queue task must pass options without a work queue.
     void CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel = {});
+    /// Fill alias_ and aliasBack_ from the grid points of the operands.
+    void BuildAliases();
     /// Intersect the triangles of two faces. Add the crossings and the segments.
     void IntersectFaces(int faceA, int faceB);
     /// Write the crossings on an edge of the mesh to the output, ordered from the vertex from to the vertex to.
@@ -638,6 +669,11 @@ private:
     int RecordId(int record) const { return CrossingBase() + record; }
 
     CsgFlatMap<CsgCrossingKey, int, CsgCrossingKeyHash> crossingIds_;
+    /// By vertex of the second operand: the id of the first operand on the same grid point, or -1.
+    /// Empty if g_csgExactOnly is true or if no grid point is shared.
+    ea::vector<int> alias_;
+    /// By vertex of the first operand: the vertex of the second operand on the same grid point, or -1.
+    ea::vector<int> aliasBack_;
     /// Grid points of the placed crossings by cell, see Placed. It is empty if g_csgExactOnly is true.
     CsgFlatMap<CsgGridCellKey, ea::vector<CsgGridPoint>, CsgGridCellKeyHash> placed_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.

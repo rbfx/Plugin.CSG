@@ -458,6 +458,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
 
     o.elements_.clear();
     o.clearFaces_.clear();
+    o.wholeFaces_.clear();
     o.elementIds_.clear();
     for (unsigned component = 0; component < componentCount; ++component)
     {
@@ -524,8 +525,13 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                 element.idCount_ = 3;
                 for (unsigned k = 0; k < 3; ++k)
                 {
-                    corners.push_back(source.vertices_[triangleVertices[t * 3 + k]]);
-                    o.elementIds_.push_back(core.Global(mesh, mesh.triangleIds_[t * 3 + k]));
+                    ModelVertex corner = source.vertices_[triangleVertices[t * 3 + k]];
+                    const int cornerId = core.Global(mesh, mesh.triangleIds_[t * 3 + k]);
+                    // One id has one position: that of the first operand.
+                    if (core.IsAlias(mesh, cornerId))
+                        corner.SetPosition(PointPosition(core, cornerId));
+                    corners.push_back(corner);
+                    o.elementIds_.push_back(cornerId);
                 }
                 auto polygon = ea::make_shared<CsgPolygon>(ea::move(corners), source.shared_);
                 polygon->plane_ = source.plane_;
@@ -550,6 +556,14 @@ void BuildKeptSet(const Corefinement& core, CsgOperation operation, CsgBooleanSc
         const CsgOperandElements& o = s.operands_[index];
         const CsgSolid& solid = second ? core.b_.solid_ : core.a_.solid_;
         unsigned nextClear = 0;
+        for (const int face : o.wholeFaces_)
+        {
+            CsgKeptFace& kept = s.kept_.emplace_back();
+            kept.polygon_ = flip ? CsgSolid::Flipped(*solid.GetFace(face)) : solid.GetFace(face);
+            kept.sourceFace_ = face;
+            kept.second_ = second;
+            kept.flip_ = flip;
+        }
         for (unsigned i = 0; i <= o.elements_.size(); ++i)
         {
             for (; nextClear < o.clearFaces_.size() && o.clearFaces_[nextClear].first == i; ++nextClear)
@@ -803,7 +817,7 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
             for (int k = 0; k < count; ++k)
             {
                 const int id = mesh.loops_.ids_[start + (face.flip_ ? count - 1 - k : k)];
-                cornerIds.push_back(mesh.offset_ + id);
+                cornerIds.push_back(core.Global(mesh, id));
                 cornerGrid.push_back(mesh.grid_[id]);
             }
         }
@@ -1193,8 +1207,26 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
             const ComponentSide side = ClassifyComponent(core, mesh, component, otherMesh, second);
             if (side == ComponentSide::None)
                 continue;
-            if (CsgSolid::Keep(side == ComponentSide::Inside, operation, second))
+            if (!CsgSolid::Keep(side == ComponentSide::Inside, operation, second))
+                continue;
+            // A face on the vertices of a face of the other operand can cancel against it. The component then
+            // goes with the kept faces, where the two faces meet.
+            const auto componentStart = solid.GetComponentStart();
+            const auto componentFaces = solid.GetComponentFaces();
+            bool meets = false;
+            for (unsigned c = componentStart[component]; c < componentStart[component + 1] && !meets; ++c)
+                meets = core.SharedLoop(mesh, static_cast<int>(componentFaces[c]), flip);
+            if (!meets)
+            {
                 result.AppendComponent(solid, component, flip);
+                continue;
+            }
+            for (unsigned c = componentStart[component]; c < componentStart[component + 1]; ++c)
+            {
+                const int face = static_cast<int>(componentFaces[c]);
+                if (mesh.loops_.loopLength_[face] >= 3)
+                    o.wholeFaces_.push_back(face);
+            }
         }
         if (!o.elements_.empty())
             ClassifyElements(core, mesh, o, s, otherMesh, second);

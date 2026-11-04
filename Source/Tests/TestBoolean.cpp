@@ -206,6 +206,139 @@ TEST_CASE("Boolean of boxes that share a face", "[boolean]")
     CheckClosed(intersectionAB);
 }
 
+namespace
+{
+
+/// Return the number of faces of the solid that share the same vertex positions with an earlier face.
+unsigned CountDuplicateFaces(const SolidPtr& solid)
+{
+    std::vector<std::vector<std::array<float, 3>>> seen;
+    unsigned duplicates = 0;
+    for (unsigned f = 0; f < solid->FaceCount(); ++f)
+    {
+        std::vector<std::array<float, 3>> corners;
+        for (const ModelVertex& vertex : solid->GetFace(f)->vertices_)
+        {
+            const Vector3 p = vertex.GetPosition();
+            corners.push_back({p.x_, p.y_, p.z_});
+        }
+        std::sort(corners.begin(), corners.end());
+        if (std::find(seen.begin(), seen.end(), corners) != seen.end())
+            ++duplicates;
+        else
+            seen.push_back(corners);
+    }
+    return duplicates;
+}
+
+/// Return the number of faces of the solid with all corners on the plane x = value.
+unsigned CountFacesOnPlaneX(const SolidPtr& solid, float value)
+{
+    unsigned count = 0;
+    for (unsigned f = 0; f < solid->FaceCount(); ++f)
+    {
+        bool onPlane = true;
+        for (const ModelVertex& vertex : solid->GetFace(f)->vertices_)
+            onPlane &= std::abs(vertex.GetPosition().x_ - value) < 1e-4f;
+        count += onPlane ? 1u : 0u;
+    }
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("Shared loops: two boxes with one face on the same four vertices", "[boolean][shared]")
+{
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(2.0f, 0.0f, 0.0f), 2);
+
+    SECTION("The alias arrays exist only if the flag is off")
+    {
+        {
+            const CsgExactOnlyScope scope(true);
+            const Corefinement core(*a, *b, CSG_DEFAULT_EPSILON);
+            for (unsigned f = 0; f < a->FaceCount(); ++f)
+                CHECK_FALSE(core.SharedLoop(core.a_, static_cast<int>(f), false));
+            CHECK(core.Global(core.b_, 0) == core.b_.offset_);
+        }
+        const CsgExactOnlyScope scope(false);
+        const Corefinement core(*a, *b, CSG_DEFAULT_EPSILON);
+        unsigned sharedA = 0;
+        unsigned sharedB = 0;
+        ea::vector<int> loopA;
+        ea::vector<int> loopB;
+        for (unsigned f = 0; f < a->FaceCount(); ++f)
+        {
+            if (core.SharedLoop(core.a_, static_cast<int>(f), false, &loopA))
+                ++sharedA;
+        }
+        for (unsigned f = 0; f < b->FaceCount(); ++f)
+        {
+            if (core.SharedLoop(core.b_, static_cast<int>(f), true, &loopB))
+                ++sharedB;
+        }
+        REQUIRE(sharedA == 1);
+        REQUIRE(sharedB == 1);
+        // The loops have the same global ids. The loop of the second operand is flipped.
+        REQUIRE(loopA.size() == 4);
+        REQUIRE(loopB.size() == 4);
+        std::vector<int> sortedA(loopA.begin(), loopA.end());
+        std::vector<int> sortedB(loopB.begin(), loopB.end());
+        std::sort(sortedA.begin(), sortedA.end());
+        std::sort(sortedB.begin(), sortedB.end());
+        CHECK(sortedA == sortedB);
+        for (const int id : loopB)
+            CHECK(id < core.CrossingBase());
+        // The vertices on the shared face are aliases. Local reverses Global.
+        unsigned aliases = 0;
+        for (int id = 0; id < core.b_.VertexCount(); ++id)
+        {
+            const int global = core.Global(core.b_, id);
+            if (core.IsAlias(core.b_, global))
+            {
+                ++aliases;
+                CHECK(core.IsShared(core.b_, id));
+                CHECK(core.Local(core.b_, global) == id);
+                CHECK(core.IsShared(core.a_, global));
+            }
+            else
+                CHECK(global == core.b_.offset_ + id);
+        }
+        CHECK(aliases == 4);
+    }
+
+    SECTION("Union and difference are closed, have the right volume and no duplicate face")
+    {
+        const CsgExactOnlyScope scope(false);
+        const auto unionAB = Run(a, b, CsgOperation::Union);
+        const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+        CheckClosed(unionAB);
+        CheckClosed(differenceAB);
+        CHECK(Volume(unionAB) == Catch::Approx(16.0).margin(VOLUME_TOLERANCE));
+        CHECK(Volume(differenceAB) == Catch::Approx(8.0).margin(VOLUME_TOLERANCE));
+        CHECK(CountDuplicateFaces(unionAB) == 0);
+        CHECK(CountDuplicateFaces(differenceAB) == 0);
+        // The two faces on the plane x = 1 cancel in the union. The difference keeps the face of A once.
+        CHECK(CountFacesOnPlaneX(unionAB, 1.0f) == 0);
+        CHECK(CountFacesOnPlaneX(differenceAB, 1.0f) == 1);
+    }
+
+    SECTION("Exact-only mode keeps the old twin faces")
+    {
+        for (const CsgOperation operation : {CsgOperation::Union, CsgOperation::DifferenceAB})
+        {
+            const auto byDefault = Run(a, b, operation);
+            const CsgExactOnlyScope scope(true);
+            const auto exact = Run(a, b, operation);
+            CHECK(SolidsIdentical(*byDefault, *exact));
+            CheckClosed(exact);
+            // Exact-only mode keeps both whole faces on the plane x = 1 in the union: the faces are twins.
+            CHECK(CountFacesOnPlaneX(exact, 1.0f) == (operation == CsgOperation::Union ? 2u : 1u));
+            CHECK(Volume(exact) == Catch::Approx(operation == CsgOperation::Union ? 16.0 : 8.0).margin(VOLUME_TOLERANCE));
+        }
+    }
+}
+
 TEST_CASE("Boolean of a box and a rotated box keeps the volume identities", "[boolean]")
 {
     const auto a = MakeBox(Vector3::ZERO, 1);

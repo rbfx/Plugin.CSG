@@ -240,6 +240,90 @@ Corefinement::Corefinement(const CsgSolid& a, const CsgSolid& b, float epsilon)
     segmentsB_.Reset(static_cast<unsigned>(b_.triangleFace_.size()));
     touchedA_.assign(a_.triangleFace_.size(), 0);
     touchedB_.assign(b_.triangleFace_.size(), 0);
+    if (!g_csgExactOnly)
+        BuildAliases();
+}
+
+void Corefinement::BuildAliases()
+{
+    if (b_.VertexCount() == 0 || !a_.solid_.BoundsOverlap(b_.solid_.GetBoundsMin(), b_.solid_.GetBoundsMax(), epsilon_))
+        return;
+    // The box of the grid points of the second operand. A vertex of the first operand outside it has no twin.
+    CsgGridInt minX = std::numeric_limits<CsgGridInt>::max();
+    CsgGridInt minY = minX;
+    CsgGridInt minZ = minX;
+    CsgGridInt maxX = std::numeric_limits<CsgGridInt>::lowest();
+    CsgGridInt maxY = maxX;
+    CsgGridInt maxZ = maxX;
+    for (const CsgGridPoint& point : b_.grid_)
+    {
+        minX = ea::min(minX, point.x_);
+        minY = ea::min(minY, point.y_);
+        minZ = ea::min(minZ, point.z_);
+        maxX = ea::max(maxX, point.x_);
+        maxY = ea::max(maxY, point.y_);
+        maxZ = ea::max(maxZ, point.z_);
+    }
+    const auto keyOf = [](const CsgGridPoint& point)
+    {
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        return key;
+    };
+    CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> onPoint;
+    bool onPointBuilt = false;
+    for (int id = 0; id < a_.VertexCount(); ++id)
+    {
+        const CsgGridPoint& point = a_.grid_[id];
+        if (point.x_ < minX || point.x_ > maxX || point.y_ < minY || point.y_ > maxY || point.z_ < minZ
+            || point.z_ > maxZ)
+            continue;
+        if (!onPointBuilt)
+        {
+            onPointBuilt = true;
+            onPoint.Reserve(b_.VertexCount());
+            for (int other = 0; other < b_.VertexCount(); ++other)
+                onPoint.TryAdd(keyOf(b_.grid_[other]), other);
+        }
+        const int* twin = onPoint.Find(keyOf(point));
+        if (!twin)
+            continue;
+        if (alias_.empty())
+        {
+            alias_.assign(b_.VertexCount(), -1);
+            aliasBack_.assign(a_.VertexCount(), -1);
+        }
+        // The first vertex of each operand on a grid point makes the pair.
+        if (alias_[*twin] < 0)
+        {
+            alias_[*twin] = id;
+            aliasBack_[id] = *twin;
+        }
+    }
+}
+
+bool Corefinement::SharedLoop(const Mesh& mesh, int face, bool flip, ea::vector<int>* loop) const
+{
+    if (alias_.empty())
+        return false;
+    const unsigned start = mesh.loops_.vertexStart_[face];
+    const unsigned end = mesh.loops_.vertexStart_[face + 1];
+    if (end - start < 3)
+        return false;
+    for (unsigned i = start; i < end; ++i)
+    {
+        if (!IsShared(mesh, mesh.loops_.ids_[i]))
+            return false;
+    }
+    if (loop)
+    {
+        loop->resize(end - start);
+        for (unsigned i = start; i < end; ++i)
+            (*loop)[flip ? end - 1 - i : i - start] = Global(mesh, mesh.loops_.ids_[i]);
+    }
+    return true;
 }
 
 void Corefinement::CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel)
@@ -2035,10 +2119,14 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
             return false;
         if (id < core.CrossingBase())
         {
-            const int local = localVertex(id - mesh.offset_);
+            const int local = localVertex(core.Local(mesh, id));
             if (local >= 0)
             {
-                vertices.push_back(source.vertices_[local]);
+                ModelVertex corner = source.vertices_[local];
+                // One id has one position: that of the first operand.
+                if (core.IsAlias(mesh, id))
+                    corner.SetPosition(PointPosition(core, id));
+                vertices.push_back(corner);
                 continue;
             }
             // A vertex that is not on this face gives no record. The fit fails.
