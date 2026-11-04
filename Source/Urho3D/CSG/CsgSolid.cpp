@@ -11,6 +11,8 @@
 #include <Urho3D/Core/Assert.h>
 #include <Urho3D/Core/Profiler.h>
 
+#include <cstring>
+
 #include <EASTL/algorithm.h>
 #include <EASTL/hash_map.h>
 #include <EASTL/hash_set.h>
@@ -1219,6 +1221,173 @@ struct CsgSolid::TriangleOutput
     ea::vector<unsigned>* vertexStart_{};
 };
 
+namespace
+{
+
+/// Count the edges that have no edge in the reverse direction, by position. Two corners are one point only if
+/// their positions are equal, so a crack of any width counts. A sheet of two overlapping faces in one direction
+/// also counts. The ids of the exact loops do not show these defects: two ids can have one position.
+/// The count is the sum of two counts: one for the edges of the triangles, and one for the edges of the face loops.
+/// The loops count too, because a face can keep stored triangles that do not follow its loop.
+/// The key of an edge is the bits of its two end positions, so one lookup is sufficient for each edge.
+class PositionEdgeCounter
+{
+public:
+    explicit PositionEdgeCounter(size_t edges) { balance_.Reserve(edges); }
+
+    void AddEdge(const Vector3& from, const Vector3& to)
+    {
+        const Point a = ToPoint(from);
+        const Point b = ToPoint(to);
+        if (a == b)
+            return;
+        const bool forward = a < b;
+        bool existed = false;
+        balance_.FindOrAdd(forward ? EdgeKey{a, b} : EdgeKey{b, a}, existed) += forward ? 1 : -1;
+    }
+
+    /// Return the count of unbalanced edges and clear the edges.
+    unsigned TakeOpen()
+    {
+        unsigned open = 0;
+        for (const auto& entry : balance_)
+            open += entry.value_ != 0 ? 1u : 0u;
+        balance_.Clear();
+        return open;
+    }
+
+private:
+    struct Point
+    {
+        uint32_t x_, y_, z_;
+
+        bool operator==(const Point& rhs) const { return x_ == rhs.x_ && y_ == rhs.y_ && z_ == rhs.z_; }
+        bool operator<(const Point& rhs) const
+        {
+            if (x_ != rhs.x_)
+                return x_ < rhs.x_;
+            return y_ != rhs.y_ ? y_ < rhs.y_ : z_ < rhs.z_;
+        }
+    };
+
+    struct EdgeKey
+    {
+        Point from_;
+        Point to_;
+
+        bool operator==(const EdgeKey& rhs) const { return from_ == rhs.from_ && to_ == rhs.to_; }
+    };
+
+    struct EdgeKeyHash
+    {
+        size_t operator()(const EdgeKey& key) const noexcept
+        {
+            const CsgPackedKeyHash mix;
+            uint64_t h = mix((static_cast<uint64_t>(key.from_.y_) << 32) | key.from_.x_);
+            h ^= mix((static_cast<uint64_t>(key.to_.x_) << 32) | key.from_.z_);
+            h ^= (static_cast<uint64_t>(key.to_.z_) << 32 | key.to_.y_) * 0x9e3779b97f4a7c15ULL;
+            return mix(h);
+        }
+    };
+
+    static Point ToPoint(const Vector3& position) { return {Bits(position.x_), Bits(position.y_), Bits(position.z_)}; }
+
+    static uint32_t Bits(float value)
+    {
+        // The sum turns -0 into +0, so the two zeros are one key.
+        value += 0.0f;
+        uint32_t result;
+        std::memcpy(&result, &value, sizeof(result));
+        return result;
+    }
+
+    CsgFlatMap<EdgeKey, int, EdgeKeyHash> balance_;
+};
+
+/// Two hashes of a position, for the fast test of the balance. See IsBalanced.
+struct PointHash
+{
+    uint64_t f_;
+    uint64_t g_;
+
+    explicit PointHash(const Vector3& position)
+    {
+        const CsgPackedKeyHash mix;
+        uint32_t bits[3];
+        for (unsigned k = 0; k < 3; ++k)
+        {
+            // The sum turns -0 into +0, so the two zeros are one key.
+            const float value = position.Data()[k] + 0.0f;
+            std::memcpy(&bits[k], &value, sizeof(float));
+        }
+        f_ = mix((static_cast<uint64_t>(bits[1]) << 32) | bits[0]);
+        f_ = mix(f_ ^ (bits[2] * 0x9e3779b97f4a7c15ULL));
+        g_ = mix(f_ + 0x632be59bd9b4e019ULL);
+    }
+};
+
+/// Return the term of a directed edge. The term of the reverse edge is the negative value, so an edge and its
+/// reverse edge cancel. The arithmetic is modulo 2^64.
+uint64_t EdgeTerm(const PointHash& from, const PointHash& to) { return from.f_ * to.g_ - to.f_ * from.g_; }
+
+/// Return true if the sums of the edge terms of the triangles and of the face loops are zero. If all edges are
+/// balanced, the sums are zero. Unbalanced edges give a zero sum only by a hash collision, which is very rare.
+/// The test does not use a map, so it is much faster than the full count.
+bool IsBalanced(ea::span<const Vector3> trianglePositions, ea::span<const CsgSharedPolygon> faces)
+{
+    uint64_t triangleSum = 0;
+    for (size_t t = 0; t + 2 < trianglePositions.size(); t += 3)
+    {
+        const PointHash a(trianglePositions[t]);
+        const PointHash b(trianglePositions[t + 1]);
+        const PointHash c(trianglePositions[t + 2]);
+        triangleSum += EdgeTerm(a, b) + EdgeTerm(b, c) + EdgeTerm(c, a);
+    }
+    uint64_t loopSum = 0;
+    for (const CsgSharedPolygon& face : faces)
+    {
+        const auto& vertices = face->vertices_;
+        if (vertices.size() < 3)
+            continue;
+        const PointHash first(vertices[0].GetPosition());
+        PointHash from = first;
+        for (unsigned i = 1; i < vertices.size(); ++i)
+        {
+            const PointHash to(vertices[i].GetPosition());
+            loopSum += EdgeTerm(from, to);
+            from = to;
+        }
+        loopSum += EdgeTerm(from, first);
+    }
+    return triangleSum == 0 && loopSum == 0;
+}
+
+unsigned CountOpenPositionEdges(ea::span<const Vector3> trianglePositions, ea::span<const CsgSharedPolygon> faces)
+{
+    // Most solids are closed. The fast test finds them, and only the other solids get the full count.
+    if (IsBalanced(trianglePositions, faces))
+        return 0;
+    PositionEdgeCounter counter(trianglePositions.size() / 2 + 1);
+    for (size_t t = 0; t + 2 < trianglePositions.size(); t += 3)
+    {
+        counter.AddEdge(trianglePositions[t], trianglePositions[t + 1]);
+        counter.AddEdge(trianglePositions[t + 1], trianglePositions[t + 2]);
+        counter.AddEdge(trianglePositions[t + 2], trianglePositions[t]);
+    }
+    unsigned open = counter.TakeOpen();
+    for (const CsgSharedPolygon& face : faces)
+    {
+        const auto& vertices = face->vertices_;
+        if (vertices.size() < 3)
+            continue;
+        for (unsigned i = 0; i < vertices.size(); ++i)
+            counter.AddEdge(vertices[i].GetPosition(), vertices[(i + 1) % vertices.size()].GetPosition());
+    }
+    return open + counter.TakeOpen();
+}
+
+} // namespace
+
 CsgSolid::CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
@@ -1639,6 +1808,8 @@ void CsgSolid::Builder::CancelTriangles()
 
     // Of the triangles on three points, the ones that have no opposite partner stay. A face that would lose some of
     // its triangles but not all of them vetoes the three points of the lost ones, and the pass runs again.
+    // The thick mode does not make the veto unnecessary. Without the veto, a face loses only a part of its triangles.
+    // Then the thick hole tests and the rotated sweep samples in TestBoolean.cpp give open results.
     ea::vector<bool> drop(triangleCount);
     ea::hash_set<TriangleKey, TriangleKeyHash> vetoed;
     for (bool changed = true; changed;)
@@ -1865,6 +2036,11 @@ bool CsgSolid::NeedsRepair() const
 bool CsgSolid::IsCleanOperand() const
 {
     return closed_ && openEdges_.empty() && !NeedsRepair();
+}
+
+unsigned CsgSolid::OpenPositionEdgeCount() const
+{
+    return CountOpenPositionEdges(trianglePositions_, faces_);
 }
 
 double CsgSolid::Volume() const

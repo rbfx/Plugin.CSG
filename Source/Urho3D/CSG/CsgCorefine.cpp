@@ -349,6 +349,14 @@ void Corefinement::CollectCrossings(CsgScratch& scratch, const CsgParallelOption
             solidA.GetComponentMax(componentA), epsilon_, temporaryB);
         treeA.CollectOverlaps(treeB, epsilon_, scratch.facePairs_, scratch.stack_, parallel);
     }
+    // In thick mode, the result depends on the order of the crossings: Placed snaps a crossing to an earlier one.
+    // A parallel search gives the pairs in another order. The sort gives one order for every parallel option.
+    if (!g_csgExactOnly)
+    {
+        ea::sort(scratch.facePairs_.begin(), scratch.facePairs_.end(),
+            [](const CsgFaceBvh::ItemPair& x, const CsgFaceBvh::ItemPair& y)
+            { return x.first != y.first ? x.first < y.first : x.second < y.second; });
+    }
     for (const CsgFaceBvh::ItemPair& pair : scratch.facePairs_)
     {
         if (a_.loops_.loopLength_[pair.first] >= 3 && b_.loops_.loopLength_[pair.second] >= 3)
@@ -457,7 +465,7 @@ int Corefinement::EdgesThrough(const Mesh& edges, int triangle, const Mesh& othe
     return count;
 }
 
-CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex)
+CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex, int record, bool& inGroup)
 {
     if (g_csgExactOnly)
         return grid;
@@ -465,6 +473,7 @@ CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex)
         ea::min(PlacedReach * CsgExact::Thickness(CsgExact::Extent(grid)), static_cast<double>(1 << (PlacedShift - 1))));
     int64_t best = -1;
     CsgGridPoint found = grid;
+    int foundRecord = -1;
     if (!isVertex && placed_.Size() > 0)
     {
         for (int64_t x = (grid.x_ - reach) >> PlacedShift; x <= (grid.x_ + reach) >> PlacedShift; ++x)
@@ -472,11 +481,12 @@ CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex)
                 for (int64_t z = (grid.z_ - reach) >> PlacedShift; z <= (grid.z_ + reach) >> PlacedShift; ++z)
                 {
                     const CsgGridCellKey cell{static_cast<int32_t>(x), static_cast<int32_t>(y), static_cast<int32_t>(z)};
-                    const ea::vector<CsgGridPoint>* near = placed_.Find(cell);
+                    const ea::vector<PlacedPoint>* near = placed_.Find(cell);
                     if (!near)
                         continue;
-                    for (const CsgGridPoint& other : *near)
+                    for (const PlacedPoint& point : *near)
                     {
+                        const CsgGridPoint& other = point.grid_;
                         const int64_t distance = ea::max(std::abs(static_cast<int64_t>(other.x_) - grid.x_),
                             ea::max(std::abs(static_cast<int64_t>(other.y_) - grid.y_),
                                 std::abs(static_cast<int64_t>(other.z_) - grid.z_)));
@@ -484,15 +494,20 @@ CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex)
                         {
                             best = distance;
                             found = other;
+                            foundRecord = point.record_;
                         }
                     }
                 }
     }
     if (best >= 0)
+    {
+        crossings_[foundRecord].placedGroup_ = true;
+        inGroup = true;
         return found;
+    }
     bool existed = false;
     placed_.FindOrAdd(CsgGridCellKey{grid.x_ >> PlacedShift, grid.y_ >> PlacedShift, grid.z_ >> PlacedShift}, existed)
-        .push_back(grid);
+        .push_back(PlacedPoint{grid, record});
     return grid;
 }
 
@@ -528,10 +543,12 @@ int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const
     }
     double t = 0.5;
     CsgGridPoint grid;
+    const int record = static_cast<int>(crossings_.size());
+    bool inGroup = false;
     if (lowFlat)
-        grid = Placed(lowGrid, true);
+        grid = Placed(lowGrid, true, record, inGroup);
     else if (highFlat)
-        grid = Placed(highGrid, true);
+        grid = Placed(highGrid, true, record, inGroup);
     else if (difference.Sign() != 0)
     {
         // The rounding is exact and it ignores the sign of the difference.
@@ -551,9 +568,10 @@ int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const
     }
     // An end on the plane is the crossing itself and it does not move. Other crossings snap to an earlier one.
     if (!g_csgExactOnly && !lowFlat && !highFlat)
-        grid = Placed(grid, false);
+        grid = Placed(grid, false, record, inGroup);
 
     Crossing data;
+    data.placedGroup_ = inGroup;
     data.grid_ = grid;
     // The crossing lies between the ends of the edge, so it is in the range of the grid.
     URHO3D_ASSERT(InGridRange(grid), "CsgCorefine crossing is outside the range of the grid");
@@ -565,8 +583,7 @@ int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const
     data.difference_ = difference;
     data.normal_ = normal;
 
-    int id = CrossingBase() + static_cast<int>(crossings_.size());
-    int record = static_cast<int>(crossings_.size());
+    int id = CrossingBase() + record;
     crossings_.push_back(data);
     idRef = id;
 
@@ -2894,6 +2911,10 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
     {
         const Crossing& crossing = crossings_[index];
         if (crossing.difference_.Sign() == 0)
+            continue;
+        // A crossing of a group of Placed is on the grid point of the group. A move pulls the group apart.
+        // So it counts as exact here: it does not move, and ConstrainClusters keeps it as a fixed point.
+        if (crossing.placedGroup_)
             continue;
         const CsgCrossingKey& key = crossing.key_;
         const Mesh& edges = key.edgeInSecond_ ? b_ : a_;

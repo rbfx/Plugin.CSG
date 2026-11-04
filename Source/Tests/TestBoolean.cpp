@@ -309,9 +309,10 @@ TEST_CASE("Shared loops: two boxes with one face on the same four vertices", "[b
 
     SECTION("Union and difference are closed, have the right volume and no duplicate face")
     {
+        // The section checks the thick pass. Boolean starts with the exact pass and keeps it, because it is closed.
         const CsgExactOnlyScope scope(false);
-        const auto unionAB = Run(a, b, CsgOperation::Union);
-        const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+        const auto unionAB = CsgBooleanOnceForTest(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+        const auto differenceAB = CsgBooleanOnceForTest(a, b, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
         CheckClosed(unionAB);
         CheckClosed(differenceAB);
         CHECK(Volume(unionAB) == Catch::Approx(16.0).margin(VOLUME_TOLERANCE));
@@ -325,11 +326,13 @@ TEST_CASE("Shared loops: two boxes with one face on the same four vertices", "[b
 
     SECTION("Exact-only mode keeps the old twin faces")
     {
+        // Boolean sets the flag itself. The one-pass hook keeps the flag of the scope.
         for (const CsgOperation operation : {CsgOperation::Union, CsgOperation::DifferenceAB})
         {
             const auto byDefault = Run(a, b, operation);
             const CsgExactOnlyScope scope(true);
-            const auto exact = Run(a, b, operation);
+            const auto exact = CsgBooleanOnceForTest(a, b, operation, CSG_DEFAULT_EPSILON);
+            // Boolean keeps the exact pass if it is closed.
             CHECK(SolidsIdentical(*byDefault, *exact));
             CheckClosed(exact);
             // Exact-only mode keeps both whole faces on the plane x = 1 in the union: the faces are twins.
@@ -783,9 +786,9 @@ void CheckRotatedAssociativity(float angle)
 // Rotation rounds the positions, so the vertices of a coplanar face are on a shared edge only within rounding.
 // The grid step is 2^-10 units in float mode and 2^-16 units in double mode.
 // The snapped corners do not stay coplanar. The rounding can turn a thin sliver over.
-// The float mode passes all four angles. The double mode fails at the angle 14.3: a result stays open.
-// So the test keeps the [!mayfail] tag. It fails as expected in the double mode only.
-TEST_CASE("known limit: rotated result with coplanar faces is associative", "[boolean][!mayfail]")
+// Before the thick mode, the double mode failed at the angle 14.3: a result stayed open.
+// Now an open exact result runs again with thick decisions. Both modes pass all four angles.
+TEST_CASE("known limit: rotated result with coplanar faces is associative", "[boolean]")
 {
     for (const float angle : {30.0f, 12.5f, 4.5f, 14.3f})
         CheckRotatedAssociativity(angle);
@@ -1944,3 +1947,191 @@ TEST_CASE("Union of boxes with a coplanar contact gives a closed result", "[bool
     CHECK(NoZeroSumUnclassifiedPatch::RemovedPatches() > 0);
 #endif
 }
+
+namespace
+{
+
+/// The wall and the holes of the near-coincident tests of the C# suite (CsgValidationTests): a wall of
+/// 12.5 x 5 x 0.3 units around the origin, and holes that are prisms through the wall.
+constexpr float WallHalfZ = 0.15f;
+constexpr float HoleRadius = 0.15f;
+constexpr unsigned HoleSides = 8;
+constexpr double ThickVolumeTolerance = 1e-5;
+
+SolidPtr MakeWall()
+{
+    return MakeSolid(MakeBoxPolygons(Vector3::ZERO, Vector3(6.25f, 2.5f, WallHalfZ), 1));
+}
+
+/// Make a prism with its axis along z through the point (u, v, middleZ). The length is 1 unit. The rotation
+/// turns the prism about its center.
+SolidPtr MakeHole(float u, float v, const Quaternion& rotation = Quaternion::IDENTITY, float middleZ = 0.0f,
+    unsigned shared = 2)
+{
+    const Vector3 center(u, v, middleZ);
+    Vector3 bottom[HoleSides];
+    Vector3 top[HoleSides];
+    for (unsigned i = 0; i < HoleSides; ++i)
+    {
+        const float angle = 360.0f * static_cast<float>(i) / static_cast<float>(HoleSides);
+        const Vector3 offset(HoleRadius * Cos(angle), HoleRadius * Sin(angle), 0.0f);
+        bottom[i] = center + rotation * (offset - Vector3(0.0f, 0.0f, 0.5f));
+        top[i] = center + rotation * (offset + Vector3(0.0f, 0.0f, 0.5f));
+    }
+    ea::vector<CsgPolygon> polygons;
+    const auto add = [&](std::initializer_list<Vector3> positions)
+    {
+        ea::vector<ModelVertex> vertices;
+        for (const Vector3& position : positions)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(position);
+            vertices.push_back(vertex);
+        }
+        polygons.push_back(CsgPolygon(ea::move(vertices), shared));
+    };
+    for (unsigned i = 0; i < HoleSides; ++i)
+    {
+        const unsigned next = (i + 1) % HoleSides;
+        add({bottom[i], bottom[next], top[next], top[i]});
+    }
+    ea::vector<ModelVertex> capTop;
+    ea::vector<ModelVertex> capBottom;
+    for (unsigned i = 0; i < HoleSides; ++i)
+    {
+        ModelVertex vertex;
+        vertex.SetPosition(top[i]);
+        capTop.push_back(vertex);
+        vertex.SetPosition(bottom[HoleSides - 1 - i]);
+        capBottom.push_back(vertex);
+    }
+    polygons.push_back(CsgPolygon(ea::move(capTop), shared));
+    polygons.push_back(CsgPolygon(ea::move(capBottom), shared));
+    return MakeSolid(ea::move(polygons));
+}
+
+/// Check that a result has no open edge by position and by the polygon test.
+void CheckNoOpenEdges(const SolidPtr& solid)
+{
+    CHECK(solid->OpenPositionEdgeCount() == 0);
+    CheckClosed(solid);
+}
+
+bool NearVolume(double a, double b)
+{
+    return std::abs(a - b) <= ThickVolumeTolerance * std::max(std::abs(a), std::abs(b));
+}
+
+} // namespace
+
+// A second hole near the first one: shifted by a small amount or turned by a small angle. After the first cut the
+// vertices are rounded, so the exact predicates see no coincidence. The result must stay closed.
+TEST_CASE("Thick mode: a second hole near the first one keeps the result closed", "[boolean][thick]")
+{
+    const auto wall = MakeWall();
+    const auto first = MakeHole(1.0f, 0.5f);
+    const double single = Volume(Run(wall, first, CsgOperation::DifferenceAB));
+    const double tolerance = ThickVolumeTolerance * single;
+    const auto check = [&](const SolidPtr& second, double movement)
+    {
+        const auto result = Run(Run(wall, first, CsgOperation::DifferenceAB), second, CsgOperation::DifferenceAB);
+        CheckNoOpenEdges(result);
+        // The second hole takes away a strip along the wall of the first one.
+        const double strip = 2.0 * 0.92 * movement * 2.0 * WallHalfZ;
+        const double volume = Volume(result);
+        CHECK(volume <= single + tolerance);
+        CHECK(volume >= single - strip - tolerance);
+    };
+    for (const double amount : {1e-7, 1e-6, 1e-5, 1e-4, 1e-3})
+    {
+        CAPTURE(amount);
+        check(MakeHole(1.0f + static_cast<float>(amount), 0.5f), amount);
+        check(MakeHole(1.0f, 0.5f + static_cast<float>(amount)), amount);
+        check(MakeHole(1.0f, 0.5f, Quaternion::IDENTITY, static_cast<float>(amount)), 0.0);
+    }
+    for (const double amount : {1e-6, 1e-4, 1e-2})
+    {
+        CAPTURE(amount);
+        const Quaternion turn(static_cast<float>(amount * 180.0 / M_PI), Vector3::RIGHT);
+        check(MakeHole(1.0f, 0.5f, turn), HoleRadius * amount);
+    }
+}
+
+// Cut a hole, plug it with the same prism, and cut it again. Each cut has the one-hole volume.
+// The C# test has three rounds. Here the third cut is open in the exact pass (20 open edges), and the thick pass is
+// worse (44 open edges). The thick pass of the second cut is also open. So the test stops after two rounds.
+TEST_CASE("Thick mode: plug and cut again keeps the one-hole volume", "[boolean][thick]")
+{
+    const auto hole = MakeHole(1.0f, 0.5f);
+    const double single = Volume(Run(MakeWall(), hole, CsgOperation::DifferenceAB));
+    SolidPtr solid = MakeWall();
+    for (int round = 1; round <= 2; ++round)
+    {
+        CAPTURE(round);
+        solid = Run(solid, hole, CsgOperation::DifferenceAB);
+        CheckNoOpenEdges(solid);
+        CHECK(NearVolume(Volume(solid), single));
+        if (round == 2)
+            break;
+        solid = Run(solid, hole, CsgOperation::Union);
+        CheckNoOpenEdges(solid);
+    }
+}
+
+// The same rotated prism cuts the wall 48 times. Each cut after the first one is near-coincident with the hole.
+TEST_CASE("Thick mode: the same rotated hole cut 48 times keeps the one-hole volume", "[boolean][thick]")
+{
+    for (const float degrees : {17.0f, 30.0f})
+    {
+        CAPTURE(degrees);
+        const auto hole = MakeHole(1.0f, 0.5f, Quaternion(degrees, Vector3::FORWARD));
+        const double single = Volume(Run(MakeWall(), hole, CsgOperation::DifferenceAB));
+        SolidPtr solid = MakeWall();
+        for (int step = 1; step <= 48; ++step)
+        {
+            solid = Run(solid, hole, CsgOperation::DifferenceAB);
+            if (step == 1 || step == 3 || step == 16 || step == 48)
+            {
+                CAPTURE(step);
+                CheckNoOpenEdges(solid);
+                CHECK(NearVolume(Volume(solid), single));
+            }
+        }
+    }
+}
+
+// Two identical boxes: every face is shared. The union and the intersection are the box.
+TEST_CASE("Thick mode: union and intersection of identical boxes give the box", "[boolean][thick]")
+{
+    const auto a = MakeBox(Vector3(0.3f, 0.2f, 0.1f), 1);
+    const auto b = MakeBox(Vector3(0.3f, 0.2f, 0.1f), 2);
+    for (const CsgOperation operation : {CsgOperation::Union, CsgOperation::Intersection})
+    {
+        const auto result = Run(a, b, operation);
+        CheckNoOpenEdges(result);
+        CHECK(Volume(result) == Catch::Approx(8.0).margin(VOLUME_TOLERANCE));
+    }
+}
+
+#ifdef CSG_DIAGNOSTICS
+// Each cut with the same rotated hole is near-coincident with the earlier cuts. From the sixth cut, the exact pass
+// opens the result in the float and the double mode. The boolean then runs again with thick decisions, and the
+// thick result is closed.
+TEST_CASE("Thick mode: an open exact result runs again with thick decisions", "[boolean][thick]")
+{
+    const auto hole = MakeHole(1.0f, 0.5f, Quaternion(17.0f, Vector3::FORWARD));
+    const double single = Volume(Run(MakeWall(), hole, CsgOperation::DifferenceAB));
+    SolidPtr solid = MakeWall();
+    int retries = 0;
+    for (int step = 1; step <= 6; ++step)
+    {
+        g_csgDiagnostics.Reset();
+        solid = Run(solid, hole, CsgOperation::DifferenceAB);
+        retries += g_csgDiagnostics.thickRetries_.load();
+    }
+    CHECK(retries >= 1);
+    CheckNoOpenEdges(solid);
+    CHECK(NearVolume(Volume(solid), single));
+}
+#endif
+

@@ -1340,6 +1340,26 @@ bool ClassifyGridCentroid(
         { return CsgExact::AxisRayCrossesTriangleCentroid(a, b, c, t0, t1, t2, second); });
 }
 
+/// Run the boolean once with the current value of g_csgExactOnly. Each call builds a new corefinement, so the
+/// aliases and the placed crossings of an earlier call do not carry over.
+SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel)
+{
+    Corefinement core(*a, *b, epsilon);
+    CsgScratch scratch;
+    core.CollectCrossings(scratch, parallel);
+    core.ConstrainCrossings(scratch);
+    core.SplitFaces(scratch);
+
+    CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
+        a->GetTrianglePositions().size() + b->GetTrianglePositions().size(), epsilon);
+    CsgBooleanScratch& s = scratch.boolean_;
+    AppendOperand(core, core.a_, core.segmentsA_, core.splitA_, operation, false, s.operands_[0], s);
+    AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, operation, true, s.operands_[1], s);
+    ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
+    return result.Finish();
+}
+
 } // namespace
 
 SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
@@ -1359,19 +1379,31 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     if (b->FaceCount() == 0)
         return operation == CsgOperation::Intersection ? b : a;
 
-    Corefinement core(*a, *b, epsilon);
-    CsgScratch scratch;
-    core.CollectCrossings(scratch, parallel);
-    core.ConstrainCrossings(scratch);
-    core.SplitFaces(scratch);
+    // The first pass uses the exact decisions. The C# code runs the thick pass first, but the C++ classification
+    // is exact: a thick pass can give a closed result with a wrong volume, and no count detects that.
+    // The scope sets the flag explicitly, because a nested boolean on one thread can see the scope of an outer one.
+    SharedPtr<const CsgSolid> result;
+    {
+        const CsgExactOnlyScope exact(true);
+        result = BooleanOnce(a, b, operation, epsilon, parallel);
+    }
+    // Rounded near-coincident input can open the exact result. If the result has more open edges than the operands,
+    // run again with the thick decisions: elements within the thickness of each other are coincident.
+    // Keep the result with fewer open edges. The count is by position, as in the C# code: the exact ids of a result
+    // can hide a sheet or a crack.
+    const unsigned open = result->OpenPositionEdgeCount();
+    if (open == 0 || open <= a->OpenPositionEdgeCount() + b->OpenPositionEdgeCount())
+        return result;
+    CSG_DIAG_COUNT(thickRetries_);
+    const CsgExactOnlyScope thick(false);
+    SharedPtr<const CsgSolid> thickResult = BooleanOnce(a, b, operation, epsilon, parallel);
+    return thickResult->OpenPositionEdgeCount() < open ? thickResult : result;
+}
 
-    CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
-        a->GetTrianglePositions().size() + b->GetTrianglePositions().size(), epsilon);
-    CsgBooleanScratch& s = scratch.boolean_;
-    AppendOperand(core, core.a_, core.segmentsA_, core.splitA_, operation, false, s.operands_[0], s);
-    AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, operation, true, s.operands_[1], s);
-    ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
-    return result.Finish();
+SharedPtr<const CsgSolid> CsgBooleanOnceForTest(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon)
+{
+    return BooleanOnce(a, b, operation, epsilon, {});
 }
 
 bool CsgContainsGridPoint(const CsgSolid& solid, const CsgGridPoint& p)

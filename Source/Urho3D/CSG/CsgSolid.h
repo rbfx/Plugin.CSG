@@ -200,6 +200,12 @@ public:
     bool HasOpenEdges() const { return !openEdges_.empty(); }
     /// Return the number of edges that have no partner.
     unsigned OpenEdgeCount() const { return static_cast<unsigned>(openEdges_.size()); }
+    /// Return the number of edges of the triangles and of the face loops that have no edge in the reverse
+    /// direction. Two corners are one point only if their positions are equal. Unlike OpenEdgeCount, the count sees
+    /// a sheet of two faces in one direction, and a crack between two vertices with one exact id.
+    /// The boolean uses it to select between the thick and the exact pass. Each call counts again, in linear time.
+    /// The solid does not store the count, so a solid build does not pay for it.
+    unsigned OpenPositionEdgeCount() const;
     /// Return the signed volume of the solid: the sum of a . (b x c) / 6 over its triangles.
     /// The sum uses double precision. A closed solid with outward faces has a positive volume.
     double Volume() const;

@@ -45,6 +45,10 @@ struct Crossing
     CsgExactVolume difference_{};
     /// Normal of the crossed triangle. It breaks ties between crossings on one edge.
     CsgNormal normal_{};
+    /// True if the crossing is in a group of Corefinement::Placed: the first crossing at the grid point, or a
+    /// crossing that snapped to it. The group shares one grid point. ConstrainCrossings does not move such a
+    /// crossing, because a move pulls the group apart.
+    bool placedGroup_{};
 };
 
 /// Order two crossings of one edge by their parameter from its lower to its higher end.
@@ -592,6 +596,8 @@ public:
     /// A corner that equals a corner of the crossed triangle or of the triangles on the edge does not count.
     /// If no corner is valid, the crossing keeps the nearest rounding. Call this after CollectCrossings and
     /// before SplitFaces. It builds the edge triangles of both meshes.
+    /// A crossing with the placedGroup_ mark does not move, and ConstrainClusters keeps it as a fixed point.
+    /// Its grid point is the grid point of the group and not the nearest rounding of its exact position.
     void ConstrainCrossings(CsgScratch& scratch);
     /// Split every triangle of both operands that has curve segments into regions. Fill splitA_ and splitB_.
     /// Call this after CollectCrossings.
@@ -649,7 +655,9 @@ private:
     /// Their grid points are some grid units apart, and the result must have one vertex there.
     /// A vertex of an operand does not move: if isVertex is true, only the registration is done.
     /// If g_csgExactOnly is true, return the grid point and register nothing.
-    CsgGridPoint Placed(const CsgGridPoint& grid, bool isVertex);
+    /// The record is the index in crossings_ of the new crossing. It is not in crossings_ yet. If the grid point
+    /// snaps, the earlier crossing gets the placedGroup_ mark, and inGroup is set to true for the new crossing.
+    CsgGridPoint Placed(const CsgGridPoint& grid, bool isVertex, int record, bool& inGroup);
 
     /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
     int CompareRecords(int x, int y) const;
@@ -674,8 +682,14 @@ private:
     ea::vector<int> alias_;
     /// By vertex of the first operand: the vertex of the second operand on the same grid point, or -1.
     ea::vector<int> aliasBack_;
+    /// A grid point of placed_ and the record of the crossing that registered it.
+    struct PlacedPoint
+    {
+        CsgGridPoint grid_;
+        int record_{};
+    };
     /// Grid points of the placed crossings by cell, see Placed. It is empty if g_csgExactOnly is true.
-    CsgFlatMap<CsgGridCellKey, ea::vector<CsgGridPoint>, CsgGridCellKeyHash> placed_;
+    CsgFlatMap<CsgGridCellKey, ea::vector<PlacedPoint>, CsgGridCellKeyHash> placed_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;
@@ -799,7 +813,7 @@ bool CsgClassifyGridCentroidForTest(
 /// Switch of the thick predicates of CsgExact. The switch is local to a thread.
 /// If it is true, each predicate gives the exact result and ignores any thickness.
 /// If it is false, a point or an edge within the thickness of a plane or an edge of the other operand counts as on it.
-/// The switch stays true until the thick mode is complete.
+/// Boolean sets the switch for each pass. See Boolean.
 inline thread_local bool g_csgExactOnly = true;
 
 /// Set g_csgExactOnly for the life of the object, and restore the old value after it.
@@ -856,6 +870,9 @@ struct CsgBooleanDiagnostics
     /// Crossings that ConstrainCrossings moved to another grid point, and crossings that it could not move.
     std::atomic<int> constrainedCrossings_{};
     std::atomic<int> unconstrainableCrossings_{};
+    /// Booleans that ran again with the thick decisions, because the exact result had more open edges than
+    /// the operands.
+    std::atomic<int> thickRetries_{};
     /// Switch of the validity count. A test sets it. Reset does not change it.
     std::atomic<bool> countInvalid_{false};
 
@@ -866,7 +883,7 @@ struct CsgBooleanDiagnostics
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
                  &unconstrainableCrossings_, &zeroSumUnclassifiedPatches_, &zeroSumDegeneratePatches_,
-                 &componentsRemoved_})
+                 &componentsRemoved_, &thickRetries_})
             counter->store(0, std::memory_order_relaxed);
     }
 };

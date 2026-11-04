@@ -28,8 +28,17 @@ namespace CsgInternal
 /// The parallel options only change how the face pairs of the corefinement are found. The result is the same
 /// for every option. The default options give a serial run. The code forces a serial run
 /// only on worker threads. A caller inside any work queue task must pass a null work queue.
+///
+/// The first pass uses the exact decisions of the predicates, see g_csgExactOnly. If its result has more open edges
+/// than the two operands together, the boolean runs again with the thick decisions. The result with fewer open
+/// edges is returned. The function sets g_csgExactOnly itself, so the value of the caller has no effect.
 SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
     CsgOperation operation, float epsilon, const CsgParallelOptions& parallel = {});
+
+/// Run one pass of the boolean with the current value of g_csgExactOnly and with no second pass.
+/// The operands must have faces and must be in the range of the grid. Only the tests use this function.
+SharedPtr<const CsgSolid> CsgBooleanOnceForTest(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon);
 
 } // namespace CsgInternal
 
