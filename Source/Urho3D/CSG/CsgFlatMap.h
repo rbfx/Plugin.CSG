@@ -295,4 +295,27 @@ struct CsgCrossingKeyHash
     }
 };
 
+/// Cell of a grid point, by integer coordinates.
+struct CsgGridCellKey
+{
+    int32_t x_{};
+    int32_t y_{};
+    int32_t z_{};
+
+    bool operator==(const CsgGridCellKey& rhs) const { return x_ == rhs.x_ && y_ == rhs.y_ && z_ == rhs.z_; }
+    bool operator!=(const CsgGridCellKey& rhs) const { return !(*this == rhs); }
+};
+
+/// Hash of CsgGridCellKey. It mixes the three words with the CsgPackedKeyHash avalanche.
+struct CsgGridCellKeyHash
+{
+    size_t operator()(const CsgGridCellKey& key) const noexcept
+    {
+        const CsgPackedKeyHash mix;
+        uint64_t h = mix((static_cast<uint64_t>(static_cast<uint32_t>(key.y_)) << 32) | static_cast<uint32_t>(key.x_));
+        h ^= static_cast<uint32_t>(key.z_) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        return mix(h);
+    }
+};
+
 }   // namespace Urho3D

@@ -129,7 +129,7 @@ void Sides(const Mesh& corners, int triangle, const Mesh& other, int otherTriang
 
 } // namespace
 
-int CompareOnEdge(const Crossing& x, const Crossing& y)
+int CompareOnEdge(const Crossing& x, const Crossing& y, bool onePoint)
 {
     const CsgExactVolume& dx = x.difference_;
     const CsgExactVolume& dy = y.difference_;
@@ -138,7 +138,7 @@ int CompareOnEdge(const Crossing& x, const Crossing& y)
         x.lowVolume_.count_, x.lowVolume_.terms_, dy.count_, dy.terms_, y.lowVolume_.count_, y.lowVolume_.terms_,
         dx.count_, dx.terms_);
     const int denominatorSign = dx.Sign() * dy.Sign();
-    if (numeratorSign != 0)
+    if (numeratorSign != 0 && !onePoint)
         return numeratorSign * denominatorSign;
 
     // Tie: compare delta * (Nx / Dx - Ny / Dy), component by component.
@@ -373,27 +373,83 @@ int Corefinement::EdgesThrough(const Mesh& edges, int triangle, const Mesh& othe
     return count;
 }
 
+CsgGridPoint Corefinement::Placed(const CsgGridPoint& grid, bool isVertex)
+{
+    if (g_csgExactOnly)
+        return grid;
+    const int64_t reach = static_cast<int64_t>(
+        ea::min(PlacedReach * CsgExact::Thickness(CsgExact::Extent(grid)), static_cast<double>(1 << (PlacedShift - 1))));
+    int64_t best = -1;
+    CsgGridPoint found = grid;
+    if (!isVertex && placed_.Size() > 0)
+    {
+        for (int64_t x = (grid.x_ - reach) >> PlacedShift; x <= (grid.x_ + reach) >> PlacedShift; ++x)
+            for (int64_t y = (grid.y_ - reach) >> PlacedShift; y <= (grid.y_ + reach) >> PlacedShift; ++y)
+                for (int64_t z = (grid.z_ - reach) >> PlacedShift; z <= (grid.z_ + reach) >> PlacedShift; ++z)
+                {
+                    const CsgGridCellKey cell{static_cast<int32_t>(x), static_cast<int32_t>(y), static_cast<int32_t>(z)};
+                    const ea::vector<CsgGridPoint>* near = placed_.Find(cell);
+                    if (!near)
+                        continue;
+                    for (const CsgGridPoint& other : *near)
+                    {
+                        const int64_t distance = ea::max(std::abs(static_cast<int64_t>(other.x_) - grid.x_),
+                            ea::max(std::abs(static_cast<int64_t>(other.y_) - grid.y_),
+                                std::abs(static_cast<int64_t>(other.z_) - grid.z_)));
+                        if (distance <= reach && (best < 0 || distance < best))
+                        {
+                            best = distance;
+                            found = other;
+                        }
+                    }
+                }
+    }
+    if (best >= 0)
+        return found;
+    bool existed = false;
+    placed_.FindOrAdd(CsgGridCellKey{grid.x_ >> PlacedShift, grid.y_ >> PlacedShift, grid.z_ >> PlacedShift}, existed)
+        .push_back(grid);
+    return grid;
+}
+
 int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0,
     const CsgGridPoint& t1, const CsgGridPoint& t2, double faceExtent)
 {
-    // The faceExtent is for the thick volumes of the crossing ends. A later step uses it with CsgExact::FlatPlane.
-    (void)faceExtent;
     bool existed = false;
     int& idRef = crossingIds_.FindOrAdd(key, existed);
     if (existed)
         return idRef;
 
     const CsgNormal normal = CsgExact::Normal(t0, t1, t2);
-    const CsgExactVolume lowVolume = CsgExact::Dot(normal, t0, edges.grid_[key.low_]);
-    const CsgExactVolume difference = CsgExact::Dot(normal, edges.grid_[key.high_], edges.grid_[key.low_]);
     const CsgGridPoint& lowGrid = edges.grid_[key.low_];
     const CsgGridPoint& highGrid = edges.grid_[key.high_];
+    CsgExactVolume lowVolume = CsgExact::Dot(normal, t0, lowGrid);
+    CsgExactVolume difference = CsgExact::Dot(normal, highGrid, lowGrid);
+    // In thick mode, an end that the orientation takes as on the plane has zero volume. The order on the edge
+    // and the position then agree with the orientation. That end is the crossing.
+    bool lowFlat = false;
+    bool highFlat = false;
+    if (!g_csgExactOnly)
+    {
+        lowFlat = CsgExact::FlatPlane(t0, t1, t2, lowGrid, faceExtent);
+        highFlat = CsgExact::FlatPlane(t0, t1, t2, highGrid, faceExtent);
+        if (lowFlat || highFlat)
+        {
+            // The difference is lowVolume - highVolume. Compute it before a volume changes.
+            const CsgExactVolume highVolume = highFlat ? CsgExactVolume{} : CsgExact::Dot(normal, t0, highGrid);
+            difference = lowFlat ? (highFlat ? CsgExactVolume{} : CsgExact::Negate(highVolume)) : lowVolume;
+            if (lowFlat)
+                lowVolume = CsgExactVolume{};
+        }
+    }
     double t = 0.5;
     CsgGridPoint grid;
-    if (difference.Sign() != 0)
+    if (lowFlat)
+        grid = Placed(lowGrid, true);
+    else if (highFlat)
+        grid = Placed(highGrid, true);
+    else if (difference.Sign() != 0)
     {
-        t = lowVolume.Approximate() / difference.Approximate();
-        t = std::isnan(t) ? 0.5 : (t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t));
         // The rounding is exact and it ignores the sign of the difference.
         grid = CsgExact::RoundCrossing(lowGrid, highGrid, lowVolume, difference);
     }
@@ -404,6 +460,14 @@ int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const
         grid.y_ = static_cast<CsgGridInt>((static_cast<int64_t>(lowGrid.y_) + highGrid.y_ + 1) >> 1);
         grid.z_ = static_cast<CsgGridInt>((static_cast<int64_t>(lowGrid.z_) + highGrid.z_ + 1) >> 1);
     }
+    if (difference.Sign() != 0)
+    {
+        t = lowVolume.Approximate() / difference.Approximate();
+        t = std::isnan(t) ? 0.5 : (t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t));
+    }
+    // An end on the plane is the crossing itself and it does not move. Other crossings snap to an earlier one.
+    if (!g_csgExactOnly && !lowFlat && !highFlat)
+        grid = Placed(grid, false);
 
     Crossing data;
     data.grid_ = grid;
@@ -466,6 +530,37 @@ void Corefinement::EdgeCrossings(
         output.push_back(edgeNodes_[node].record_);
 
     SortIds(output, scratch.merge_, [this](int x, int y) { return CompareRecords(x, y); });
+    // In thick mode, neighbors at one grid point are one point: an edge that meets an edge of the other operand
+    // crosses the two faces on that edge there. The displacement decides on which side the edges pass, so it also
+    // orders these crossings. Their exact order can be the opposite one.
+    if (!g_csgExactOnly)
+    {
+        const int count = static_cast<int>(output.size());
+        for (int first = 0; first < count;)
+        {
+            int end = first + 1;
+            while (end < count && Record(output[end]).grid_ == Record(output[first]).grid_)
+                ++end;
+            // A run is short, so an insertion sort is enough. It is stable and it is safe for an inconsistent order.
+            for (int i = first + 1; i < end; ++i)
+            {
+                const int value = output[i];
+                int j = i;
+                while (j > first)
+                {
+                    int order = CompareOnEdge(Record(output[j - 1]), Record(value), true);
+                    if (order == 0)
+                        order = output[j - 1] < value ? -1 : (output[j - 1] > value ? 1 : 0);
+                    if (order <= 0)
+                        break;
+                    output[j] = output[j - 1];
+                    --j;
+                }
+                output[j] = value;
+            }
+            first = end;
+        }
+    }
     // Crossings of one edge that round to one grid point have one id. They are next to each other.
     int kept = 0;
     for (int i = 0; i < static_cast<int>(output.size()); ++i)

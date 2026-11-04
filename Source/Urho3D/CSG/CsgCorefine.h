@@ -49,7 +49,9 @@ struct Crossing
 
 /// Order two crossings of one edge by their parameter from its lower to its higher end.
 /// The order is exact. The displacement of the second operand breaks the ties. Return -1, 0 or 1.
-int CompareOnEdge(const Crossing& x, const Crossing& y);
+/// If onePoint is true, the crossings are at one position and so they are one point. Then only the
+/// displacement orders them, and the test of the parameter is skipped.
+int CompareOnEdge(const Crossing& x, const Crossing& y, bool onePoint = false);
 
 /// The triangles on one undirected edge of a mesh. A closed surface has two triangles on an edge.
 /// A boundary edge has one. An entry that is not used is -1.
@@ -605,6 +607,19 @@ private:
     int CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0, const CsgGridPoint& t1,
         const CsgGridPoint& t2, double faceExtent);
 
+    /// Cell of 2^PlacedShift grid units of placed_. The reach of Placed is half a cell.
+    static constexpr int PlacedShift = 8;
+    /// Reach of Placed in thicknesses. A vertex error of half a float spacing moves a crossing on a line at a
+    /// small angle to the crossed face by some spacings.
+    static constexpr double PlacedReach = 4.0;
+
+    /// Return the grid point of an earlier crossing within the reach of the grid point, or the grid point itself.
+    /// Later crossings then find the grid point. One true point on an edge of each operand gives two crossings.
+    /// Their grid points are some grid units apart, and the result must have one vertex there.
+    /// A vertex of an operand does not move: if isVertex is true, only the registration is done.
+    /// If g_csgExactOnly is true, return the grid point and register nothing.
+    CsgGridPoint Placed(const CsgGridPoint& grid, bool isVertex);
+
     /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
     int CompareRecords(int x, int y) const;
 
@@ -623,6 +638,8 @@ private:
     int RecordId(int record) const { return CrossingBase() + record; }
 
     CsgFlatMap<CsgCrossingKey, int, CsgCrossingKeyHash> crossingIds_;
+    /// Grid points of the placed crossings by cell, see Placed. It is empty if g_csgExactOnly is true.
+    CsgFlatMap<CsgGridCellKey, ea::vector<CsgGridPoint>, CsgGridCellKeyHash> placed_;
     /// Crossings of the edges of the first operand (index 0) and the second operand (index 1), by directed key.
     CsgFlatMap<uint64_t, EdgeList, CsgPackedKeyHash> edgeCrossings_[2];
     ea::vector<EdgeNode> edgeNodes_;

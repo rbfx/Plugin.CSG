@@ -699,6 +699,103 @@ TEST_CASE("Corefine handles crossings of one edge that round to one grid point",
     CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
 }
 
+namespace
+{
+
+/// A prism whose section in the plane xz is a triangle. Its ridge is on the line x = 0, z = 1000 grid units.
+/// The left face rises 0.4 grid unit in x for each grid unit in z. The right face rises 0.6 grid unit.
+CsgSolid MakeRidgePrism()
+{
+    const float unit = static_cast<float>(1.0 / 1024.0);
+    const auto polygon = [](std::initializer_list<Vector3> corners)
+    {
+        ea::vector<ModelVertex> vertices;
+        for (const Vector3& corner : corners)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(corner);
+            vertices.push_back(vertex);
+        }
+        return CsgPolygon(ea::move(vertices), 2);
+    };
+    const auto point = [unit](float x, float y, float z) { return Vector3(x * unit, y, z * unit); };
+    const Vector3 p0Low = point(-400.0f, -1.0f, 0.0f);
+    const Vector3 p0High = point(-400.0f, 1.0f, 0.0f);
+    const Vector3 p1Low = point(600.0f, -1.0f, 0.0f);
+    const Vector3 p1High = point(600.0f, 1.0f, 0.0f);
+    const Vector3 p2Low = point(0.0f, -1.0f, 1000.0f);
+    const Vector3 p2High = point(0.0f, 1.0f, 1000.0f);
+    ea::vector<CsgPolygon> prism;
+    prism.push_back(polygon({p0Low, p0High, p1High, p1Low}));
+    prism.push_back(polygon({p2Low, p1Low, p1High, p2High}));
+    prism.push_back(polygon({p0Low, p2Low, p2High, p0High}));
+    prism.push_back(polygon({p0Low, p1Low, p2Low}));
+    prism.push_back(polygon({p0High, p2High, p1High}));
+    return CsgSolid(prism);
+}
+
+}
+
+TEST_CASE("Corefine thick mode puts the crossings of an edge near a shared edge on one grid point", "[corefine]")
+{
+    // A top edge of the box A runs along x, one grid unit below the ridge of the prism B.
+    // It crosses the left face at x = -0.4 grid unit and the right face at x = 0.6 grid unit.
+    // The exact rounding gives the grid points 0 and 1. Thick mode puts both crossings on the first one.
+    const CsgSolid b = MakeRidgePrism();
+    const float unit = static_cast<float>(1.0 / 1024.0);
+    const CsgSolid a(MakeBoxPolygons(Vector3(0.0f, 0.0f, 1511.0f * 0.5f * unit), Vector3(1.5f, 0.25f, 487.0f * 0.5f * unit), 1));
+
+    const auto collect = [&](bool exactOnly, ea::vector<ea::pair<CsgGridPoint, CsgGridPoint>>& pairs)
+    {
+        CsgExactOnlyScope scope(exactOnly);
+        Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+        CsgScratch scratch;
+        core.CollectCrossings(scratch);
+        ea::vector<int> forward;
+        ea::vector<int> backward;
+        for (int low = 0; low < core.a_.VertexCount(); ++low)
+        {
+            for (int high = low + 1; high < core.a_.VertexCount(); ++high)
+            {
+                const CsgGridPoint& p = core.a_.grid_[low];
+                const CsgGridPoint& q = core.a_.grid_[high];
+                if (p.z_ != 999 || q.z_ != 999 || p.y_ != q.y_ || p.x_ == q.x_)
+                    continue;
+                core.EdgeCrossings(core.a_, low, high, scratch, forward);
+                core.EdgeCrossings(core.a_, high, low, scratch, backward);
+                REQUIRE(forward.size() == 2);
+                REQUIRE(backward.size() == 2);
+                CHECK(forward[0] == backward[1]);
+                CHECK(forward[1] == backward[0]);
+                pairs.emplace_back(core.CrossingAt(forward[0]).grid_, core.CrossingAt(forward[1]).grid_);
+                // The id order follows the order along the edge, from the lower to the higher end.
+                const CsgGridPoint& first = pairs.back().first;
+                const CsgGridPoint& second = pairs.back().second;
+                CHECK(first.y_ == p.y_);
+                CHECK(second.y_ == p.y_);
+                CHECK(first.z_ == 999);
+                CHECK(second.z_ == 999);
+            }
+        }
+    };
+
+    ea::vector<ea::pair<CsgGridPoint, CsgGridPoint>> exactPairs;
+    collect(true, exactPairs);
+    REQUIRE(exactPairs.size() == 2);
+    for (const auto& pair : exactPairs)
+    {
+        // The exact-only result is the rounding of each crossing: x = -0.4 gives 0 and x = 0.6 gives 1.
+        CHECK(pair.first.x_ + pair.second.x_ == 1);
+        CHECK(std::abs(pair.first.x_ - pair.second.x_) == 1);
+    }
+
+    ea::vector<ea::pair<CsgGridPoint, CsgGridPoint>> thickPairs;
+    collect(false, thickPairs);
+    REQUIRE(thickPairs.size() == 2);
+    for (const auto& pair : thickPairs)
+        CHECK(pair.first == pair.second);
+}
+
 TEST_CASE("Corefine moves the crossings of one edge with intersecting cells to one grid point", "[corefine]")
 {
     // The wedge B has a flat bottom at z = 0 and a top that rises 3 steps in each unit along x.
