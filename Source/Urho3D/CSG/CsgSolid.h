@@ -296,6 +296,8 @@ public:
         friend class CsgSolid;
         void AppendFace(const CsgSolid& source, unsigned face, bool flip, unsigned component);
         unsigned IdOffset(const CsgSolid& source);
+        /// Cancel the triangles of the region that are on the same three points. See the definition.
+        void CancelTriangles();
 
         ea::vector<CsgSharedPolygon> faces_;
         ea::vector<unsigned> triangleStart_;

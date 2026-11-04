@@ -12,11 +12,14 @@
 #include <Urho3D/Core/Profiler.h>
 
 #include <EASTL/algorithm.h>
+#include <EASTL/hash_map.h>
+#include <EASTL/hash_set.h>
 #include <EASTL/sort.h>
 #include <EASTL/unique_ptr.h>
 #include <EASTL/utility.h>
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 namespace Urho3D
@@ -218,6 +221,216 @@ bool InGridRange(float value)
 bool InGridRange(const Vector3& position)
 {
     return InGridRange(position.x_) && InGridRange(position.y_) && InGridRange(position.z_);
+}
+
+/// Whether a point lies on the edge between two others, clear of its ends: exactly, or within the distance
+/// that counts as straight. The distance is absolute, in grid steps.
+bool IsOnEdge(const CsgGridPoint& point, const CsgGridPoint& from, const CsgGridPoint& to, double straight)
+{
+    const double ex = static_cast<double>(to.x_) - from.x_;
+    const double ey = static_cast<double>(to.y_) - from.y_;
+    const double ez = static_cast<double>(to.z_) - from.z_;
+    const double wx = static_cast<double>(point.x_) - from.x_;
+    const double wy = static_cast<double>(point.y_) - from.y_;
+    const double wz = static_cast<double>(point.z_) - from.z_;
+    const double length = ex * ex + ey * ey + ez * ez;
+    const double along = wx * ex + wy * ey + wz * ez;
+    // Both branches below return false for a point that is not between the ends, so the exact test can wait.
+    if (along <= 0.0 || along >= length)
+        return false;
+    const CsgNormal normal = CsgExact::Normal(from, to, point);
+    if (normal.x_.Sign() == 0 && normal.y_.Sign() == 0 && normal.z_.Sign() == 0)
+        return true;
+    if (along <= length * 1e-3 || along >= length * (1.0 - 1e-3))
+        return false;
+    const double cx = wy * ez - wz * ey;
+    const double cy = wz * ex - wx * ez;
+    const double cz = wx * ey - wy * ex;
+    return cx * cx + cy * cy + cz * cz <= straight * straight * length;
+}
+
+/// Give area to each triangle that has none. The ear clipper closes an edge shorter than its rounding with a
+/// triangle, and on a straight run of the boundary that triangle is flat: one corner lies on the edge between
+/// the other two, exactly or within the distance the clipper takes for straight. The triangle across that
+/// edge then has the corner on its edge. The diagonal between the two turns: both then end at that corner
+/// and have area. The indices are indices of the corners.
+void TurnFlatTriangles(ea::span<const ModelVertex> corners, ea::vector<unsigned>& indices)
+{
+    if (indices.size() < 6)
+        return;
+    // A corner that has no grid point gives no exact test.
+    for (const ModelVertex& corner : corners)
+    {
+        if (!InGridRange(corner.GetPosition()))
+            return;
+    }
+    ea::vector<CsgGridPoint> grid;
+    grid.reserve(corners.size());
+    double extent = 0.0;
+    for (const ModelVertex& corner : corners)
+    {
+        const CsgGridPoint point = CsgGridPoint::From(corner.GetPosition());
+        grid.push_back(point);
+        extent = ea::max(extent, ea::max(std::abs(static_cast<double>(point.x_)),
+            ea::max(std::abs(static_cast<double>(point.y_)), std::abs(static_cast<double>(point.z_)))));
+    }
+
+    // A turn can leave a flat triangle when more corners are on the line. The budget ends such a chain.
+    const auto turn = [&](double straight, int budget)
+    {
+        unsigned t = 0;
+        while (t + 2 < indices.size())
+        {
+            bool turned = false;
+            for (unsigned k = 0; k < 3 && !turned; ++k)
+            {
+                const unsigned middle = indices[t + k];
+                const unsigned p = indices[t + (k + 1) % 3];
+                const unsigned q = indices[t + (k + 2) % 3];
+                if (!IsOnEdge(grid[middle], grid[p], grid[q], straight))
+                    continue;
+                if (budget-- <= 0)
+                    return;
+                for (unsigned o = 0; o + 2 < indices.size() && !turned; o += 3)
+                {
+                    for (unsigned j = 0; j < 3 && o != t; ++j)
+                    {
+                        if (grid[indices[o + j]] != grid[q] || grid[indices[o + (j + 1) % 3]] != grid[p])
+                            continue;
+                        const unsigned far = indices[o + (j + 2) % 3];
+                        // The turn must not make the same defect at the far corner. A triangle that is on one line
+                        // exactly turns also into two thin triangles: they have area.
+                        const double limit = IsOnEdge(grid[middle], grid[p], grid[q], 0.0) ? 0.0 : straight;
+                        if (IsOnEdge(grid[middle], grid[p], grid[far], limit)
+                            || IsOnEdge(grid[middle], grid[far], grid[q], limit)
+                            || IsOnEdge(grid[far], grid[middle], grid[p], limit)
+                            || IsOnEdge(grid[far], grid[q], grid[middle], limit))
+                            break;
+                        indices[t] = middle;
+                        indices[t + 1] = p;
+                        indices[t + 2] = far;
+                        indices[o] = q;
+                        indices[o + 1] = middle;
+                        indices[o + 2] = far;
+                        turned = true;
+                        break;
+                    }
+                }
+            }
+            // Both new triangles are examined again from the start.
+            t = turned ? 0 : t + 3;
+        }
+    };
+
+    // The triangles that are on one line exactly turn first, with a budget of their own: a thin face has many
+    // triangles within the straight distance, and they must not use up the turns. A turn within the straight
+    // distance can put three corners on one line again, so the exact turns run one more time.
+    const int count = static_cast<int>(indices.size());
+    turn(0.0, count * 4);
+    turn(extent * CsgStraightDistance, count);
+    turn(0.0, count * 4);
+}
+
+/// Whether the grid point p is before q in the order of the grid points: by x, then y, then z.
+bool IsBefore(const CsgGridPoint& p, const CsgGridPoint& q)
+{
+    if (p.x_ != q.x_)
+        return p.x_ < q.x_;
+    if (p.y_ != q.y_)
+        return p.y_ < q.y_;
+    return p.z_ < q.z_;
+}
+
+/// The three grid points of a triangle in one order.
+struct TriangleKey
+{
+    CsgGridPoint a_;
+    CsgGridPoint b_;
+    CsgGridPoint c_;
+
+    friend bool operator==(const TriangleKey& l, const TriangleKey& r)
+    {
+        return l.a_ == r.a_ && l.b_ == r.b_ && l.c_ == r.c_;
+    }
+};
+
+struct TriangleKeyHash
+{
+    size_t operator()(const TriangleKey& key) const;
+};
+
+uint64_t GridPointNumber(const CsgGridPoint& point)
+{
+    uint64_t number = static_cast<uint64_t>(static_cast<int64_t>(point.x_)) * 0x9E3779B97F4A7C15ULL
+        + static_cast<uint64_t>(static_cast<int64_t>(point.y_));
+    number = (number ^ number >> 32) * 0xC2B2AE3D27D4EB4FULL + static_cast<uint64_t>(static_cast<int64_t>(point.z_));
+    number = (number ^ number >> 29) * 0x165667B19E3779F9ULL;
+    return number ^ number >> 32;
+}
+
+size_t TriangleKeyHash::operator()(const TriangleKey& key) const
+{
+    return static_cast<size_t>(GridPointNumber(key.a_) + GridPointNumber(key.b_) + GridPointNumber(key.c_));
+}
+
+/// Return the key of the triangle on three points and its direction, 1 or -1. Return false if two corners
+/// are on one point.
+bool MakeTriangleKey(CsgGridPoint a, CsgGridPoint b, CsgGridPoint c, TriangleKey& key, int& direction)
+{
+    direction = 1;
+    if (IsBefore(b, a))
+    {
+        ea::swap(a, b);
+        direction = -direction;
+    }
+    if (IsBefore(c, b))
+    {
+        ea::swap(b, c);
+        direction = -direction;
+    }
+    if (IsBefore(b, a))
+    {
+        ea::swap(a, b);
+        direction = -direction;
+    }
+    key = {a, b, c};
+    return a != b && b != c;
+}
+
+/// Whether the triangles can have a triangle to cancel: a triangle with two corners on one grid point, or two
+/// triangles with one number. The number of a triangle comes from its three grid points and is the same
+/// for each order of them, so two triangles on the same three grid points have one number. Most regions
+/// have no such triangle, and this test needs no map of the grid points.
+/// The positions must be in the range of the grid.
+bool CanCancel(ea::span<const Vector3> positions)
+{
+    static thread_local ea::vector<uint64_t> numbers;
+    unsigned size = 16;
+    while (size < positions.size())
+        size *= 2;
+    numbers.assign(size, 0);
+    for (unsigned t = 0; t + 2 < positions.size(); t += 3)
+    {
+        const CsgGridPoint a = CsgGridPoint::From(positions[t]);
+        const CsgGridPoint b = CsgGridPoint::From(positions[t + 1]);
+        const CsgGridPoint c = CsgGridPoint::From(positions[t + 2]);
+        if (a == b || b == c || a == c)
+            return true;
+        const uint64_t number = GridPointNumber(a) + GridPointNumber(b) + GridPointNumber(c);
+        // Zero marks a free slot.
+        if (number == 0)
+            return true;
+        for (unsigned slot = static_cast<unsigned>(number >> 32) & (size - 1);; slot = (slot + 1) & (size - 1))
+        {
+            if (numbers[slot] == number)
+                return true;
+            if (numbers[slot] != 0)
+                continue;
+            numbers[slot] = number;
+            break;
+        }
+    }
+    return false;
 }
 
 /// Snap a position to the grid. A coordinate outside of the range is clamped, a NaN becomes zero.
@@ -1201,7 +1414,13 @@ bool CsgSolid::IsFallbackFace(unsigned face) const
 bool CsgSolid::CopyTriangles(unsigned face, ea::vector<unsigned>& output) const
 {
     if (IsFallbackFace(face))
-        return CsgTriangulatePolygon(*faces_[face], output);
+    {
+        if (!CsgTriangulatePolygon(*faces_[face], output))
+            return false;
+        // The fresh triangles can be flat on a straight run of the boundary also, so the flat ones turn.
+        TurnFlatTriangles(faces_[face]->vertices_, output);
+        return true;
+    }
     output.clear();
     const unsigned begin = triangleStart_[face] * 3;
     const unsigned end = triangleStart_[face + 1] * 3;
@@ -1332,6 +1551,207 @@ void CsgSolid::Builder::AppendRegion(ea::vector<CsgSharedPolygon>&& faces, ea::s
     for (const int id : exactIds)
         exactIds_.push_back(regionIdBase_ + id);
     grid_.insert(grid_.end(), exactGrid.begin(), exactGrid.end());
+    CancelTriangles();
+}
+
+/// Cancel the triangles of the region that are on the same three points. Two triangles in opposite directions are
+/// a sheet with no volume: the two go away. Two in one direction stay: each has its own neighbors, and one alone
+/// leaves open edges. A triangle with two corners on one point has no area, and its other two edges cancel: it
+/// goes away. A face that loses all its triangles goes away.
+///
+/// The points are the exact ids of the corners. The loops of the faces do not change, so a face that loses only
+/// some of its triangles would leave the edges of the faces that lost all of theirs without a partner. Then the
+/// triangles of the three points stay in all faces. A face that loses a triangle keeps its stored triangles.
+///
+/// The function keeps the faces, the bounds, the fallback faces, the exact ids, the grid points and the
+/// triangles of the region in step.
+void CsgSolid::Builder::CancelTriangles()
+{
+    const unsigned firstFace = regionFace_;
+    const unsigned endFace = regionFace_ + regionFaces_;
+    URHO3D_ASSERT(endFace == faces_.size() && triangleStart_.size() == faces_.size() + 1);
+    const unsigned firstTriangle = triangleStart_[firstFace];
+    const unsigned endTriangle = trianglePositions_.size() / 3;
+    const ea::span<const Vector3> positions(
+        trianglePositions_.data() + firstTriangle * 3, (endTriangle - firstTriangle) * 3);
+    // A position outside the range of the grid has no grid point. Such a region keeps its triangles.
+    for (const Vector3& position : positions)
+    {
+        if (!InGridRange(position))
+            return;
+    }
+    if (!CanCancel(positions))
+        return;
+
+    // The corners of the region faces own the exact ids and the grid points. A face keeps the corners of its own.
+    unsigned cornerBase = 0;
+    for (unsigned face = 0; face < firstFace; ++face)
+        cornerBase += faces_[face]->vertices_.size();
+    unsigned regionCorners = 0;
+    for (unsigned face = firstFace; face < endFace; ++face)
+        regionCorners += faces_[face]->vertices_.size();
+    const bool hasIds = exactIds_.size() == cornerBase + regionCorners;
+    const bool hasGrid = grid_.size() == cornerBase + regionCorners;
+
+    // Two triangles cancel only if they have the same exact ids: then their edges cancel as well. A region without
+    // ids uses the grid points of the positions.
+    struct TriangleInfo
+    {
+        TriangleKey key_;
+        int direction_{};
+        bool degenerate_{};
+    };
+    const unsigned triangleCount = endTriangle - firstTriangle;
+    ea::vector<TriangleInfo> info(triangleCount);
+    ea::hash_map<TriangleKey, int, TriangleKeyHash> net;
+    bool any = false;
+    {
+        unsigned cornerStart = cornerBase;
+        for (unsigned face = firstFace; face < endFace; ++face)
+        {
+            for (unsigned t = triangleStart_[face]; t < triangleStart_[face + 1]; ++t)
+            {
+                CsgGridPoint points[3];
+                for (unsigned corner = 0; corner < 3; ++corner)
+                {
+                    if (hasIds)
+                        points[corner].x_ = exactIds_[cornerStart + triangleVertices_[t * 3 + corner]];
+                    else
+                        points[corner] = CsgGridPoint::From(trianglePositions_[t * 3 + corner]);
+                }
+                TriangleInfo& triangle = info[t - firstTriangle];
+                triangle.degenerate_ = !MakeTriangleKey(
+                    points[0], points[1], points[2], triangle.key_, triangle.direction_);
+                if (triangle.degenerate_)
+                {
+                    any = true;
+                    continue;
+                }
+                const auto result = net.insert(triangle.key_);
+                result.first->second += triangle.direction_;
+                any |= !result.second;
+            }
+            cornerStart += faces_[face]->vertices_.size();
+        }
+    }
+    if (!any)
+        return;
+
+    // Of the triangles on three points, the ones that have no opposite partner stay. A face that would lose some of
+    // its triangles but not all of them vetoes the three points of the lost ones, and the pass runs again.
+    ea::vector<bool> drop(triangleCount);
+    ea::hash_set<TriangleKey, TriangleKeyHash> vetoed;
+    for (bool changed = true; changed;)
+    {
+        changed = false;
+        auto working = net;
+        for (unsigned t = 0; t < triangleCount; ++t)
+        {
+            const TriangleInfo& triangle = info[t];
+            if (triangle.degenerate_)
+            {
+                drop[t] = true;
+                continue;
+            }
+            drop[t] = false;
+            if (vetoed.find(triangle.key_) != vetoed.end())
+                continue;
+            int& sum = working[triangle.key_];
+            if (sum != 0 && (sum > 0) == (triangle.direction_ > 0))
+                sum -= triangle.direction_;
+            else
+                drop[t] = true;
+        }
+        for (unsigned face = firstFace; face < endFace; ++face)
+        {
+            unsigned lost = 0;
+            unsigned kept = 0;
+            for (unsigned t = triangleStart_[face]; t < triangleStart_[face + 1]; ++t)
+            {
+                if (!info[t - firstTriangle].degenerate_)
+                    (drop[t - firstTriangle] ? lost : kept)++;
+            }
+            if (lost == 0 || kept == 0)
+                continue;
+            for (unsigned t = triangleStart_[face]; t < triangleStart_[face + 1]; ++t)
+            {
+                if (!info[t - firstTriangle].degenerate_ && drop[t - firstTriangle])
+                    changed |= vetoed.insert(info[t - firstTriangle].key_).second;
+            }
+        }
+    }
+    bool anyDrop = false;
+    for (unsigned t = 0; t < triangleCount; ++t)
+        anyDrop |= drop[t];
+    if (!anyDrop)
+        return;
+
+    // The fallback faces are in ascending order. The ones of the region are set again below.
+    ea::vector<unsigned> regionFallback;
+    const auto fallbackBegin = ea::lower_bound(fallbackFaces_.begin(), fallbackFaces_.end(), firstFace);
+    regionFallback.assign(fallbackBegin, fallbackFaces_.end());
+    fallbackFaces_.erase(fallbackBegin, fallbackFaces_.end());
+
+    unsigned writeFace = firstFace;
+    unsigned writeTriangle = firstTriangle;
+    unsigned writeCorner = cornerBase;
+    unsigned readTriangle = firstTriangle;
+    unsigned readCorner = cornerBase;
+    for (unsigned face = firstFace; face < endFace; ++face)
+    {
+        const unsigned end = triangleStart_[face + 1];
+        const unsigned keptStart = writeTriangle;
+        for (unsigned t = readTriangle; t < end; ++t)
+        {
+            if (drop[t - firstTriangle])
+                continue;
+            for (unsigned corner = 0; corner < 3; ++corner)
+            {
+                trianglePositions_[writeTriangle * 3 + corner] = trianglePositions_[t * 3 + corner];
+                triangleVertices_[writeTriangle * 3 + corner] = triangleVertices_[t * 3 + corner];
+            }
+            ++writeTriangle;
+        }
+        // A face that loses no triangle keeps its fallback mark. A face that loses some keeps its stored triangles.
+        const bool isFallback = ea::binary_search(regionFallback.begin(), regionFallback.end(), face)
+            && writeTriangle - keptStart == end - readTriangle;
+        const bool emptied = end > readTriangle && writeTriangle == keptStart;
+        const unsigned cornerCount = faces_[face]->vertices_.size();
+        readTriangle = end;
+        const unsigned cornerStart = readCorner;
+        readCorner += cornerCount;
+        // A face that loses all its triangles goes away.
+        if (emptied)
+            continue;
+        if (writeFace != face)
+        {
+            faces_[writeFace] = ea::move(faces_[face]);
+            faceMin_[writeFace] = faceMin_[face];
+            faceMax_[writeFace] = faceMax_[face];
+        }
+        if (isFallback)
+            fallbackFaces_.push_back(writeFace);
+        for (unsigned i = 0; i < cornerCount; ++i)
+        {
+            if (hasIds)
+                exactIds_[writeCorner + i] = exactIds_[cornerStart + i];
+            if (hasGrid)
+                grid_[writeCorner + i] = grid_[cornerStart + i];
+        }
+        writeCorner += cornerCount;
+        triangleStart_[++writeFace] = writeTriangle;
+    }
+    faces_.erase(faces_.begin() + writeFace, faces_.end());
+    faceMin_.erase(faceMin_.begin() + writeFace, faceMin_.end());
+    faceMax_.erase(faceMax_.begin() + writeFace, faceMax_.end());
+    triangleStart_.erase(triangleStart_.begin() + writeFace + 1, triangleStart_.end());
+    if (hasIds)
+        exactIds_.erase(exactIds_.begin() + writeCorner, exactIds_.end());
+    if (hasGrid)
+        grid_.erase(grid_.begin() + writeCorner, grid_.end());
+    trianglePositions_.erase(trianglePositions_.begin() + writeTriangle * 3, trianglePositions_.end());
+    triangleVertices_.erase(triangleVertices_.begin() + writeTriangle * 3, triangleVertices_.end());
+    regionFaces_ = writeFace - firstFace;
 }
 
 SharedPtr<CsgSolid> CsgSolid::Builder::Finish()
@@ -1741,6 +2161,7 @@ void CsgSolid::Triangulate(ea::span<const CsgSharedPolygon> faces, ea::span<cons
         {
             if (!clean)
                 output.fallbackFaces_.push_back(firstFace + i);
+            TurnFlatTriangles(vertices, scratch);
             for (unsigned t = 0; t + 2 < scratch.size(); t += 3)
                 appendTriangle(scratch[t], scratch[t + 1], scratch[t + 2]);
         }

@@ -24,16 +24,6 @@
 namespace Urho3D
 {
 
-namespace
-{
-
-/// Distance from the line through its neighbors, relative to the largest coordinate of the polygon, within
-/// which a vertex counts as part of a straight run: a few float roundings. Faces that share a run then agree
-/// that it is straight, so neither claims the sliver between the run and its chord.
-constexpr double STRAIGHT_DISTANCE = 1e-6;
-
-} // namespace
-
 bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndices)
 {
     bool clean = true;
@@ -115,14 +105,14 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         const unsigned previous = ring[(at + ring.size() - 1) % ring.size()];
         const unsigned next = ring[(at + 1) % ring.size()];
         const double chord = length(previous, next);
-        return chord <= 0.0 || std::abs(orient(previous, vertex, next)) / chord < extent * STRAIGHT_DISTANCE;
+        return chord <= 0.0 || std::abs(orient(previous, vertex, next)) / chord < extent * CsgStraightDistance;
     };
 
     // Return true if the vertex lies on the open segment between two vertices, within rounding.
     const auto touchesEdge = [&](unsigned from, unsigned to, unsigned vertex)
     {
         const double chord = length(from, to);
-        if (std::abs(orient(from, to, vertex)) > chord * extent * STRAIGHT_DISTANCE)
+        if (std::abs(orient(from, to, vertex)) > chord * extent * CsgStraightDistance)
             return false;
         const double along = (xs[vertex] - xs[from]) * (xs[to] - xs[from]) + (ys[vertex] - ys[from]) * (ys[to] - ys[from]);
         return along > 0.0 && along < chord * chord;
@@ -133,7 +123,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
     // the ear's own boundary edges, or their extensions, do not block it.
     const auto containsOther = [&](unsigned a, unsigned b, unsigned c)
     {
-        const double diagonal = length(c, a) * extent * STRAIGHT_DISTANCE;
+        const double diagonal = length(c, a) * extent * CsgStraightDistance;
         const unsigned ringSize = ring.size();
         for (unsigned r = 0; r < ringSize; ++r)
         {
@@ -176,7 +166,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         const unsigned a = ring[(i + 3) % 4];
         const unsigned c = ring[(i + 1) % 4];
         const unsigned e = ring[(i + 2) % 4];
-        return std::abs(orient(a, c, e)) <= length(a, c) * extent * STRAIGHT_DISTANCE;
+        return std::abs(orient(a, c, e)) <= length(a, c) * extent * CsgStraightDistance;
     };
 
     outIndices.reserve((numVertices - 2) * 3);
@@ -204,7 +194,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
                 }
                 // A tip within rounding of a neighbor closes a zero-length edge: the needle has no area to invert, and
                 // leaving it would block every ear around it.
-                const double needle = extent * STRAIGHT_DISTANCE;
+                const double needle = extent * CsgStraightDistance;
                 if ((!straight || !straight[b]) && turn >= 0.0 && (length(a, b) <= needle || length(b, c) <= needle))
                 {
                     clip = static_cast<int>(i);
@@ -212,7 +202,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
                 }
                 // Distance of b from the chord a-c is twice the ear's area over the chord length.
                 const double chord = length(a, c);
-                if (turn <= 0.0 || turn <= chord * extent * STRAIGHT_DISTANCE || isStraight(b)
+                if (turn <= 0.0 || turn <= chord * extent * CsgStraightDistance || isStraight(b)
                     || (count == 4 && isStraight(ring[(i + 2) % count]))
                     || (round == 0 && count == 4 && leavesFlat(i)) || containsOther(a, b, c))
                     continue;
@@ -236,7 +226,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
                     const double turn = orient(a, b, c);
                     if (round == 0 && count == 4 && leavesFlat(i))
                         continue;
-                    if (turn > length(a, c) * extent * STRAIGHT_DISTANCE && !containsOther(a, b, c))
+                    if (turn > length(a, c) * extent * CsgStraightDistance && !containsOther(a, b, c))
                         clip = static_cast<int>(i);
                 }
             }

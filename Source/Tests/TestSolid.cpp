@@ -5,6 +5,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgSolid.h"
+#include "Urho3D/CSG/CsgTriangulation.h"
 
 #include "TestGeometry.h"
 
@@ -1215,7 +1216,8 @@ TEST_CASE("Builder region groups the kept faces like a solid of the kept faces",
 
     // The solid of the kept faces is the reference. Its topology build gives the components and the closed flag.
     // The builder appends the same kept faces after a whole component and must give the same grouping.
-    const auto check = [&](KeptFaces& kept, bool expectClosed, unsigned expectComponents)
+    // The builder cancels the triangles of a face with no area. The faces that it drops are the last ones.
+    const auto check = [&](KeptFaces& kept, bool expectClosed, unsigned expectComponents, unsigned dropped = 0)
     {
         ea::vector<CsgGridPoint> grid;
         for (const CsgSharedPolygon& face : kept.faces_)
@@ -1236,13 +1238,13 @@ TEST_CASE("Builder region groups the kept faces like a solid of the kept faces",
             {kept.ids_.data(), kept.ids_.size()}, kept.idSpace_, {grid.data(), grid.size()});
         const auto solid = builder.Finish();
 
-        REQUIRE(solid->FaceCount() == expected->FaceCount() + farFaces);
+        REQUIRE(solid->FaceCount() == expected->FaceCount() - dropped + farFaces);
         CHECK(solid->IsClosed() == expectClosed);
         CHECK(expected->IsClosed() == expectClosed);
         // The far box is component 0. The region components follow in the order of their first face.
         REQUIRE(solid->ComponentCount() == expected->ComponentCount() + 1);
         CHECK(expected->ComponentCount() == expectComponents);
-        for (unsigned face = 0; face < expected->FaceCount(); ++face)
+        for (unsigned face = 0; face < expected->FaceCount() - dropped; ++face)
         {
             CHECK(solid->GetFaceComponents()[farFaces + face] == expected->GetFaceComponents()[face] + 1);
             const unsigned begin = expected->GetTriangleStart()[face];
@@ -1280,7 +1282,7 @@ TEST_CASE("Builder region groups the kept faces like a solid of the kept faces",
         check(kept, false, 2);
     }
 
-    SECTION("A collapsed face joins a component and keeps the solid closed")
+    SECTION("A collapsed face joins a component and keeps the solid closed, and the builder drops it")
     {
         KeptFaces kept = KeepBoxes(a, b);
         // A triangle with three corners at one position and one id. It has a triangle but no loop.
@@ -1290,7 +1292,7 @@ TEST_CASE("Builder region groups the kept faces like a solid of the kept faces",
         kept.origins_.clear();
         for (int k = 0; k < 3; ++k)
             kept.ids_.push_back(a->VertexKey(0, 0));
-        check(kept, true, 2);
+        check(kept, true, 2, 1);
     }
 }
 
@@ -1405,4 +1407,159 @@ TEST_CASE("Solid out of the grid range does not weld corners with one clamped gr
     CHECK(nanSolid.GetExactLoops().positions_.size() == 11);
     const auto nanOperand = CsgSolid::FromOperand(ea::move(withNaN));
     CHECK(nanOperand->GetExactLoops().positions_.size() == 11);
+}
+
+namespace
+{
+
+/// Return true if the triangle has three corners on one line, exactly on the grid.
+bool HasZeroExactNormal(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    const CsgNormal normal =
+        CsgExact::Normal(CsgGridPoint::From(a), CsgGridPoint::From(b), CsgGridPoint::From(c));
+    return normal.x_.Sign() == 0 && normal.y_.Sign() == 0 && normal.z_.Sign() == 0;
+}
+
+/// A polygon with the vertices at the given multiples of 1/1024.
+CsgPolygon MakeGridPolygon(ea::span<const IntVector3> points)
+{
+    ea::vector<Vector3> positions;
+    for (const IntVector3& point : points)
+        positions.push_back(Vector3(point.x_, point.y_, point.z_) / 1024.0f);
+    return MakeTestPolygon(positions);
+}
+
+} // namespace
+
+TEST_CASE("Kept face with a vertex on a straight run has no triangle without area", "[solid][kept][flat]")
+{
+    // The vertices 3, 4 and 5 are within rounding of one line. The vertices 8 and 9 are on the straight run at the
+    // left edge. The ear clipper closes the short edges with flat triangles. The flat triangles turn.
+    const IntVector3 points[] = {{0, 0, 0}, {1829, 0, 0}, {1829, 1210, 0}, {326, 1210, -2}, {346, 1210, -2},
+        {347, 1210, -2}, {0, 1210, 0}, {0, 1072, 2}, {0, 360, 0}, {0, 361, 0}};
+    const CsgPolygon polygon = MakeGridPolygon(points);
+
+    // The triangulator alone leaves a flat triangle here, so the test covers the turn.
+    ea::vector<unsigned> raw;
+    REQUIRE(CsgTriangulatePolygon(polygon, raw));
+    unsigned rawFlat = 0;
+    for (unsigned t = 0; t + 2 < raw.size(); t += 3)
+    {
+        rawFlat += HasZeroExactNormal(polygon.vertices_[raw[t]].GetPosition(),
+            polygon.vertices_[raw[t + 1]].GetPosition(), polygon.vertices_[raw[t + 2]].GetPosition());
+    }
+    CHECK(rawFlat > 0);
+
+    ea::vector<CsgSharedPolygon> faces;
+    faces.push_back(ea::make_shared<CsgPolygon>(polygon));
+    const auto solid = CsgSolid::FromKeptFaces(ea::move(faces), CSG_DEFAULT_EPSILON, {}, {}, 0);
+    REQUIRE(solid->FaceCount() == 1);
+    const auto positions = solid->GetTrianglePositions();
+    REQUIRE(solid->GetTriangleStart()[1] == positions.size() / 3);
+    // A polygon of n vertices gives n - 2 triangles, flat or not.
+    CHECK(positions.size() / 3 == 8);
+    for (unsigned t = 0; t < positions.size() / 3; ++t)
+    {
+        CAPTURE(t);
+        CHECK_FALSE(HasZeroExactNormal(positions[t * 3], positions[t * 3 + 1], positions[t * 3 + 2]));
+    }
+    // Each triangle indexes a vertex of the face.
+    for (const unsigned index : solid->GetTriangleVertices())
+        CHECK(index < polygon.vertices_.size());
+}
+
+TEST_CASE("Builder region cancels opposite triangles on the same points and stays closed",
+    "[solid][kept][region][cancel]")
+{
+    const auto far = MakeBoxSolid(Vector3(40.0f, 0.0f, 0.0f), 1.0f);
+    const unsigned farFaces = far->FaceCount();
+    const int farIds = static_cast<int>(far->VertexKeySpace());
+
+    const Vector3 a(0, 0, 0), b(1, 0, 0), c(0, 1, 0), d(0, 0, 1);
+    const Vector3 e(5, 0, 0), f(6, 0, 0), g(5, 1, 0);
+    // A tetrahedron with outward faces, ids 0 to 3.
+    struct Item
+    {
+        ea::vector<Vector3> positions_;
+        ea::vector<int> ids_;
+    };
+    const Item tetrahedron[] = {
+        {{a, c, b}, {0, 2, 1}},
+        {{a, b, d}, {0, 1, 3}},
+        {{a, d, c}, {0, 3, 2}},
+        {{b, c, d}, {1, 2, 3}},
+    };
+    // A sheet of one triangle on the points e, f, g (ids 4 to 6) and the same triangle in the opposite direction.
+    const Item sheet[] = {{{e, f, g}, {4, 5, 6}}, {{g, f, e}, {6, 5, 4}}};
+
+    ea::vector<Item> items;
+    items.push_back(sheet[0]);
+    for (const Item& item : tetrahedron)
+        items.push_back(item);
+    items.push_back(sheet[1]);
+
+    ea::vector<CsgSharedPolygon> faces;
+    ea::vector<int> ids;
+    ea::vector<CsgGridPoint> grid;
+    for (const Item& item : items)
+    {
+        faces.push_back(ea::make_shared<CsgPolygon>(MakeTestPolygon({item.positions_.data(), item.positions_.size()})));
+        for (unsigned k = 0; k < item.positions_.size(); ++k)
+        {
+            ids.push_back(item.ids_[k]);
+            grid.push_back(CsgGridPoint::From(item.positions_[k]));
+        }
+    }
+    const CsgSharedPolygon tetrahedronFace = faces[1];
+
+    CsgSolid::Builder builder(farFaces + faces.size(), 400);
+    builder.AppendComponent(*far, 0, false);
+    builder.AppendRegion(ea::move(faces), {}, {ids.data(), ids.size()}, 7, {grid.data(), grid.size()});
+    const auto solid = builder.Finish();
+
+    // The sheet is gone. The four faces of the tetrahedron stay, in order, with their ids and triangles.
+    REQUIRE(solid->FaceCount() == farFaces + 4);
+    CHECK(solid->GetFace(farFaces).get() == tetrahedronFace.get());
+    CHECK(solid->IsClosed());
+    CHECK_FALSE(solid->HasOpenEdges());
+    CHECK(solid->OpenEdgeCount() == 0);
+    CHECK(solid->ComponentCount() == 2);
+    REQUIRE(solid->GetTriangleStart().size() == farFaces + 5);
+    CHECK(solid->GetTriangleStart()[farFaces] == 12);
+    CHECK(solid->GetTriangleStart()[farFaces + 4] == 16);
+    REQUIRE(solid->GetTriangleVertices().size() == 16 * 3);
+    REQUIRE(solid->GetTrianglePositions().size() == 16 * 3);
+    for (unsigned face = 0; face < 4; ++face)
+    {
+        CHECK(solid->GetTriangleStart()[farFaces + face + 1] == 12 + face + 1);
+        for (unsigned k = 0; k < 3; ++k)
+        {
+            // The ids are numbers of the exact loops: a key equals another one if the input ids are equal.
+            for (unsigned other = 0; other < 4; ++other)
+            {
+                for (unsigned j = 0; j < 3; ++j)
+                {
+                    CHECK((solid->VertexKey(farFaces + face, k) == solid->VertexKey(farFaces + other, j))
+                        == (tetrahedron[face].ids_[k] == tetrahedron[other].ids_[j]));
+                    CHECK(solid->VertexKey(farFaces + face, k) >= farIds);
+                }
+            }
+            CHECK(solid->GetFace(farFaces + face)->vertices_[k].GetPosition() == tetrahedron[face].positions_[k]);
+            const unsigned corner = (12 + face) * 3 + k;
+            CHECK(solid->GetTriangleVertices()[corner] < 3);
+            CHECK(solid->GetTrianglePositions()[corner]
+                == solid->GetFace(farFaces + face)->vertices_[solid->GetTriangleVertices()[corner]].GetPosition());
+        }
+        Vector3 low = tetrahedron[face].positions_[0];
+        Vector3 high = low;
+        for (const Vector3& position : tetrahedron[face].positions_)
+        {
+            low = Vector3(ea::min(low.x_, position.x_), ea::min(low.y_, position.y_), ea::min(low.z_, position.z_));
+            high = Vector3(ea::max(high.x_, position.x_), ea::max(high.y_, position.y_), ea::max(high.z_, position.z_));
+        }
+        CHECK(solid->GetFaceMin()[farFaces + face] == low);
+        CHECK(solid->GetFaceMax()[farFaces + face] == high);
+    }
+    CHECK(solid->ContainsPoint(Vector3(0.1f, 0.1f, 0.1f)));
+    CHECK_FALSE(solid->ContainsPoint(Vector3(5.2f, 0.2f, 0.0f)));
 }

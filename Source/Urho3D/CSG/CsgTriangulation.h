@@ -46,6 +46,11 @@ public:
 	CsgTriangulatedModel& operator=(const CsgTriangulatedModel&) = delete;
 };
 
+/// Distance from the line through its neighbors, relative to the largest coordinate of the polygon, within
+/// which a vertex counts as part of a straight run: a few float roundings. Faces that share a run then agree
+/// that it is straight, so neither claims the sliver between the run and its chord.
+constexpr double CsgStraightDistance = 1e-6;
+
 /// Buffers of the polygon triangulator. A caller that triangulates many polygons keeps one scratch and reuses it.
 struct CsgTriangulationScratch
 {
