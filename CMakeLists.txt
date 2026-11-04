@@ -17,7 +17,11 @@ if (PROJECT_IS_TOP_LEVEL)
     set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif ()
 
-find_package(Urho3D REQUIRED)
+# A parent project can build the engine in-tree. Then the target already exists.
+# A second find_package call would add the engine a second time.
+if (NOT TARGET Urho3D)
+    find_package(Urho3D REQUIRED)
+endif ()
 if (PROJECT_IS_TOP_LEVEL)
     create_symlink(${Urho3D_PACKAGE_ROOT}/bin/CoreData ${CMAKE_BINARY_DIR}/../CoreData)
     create_symlink(${Urho3D_PACKAGE_ROOT}/bin/Data ${CMAKE_BINARY_DIR}/../Data)
