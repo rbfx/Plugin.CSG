@@ -26,8 +26,10 @@
 
 #include <catch2/catch_amalgamated.hpp>
 
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 using namespace Urho3D;
 
@@ -182,6 +184,15 @@ void RunFrames(CsgRoot* root, WorkQueue* workQueue, unsigned frames)
 }
 
 StaticModel* GetOutput(CsgRoot* root) { return root->GetNode()->GetComponent<StaticModel>(); }
+
+/// Remove the test build hook when the scope ends. A failed check must not leave the hook for other tests.
+struct TestBuildHookGuard
+{
+    TestBuildHookGuard() = default;
+    TestBuildHookGuard(const TestBuildHookGuard&) = delete;
+    TestBuildHookGuard& operator=(const TestBuildHookGuard&) = delete;
+    ~TestBuildHookGuard() { CsgRoot::SetTestBuildHook(nullptr); }
+};
 
 } // namespace
 
@@ -650,4 +661,218 @@ TEST_CASE("CsgRoot applies the statistics of a queued result with the result", "
     REQUIRE(root->ApplyPendingResult());
     CHECK(root->GetLastBuildStats().faceCount_ > 0);
     CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+}
+
+TEST_CASE("CsgRoot refuses the build when the boolean throws", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Failing");
+    CHECK(!root->GetLastBuildFailed());
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    CHECK(!root->GetLastBuildFailed());
+    const Model* oneBrushModel = GetOutput(root)->GetModel();
+    const unsigned oneBrushIndices = CountIndices(oneBrushModel);
+    const CsgBuildStats oneBrushStats = root->GetLastBuildStats();
+
+    // The build throws. The output, and the statistics, stay as they are.
+    // Let the events of the new brush settle first, so that no later change makes the failed job stale.
+    RunFrames(root, workQueue, 10);
+    CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildFailed());
+    CHECK(GetOutput(root)->GetModel() == oneBrushModel);
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == oneBrushIndices);
+    CHECK(root->GetLastBuildStats().faceCount_ == oneBrushStats.faceCount_);
+
+    // The root is not in flight. The next build works and clears the flag.
+    CsgRoot::SetTestBuildHook(nullptr);
+    AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+    const Model* extendedModel = GetOutput(root)->GetModel();
+    REQUIRE(extendedModel);
+    CHECK(CountIndices(extendedModel) > oneBrushIndices);
+    CHECK(extendedModel->GetBoundingBox().max_.x_ == Catch::Approx(4.0f).margin(1e-3f));
+}
+
+TEST_CASE("CsgRoot refuses the build when the boolean throws a non-standard exception", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "FailingInt");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 10);
+    const Model* builtModel = GetOutput(root)->GetModel();
+
+    CsgRoot::SetTestBuildHook([] { throw 42; });
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildFailed());
+    CHECK(GetOutput(root)->GetModel() == builtModel);
+
+    CsgRoot::SetTestBuildHook(nullptr);
+    root->SetEpsilon(3e-4f);
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(GetOutput(root)->GetModel() != builtModel);
+}
+
+TEST_CASE("CsgRoot queues a failed build while auto-apply is off", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "PendingFailing");
+    root->SetAutoApplyResults(false);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    REQUIRE(root->ApplyPendingResult());
+    CHECK(!root->HasPendingResult());
+
+    CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+
+    // The flag changes when the root takes the queued result.
+    REQUIRE(root->HasPendingResult());
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(!root->ApplyPendingResult());
+    CHECK(root->GetLastBuildFailed());
+    CHECK(!root->HasPendingResult());
+
+    CsgRoot::SetTestBuildHook(nullptr);
+    root->SetEpsilon(3e-4f);
+    RunFrames(root, workQueue, 60);
+    REQUIRE(root->HasPendingResult());
+    CHECK(root->ApplyPendingResult());
+    CHECK(!root->GetLastBuildFailed());
+}
+
+TEST_CASE("CsgRoot runs the test build hook once for each build", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Counting");
+    std::atomic<int> calls{0};
+    CsgRoot::SetTestBuildHook([&calls] { ++calls; });
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    CHECK(calls == 1);
+    CHECK(!root->GetLastBuildFailed());
+
+    // The job takes the hook, so a build without a new hook does not call it.
+    RunFrames(root, workQueue, 10);
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+    CHECK(calls == 1);
+
+    CsgRoot::SetTestBuildHook([&calls] { ++calls; });
+    root->SetEpsilon(3e-4f);
+    RunFrames(root, workQueue, 60);
+    CHECK(calls == 2);
+}
+
+TEST_CASE("CsgRoot refuses to bake after a failed build", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "BakeAfterFailure");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 10);
+
+    // The epsilon changes, but the build fails. The cache keeps the old epsilon.
+    CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+    REQUIRE(root->GetLastBuildFailed());
+    CHECK(!root->Bake());
+
+    // A later successful build lets the root bake again.
+    CsgRoot::SetTestBuildHook(nullptr);
+    root->SetEpsilon(3e-4f);
+    RunFrames(root, workQueue, 60);
+    REQUIRE(!root->GetLastBuildFailed());
+    CHECK(root->Bake());
+}
+
+TEST_CASE("CsgRoot clears the failed flag when no brushes remain", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "NoBrushes");
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 10);
+
+    CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+    root->SetEpsilon(2e-4f);
+    RunFrames(root, workQueue, 60);
+    REQUIRE(root->GetLastBuildFailed());
+
+    // The rebuild without brushes shows the base model. This is a valid output.
+    brush->GetNode()->Remove();
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+    REQUIRE(GetOutput(root));
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
 }

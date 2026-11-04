@@ -23,7 +23,10 @@
 #include <Urho3D/Scene/Scene.h>
 
 #include <cmath>
+#include <exception>
 #include <memory>
+#include <mutex>
+#include <utility>
 
 namespace Urho3D
 {
@@ -70,10 +73,25 @@ struct CsgRoot::BuildJob
     /// Statistics of the job. The worker thread fills it before it posts the main thread task.
     /// The main thread task adds the model build time. The posted task orders the two writes, so there is no data race.
     CsgBuildStats stats_;
+    /// True if the boolean threw. The worker thread sets it before it posts the main thread task.
+    bool failed_{};
 };
 
 namespace
 {
+
+/// Test only action that the next build job runs. The mutex guards it, as the main thread sets it and a worker takes it.
+std::mutex testBuildHookMutex;
+std::function<void()> testBuildHook;
+
+/// Take the test action. The job takes it once.
+std::function<void()> TakeTestBuildHook()
+{
+    const std::lock_guard<std::mutex> lock(testBuildHookMutex);
+    std::function<void()> hook = std::move(testBuildHook);
+    testBuildHook = nullptr;
+    return hook;
+}
 
 inline unsigned PackSourceGeometryKey(unsigned meshId, unsigned geometryIndex)
 {
@@ -792,12 +810,14 @@ void CsgRoot::Rebuild()
             cachedMetricScale_ = baked_->metricScale_;
             const ResourceRefList outputMaterials = baked_->outputMaterials_;
             ApplyResultToOutput(baked_->outputModel_, outputMaterials);
+            lastBuildFailed_ = false;
             return;
         }
         cachedSolid_ = nullptr;
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
         ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
+        lastBuildFailed_ = false;
         return;
     }
 
@@ -864,41 +884,65 @@ void CsgRoot::Rebuild()
         TaskPriority::Medium);
 }
 
+void CsgRoot::SetTestBuildHook(std::function<void()> hook)
+{
+    const std::lock_guard<std::mutex> lock(testBuildHookMutex);
+    testBuildHook = std::move(hook);
+}
+
 void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job)
 {
     (void)threadIndex;
 
-    HiresTimer timer;
-    SharedPtr<const CsgSolid> solid = job->cachedSolid_;
-    if (!solid)
-        solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
-    EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
-    job->resultSolid_ = solid;
-    const long long booleanUSec = timer.GetUSec(true);
-
+    // An exception must not skip the post. The main thread waits for it and the root stays in flight without it.
     SharedPtr<CsgTriangulatedModel> triangulated;
-    if (solid && solid->FaceCount() != 0)
+    try
     {
-        triangulated = CsgTriangulateSolid(*solid, job->epsilon_);
-        if (triangulated)
-            CsgInternal::ToNodeSpace(*triangulated, job->metricScale_);
+        if (const std::function<void()> hook = TakeTestBuildHook())
+            hook();
+        HiresTimer timer;
+        SharedPtr<const CsgSolid> solid = job->cachedSolid_;
+        if (!solid)
+            solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
+        EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
+        job->resultSolid_ = solid;
+        const long long booleanUSec = timer.GetUSec(true);
+
+        if (solid && solid->FaceCount() != 0)
+        {
+            triangulated = CsgTriangulateSolid(*solid, job->epsilon_);
+            if (triangulated)
+                CsgInternal::ToNodeSpace(*triangulated, job->metricScale_);
+        }
+        if (!triangulated)
+            triangulated = MakeShared<CsgTriangulatedModel>();
+        const long long triangulateUSec = timer.GetUSec(false);
+
+        unsigned triangleCount = 0;
+        for (const CsgTriangulatedModel::Geometry& geometry : triangulated->geometries_)
+            triangleCount += geometry.indexData_.size() / 3;
+        job->stats_.booleanMs_ = static_cast<float>(booleanUSec) * 0.001f;
+        job->stats_.triangulateMs_ = static_cast<float>(triangulateUSec) * 0.001f;
+        job->stats_.faceCount_ = solid ? solid->FaceCount() : 0;
+        job->stats_.triangleCount_ = triangleCount;
+        job->stats_.closed_ = solid ? solid->IsClosed() : true;
+        job->stats_.volume_ = solid ? solid->Volume() : 0.0;
+
+        const long long elapsed = booleanUSec + triangulateUSec;
+        URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, elapsed / 1000, elapsed % 1000);
     }
-    if (!triangulated)
-        triangulated = MakeShared<CsgTriangulatedModel>();
-    const long long triangulateUSec = timer.GetUSec(false);
-
-    unsigned triangleCount = 0;
-    for (const CsgTriangulatedModel::Geometry& geometry : triangulated->geometries_)
-        triangleCount += geometry.indexData_.size() / 3;
-    job->stats_.booleanMs_ = static_cast<float>(booleanUSec) * 0.001f;
-    job->stats_.triangulateMs_ = static_cast<float>(triangulateUSec) * 0.001f;
-    job->stats_.faceCount_ = solid ? solid->FaceCount() : 0;
-    job->stats_.triangleCount_ = triangleCount;
-    job->stats_.closed_ = solid ? solid->IsClosed() : true;
-    job->stats_.volume_ = solid ? solid->Volume() : 0.0;
-
-    const long long elapsed = booleanUSec + triangulateUSec;
-    URHO3D_LOGDEBUG("CsgRoot({}): rebuild took {}.{}ms", job->componentId_, elapsed / 1000, elapsed % 1000);
+    catch (const std::exception& e)
+    {
+        job->failed_ = true;
+        triangulated = nullptr;
+        URHO3D_LOGERROR("CsgRoot({}): the rebuild failed, the output does not change: {}", job->componentId_, e.what());
+    }
+    catch (...)
+    {
+        job->failed_ = true;
+        triangulated = nullptr;
+        URHO3D_LOGERROR("CsgRoot({}): the rebuild failed, the output does not change", job->componentId_);
+    }
 
     queue->PostDelayedTaskForMainThread([job, triangulated = ea::move(triangulated)](unsigned, WorkQueue*) mutable
     { ApplyBuildJobResultOnMainThread(job, ea::move(triangulated)); });
@@ -921,6 +965,22 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     {
         if (root->rebuildDirty_)
             root->Rebuild();
+        return;
+    }
+
+    // A failed build changes nothing: the cache, the dirty brushes and the output stay as they are.
+    if (job->failed_)
+    {
+        if (root->autoApplyResults_)
+            root->lastBuildFailed_ = true;
+        else
+        {
+            PendingBuildResult failure;
+            failure.model_ = MakeShared<Model>(root->context_);
+            failure.revision_ = job->buildId_;
+            failure.failed_ = true;
+            root->pendingResults_.push_back(ea::move(failure));
+        }
         return;
     }
 
@@ -969,6 +1029,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     {
         root->ApplyResultToOutput(renderableModel, materials);
         root->lastBuildStats_ = job->stats_;
+        root->lastBuildFailed_ = false;
     }
     else
         root->pendingResults_.push_back({renderableModel, materials, job->buildId_, job->stats_});
@@ -981,6 +1042,10 @@ bool CsgRoot::ApplyPendingResult()
 
     const PendingBuildResult result = ea::move(pendingResults_.front());
     pendingResults_.erase(pendingResults_.begin());
+    lastBuildFailed_ = result.failed_;
+    if (result.failed_)
+        return false;
+
     ApplyResultToOutput(result.model_, result.materials_);
     lastBuildStats_ = result.stats_;
     return true;
@@ -988,8 +1053,9 @@ bool CsgRoot::ApplyPendingResult()
 
 bool CsgRoot::Bake()
 {
-    if (!node_ || rebuildInFlight_ || rebuildDirty_ || HasPendingResult() || !cachedSolid_ || cachedBrushes_.empty()
-        || cachedSourceModels_.empty())
+    // After a failed build the cache does not match the inputs, so the root must not bake it.
+    if (!node_ || rebuildInFlight_ || rebuildDirty_ || lastBuildFailed_ || HasPendingResult() || !cachedSolid_
+        || cachedBrushes_.empty() || cachedSourceModels_.empty())
     {
         return false;
     }

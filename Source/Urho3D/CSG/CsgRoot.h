@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "Urho3D/CSG/Csg.h"
@@ -116,6 +117,15 @@ public:
     /// Get the statistics of the build whose result the root applied last.
     /// A result that waits in the queue has no effect on the value until ApplyPendingResult applies it.
     const CsgBuildStats& GetLastBuildStats() const { return lastBuildStats_; }
+    /// Return true if the last build that the root took was a failed build.
+    /// A build fails if the boolean operation throws. The output model does not change then.
+    /// A later build that the root applies clears the flag.
+    /// While auto-apply is off, a failed build is a queued result. ApplyPendingResult sets the flag.
+    bool GetLastBuildFailed() const { return lastBuildFailed_; }
+    /// Test only. Set an action that the next build job runs on its worker thread before the boolean.
+    /// The job takes the action once. Pass an empty function to remove it.
+    /// If the action throws, the build fails. This function is thread safe.
+    static void SetTestBuildHook(std::function<void()> hook);
     /// Fold all applied brushes into the base operand and remove the brush nodes.
     /// Later brushes apply to the baked result, so each one costs one boolean operation.
     /// Baking is permanent and exists only at run time. The root does not serialize the baked geometry.
@@ -176,6 +186,8 @@ private:
         ResourceRefList materials_;
         unsigned revision_{};
         CsgBuildStats stats_;
+        /// True if the build failed. The model is empty and the output must not change.
+        bool failed_{};
     };
 
     /// Result of a bake. It replaces the base operand until the base model or the epsilon changes.
@@ -227,6 +239,7 @@ private:
     bool autoApplyResults_{true};
     ea::vector<PendingBuildResult> pendingResults_;
     CsgBuildStats lastBuildStats_;
+    bool lastBuildFailed_{};
 
     /// Solid of the last applied build. It is the base for an append of brushes.
     SharedPtr<const CsgSolid> cachedSolid_;
