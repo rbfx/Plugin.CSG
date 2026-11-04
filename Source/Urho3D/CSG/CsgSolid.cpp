@@ -807,6 +807,83 @@ void BuildTopology(ea::span<const Vector3> corners, ea::span<const unsigned> ver
     GroupComponents(faceCount, sets, result.componentStart, result.componentFaces, result.faceComponents);
 }
 
+/// Join the faces from one face on that share an edge, as the links of the raw edges do for all faces.
+/// Return false if a face with triangles welds to less than three ids, or if an undirected edge has a winding
+/// that is not zero. Then the loops need the full topology build.
+/// The edges are sorted into arrays by their lower id instead of a hash map. A boolean result needs its edges
+/// for nothing else.
+bool LinkRegion(const CsgWeldedLoops& loops, ea::span<const unsigned> triangleStart, unsigned first, FaceSets& sets)
+{
+    const unsigned idCount = loops.welder_.Count();
+    const unsigned faceEnd = loops.loopLength_.size();
+    ea::vector<int> bucketStart(idCount + 1, 0);
+    unsigned edgeCount = 0;
+    for (unsigned face = first; face < faceEnd; ++face)
+    {
+        const unsigned count = loops.loopLength_[face];
+        if (count == 0)
+        {
+            if (triangleStart[face] != triangleStart[face + 1])
+                return false;
+            continue;
+        }
+        const unsigned start = loops.vertexStart_[face];
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const int from = loops.vertexIds_[start + i];
+            const int to = loops.vertexIds_[start + (i + 1 == count ? 0 : i + 1)];
+            ++bucketStart[ea::min(from, to) + 1];
+        }
+        edgeCount += count;
+    }
+    for (unsigned id = 0; id < idCount; ++id)
+        bucketStart[id + 1] += bucketStart[id];
+
+    // Each edge keeps its higher id and its face. The face is complemented when the edge runs downward.
+    ea::vector<int> highs(edgeCount);
+    ea::vector<int> owners(edgeCount);
+    ea::vector<int> fill(bucketStart.begin(), bucketStart.end() - 1);
+    for (unsigned face = first; face < faceEnd; ++face)
+    {
+        const unsigned count = loops.loopLength_[face];
+        const unsigned start = loops.vertexStart_[face];
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const int from = loops.vertexIds_[start + i];
+            const int to = loops.vertexIds_[start + (i + 1 == count ? 0 : i + 1)];
+            const int slot = from < to ? fill[from]++ : fill[to]++;
+            highs[slot] = ea::max(from, to);
+            owners[slot] = from < to ? static_cast<int>(face - first) : ~static_cast<int>(face - first);
+        }
+    }
+
+    // Within a bucket, the first edge to each higher id collects the winding of the edges that repeat it.
+    const auto faceOf = [&](int owner) { return owner < 0 ? ~owner : owner; };
+    ea::vector<int> firstEdge(idCount, 0);
+    ea::vector<int> winding(edgeCount, 0);
+    for (unsigned low = 0; low < idCount; ++low)
+    {
+        const int begin = bucketStart[low];
+        const int end = bucketStart[low + 1];
+        for (int edge = begin; edge < end; ++edge)
+        {
+            const int high = highs[edge];
+            int group = firstEdge[high];
+            if (group < begin || group >= edge || highs[group] != high)
+                firstEdge[high] = group = edge;
+            else
+                sets.Union(faceOf(owners[edge]), faceOf(owners[group]));
+            winding[group] += owners[edge] < 0 ? -1 : 1;
+        }
+        for (int edge = begin; edge < end; ++edge)
+        {
+            if (winding[edge] != 0)
+                return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 CsgPointWelder::CsgPointWelder(float epsilon, unsigned capacity)
@@ -917,6 +994,18 @@ int CsgPointWelder::Find(const Vector3& point) const
     return best == std::numeric_limits<int>::max() ? -1 : best;
 }
 
+struct CsgSolid::TriangleOutput
+{
+    ea::vector<unsigned>& triangleStart_;
+    ea::vector<Vector3>& trianglePositions_;
+    ea::vector<unsigned>& triangleVertices_;
+    ea::vector<Vector3>& faceMin_;
+    ea::vector<Vector3>& faceMax_;
+    ea::vector<unsigned>& fallbackFaces_;
+    ea::vector<Vector3>* corners_{};
+    ea::vector<unsigned>* vertexStart_{};
+};
+
 CsgSolid::CsgSolid(ea::span<const CsgPolygon> polygons, float epsilon)
 {
     URHO3D_PROFILE("CsgSolid::CsgSolid");
@@ -996,7 +1085,68 @@ CsgSolid::CsgSolid(Builder&& builder)
     vertexStart.push_back(corners.size());
     exact_ = BuildExactLoops(
         corners, vertexStart, triangleStart_, builder.exactIds_, builder.exactIdSpace_, builder.grid_);
+    if (builder.regionFaces_ != 0)
+    {
+        outOfRange_ = outOfRange_ || exact_->outOfRange_;
+        GroupRegion(builder, corners, vertexStart);
+    }
     BuildBounds();
+}
+
+void CsgSolid::GroupRegion(const Builder& builder, ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart)
+{
+    URHO3D_PROFILE("CsgSolid::GroupRegion");
+    const unsigned first = builder.regionFace_;
+    const unsigned faceCount = builder.regionFaces_;
+    FaceSets sets(faceCount);
+    ea::vector<unsigned> componentStart;
+    ea::vector<unsigned> componentFaces;
+    ea::vector<unsigned> faceComponents;
+    if (LinkRegion(*exact_, triangleStart_, first, sets))
+    {
+        GroupComponents(faceCount, sets, componentStart, componentFaces, faceComponents);
+        // A face without a surface is a hole.
+        for (unsigned face = first; face < first + faceCount; ++face)
+        {
+            if (vertexStart[face + 1] - vertexStart[face] < 3 || triangleStart_[face] == triangleStart_[face + 1])
+                closed_ = false;
+        }
+    }
+    else
+    {
+        // A crack or a collapsed face: the topology build of the region faces alone decides.
+        const unsigned cornerBase = vertexStart[first];
+        ea::vector<unsigned> regionVertexStart;
+        regionVertexStart.reserve(faceCount + 1);
+        for (unsigned face = first; face <= first + faceCount; ++face)
+            regionVertexStart.push_back(vertexStart[face] - cornerBase);
+        ea::vector<unsigned> regionTriangleStart;
+        regionTriangleStart.reserve(faceCount + 1);
+        for (unsigned face = first; face <= first + faceCount; ++face)
+            regionTriangleStart.push_back(triangleStart_[face] - triangleStart_[first]);
+        ea::vector<int> regionIds;
+        regionIds.reserve(builder.exactIds_.size() - cornerBase);
+        for (unsigned i = cornerBase; i < builder.exactIds_.size(); ++i)
+            regionIds.push_back(builder.exactIds_[i] - builder.regionIdBase_);
+
+        Topology topology;
+        BuildTopology(corners.subspan(cornerBase), regionVertexStart, regionTriangleStart, epsilon_, regionIds,
+            builder.regionIdSpace_, ea::span<const CsgGridPoint>(builder.grid_).subspan(cornerBase), topology);
+        closed_ = closed_ && topology.closed;
+        componentStart = ea::move(topology.componentStart);
+        componentFaces = ea::move(topology.componentFaces);
+        faceComponents = ea::move(topology.faceComponents);
+    }
+
+    const unsigned componentBase = componentStart_.size() - 1;
+    for (const unsigned component : faceComponents)
+        faceComponents_.push_back(componentBase + component);
+    for (unsigned component = 0; component + 1 < componentStart.size(); ++component)
+    {
+        for (unsigned c = componentStart[component]; c < componentStart[component + 1]; ++c)
+            componentFaces_.push_back(first + componentFaces[c]);
+        componentStart_.push_back(componentFaces_.size());
+    }
 }
 
 SharedPtr<CsgSolid> CsgSolid::FromKeptFaces(ea::vector<CsgSharedPolygon>&& faces, float epsilon,
@@ -1160,6 +1310,28 @@ void CsgSolid::Builder::AppendFace(const CsgSolid& source, unsigned face, bool f
         triangleVertices_.insert(triangleVertices_.end(), locals, locals + count * 3);
     }
     triangleStart_.push_back(triangleStart_.back() + count);
+}
+
+void CsgSolid::Builder::AppendRegion(ea::vector<CsgSharedPolygon>&& faces, ea::span<const CsgFaceOrigin> origins,
+    ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid)
+{
+    URHO3D_ASSERT(regionFaces_ == 0, "CsgSolid::Builder takes one region");
+    URHO3D_ASSERT(origins.empty() || origins.size() == faces.size(), "CsgSolid origins must have one entry for each face");
+    if (faces.empty())
+        return;
+    regionFace_ = faces_.size();
+    regionFaces_ = faces.size();
+    regionIdBase_ = exactIdSpace_;
+    regionIdSpace_ = exactIdSpace;
+    exactIdSpace_ += exactIdSpace;
+
+    TriangleOutput output{triangleStart_, trianglePositions_, triangleVertices_, faceMin_, faceMax_, fallbackFaces_};
+    Triangulate(faces, origins, regionFace_, output);
+    faces_.insert(faces_.end(), ea::make_move_iterator(faces.begin()), ea::make_move_iterator(faces.end()));
+    // The ids of the region start after the ids of the sources before it.
+    for (const int id : exactIds)
+        exactIds_.push_back(regionIdBase_ + id);
+    grid_.insert(grid_.end(), exactGrid.begin(), exactGrid.end());
 }
 
 SharedPtr<CsgSolid> CsgSolid::Builder::Finish()
@@ -1437,6 +1609,156 @@ ea::vector<CsgPolygon> CsgSolid::ToPolygons() const
     return result;
 }
 
+void CsgSolid::Triangulate(ea::span<const CsgSharedPolygon> faces, ea::span<const CsgFaceOrigin> origins,
+    unsigned firstFace, TriangleOutput& output)
+{
+    URHO3D_PROFILE("CsgSolid::Triangulate");
+    const unsigned faceCount = faces.size();
+
+    // Two planar faces can share a run of several edges only along the line where their planes meet, so a
+    // vertex whose edges both lead to the same neighbor is straight up to rounding. If both faces clipped it as
+    // an ear, both would claim the sliver under the run and share a diagonal. Both faces of such a pair have
+    // more than three vertices, so only those enter the list. The list is sorted by edge and by face.
+    // For an edge in many faces, the last face is the owner.
+    struct EdgeOwner
+    {
+        Vector3 from_;
+        Vector3 to_;
+        unsigned face_;
+    };
+    const auto hasNan = [](const Vector3& v) { return v.x_ != v.x_ || v.y_ != v.y_ || v.z_ != v.z_; };
+    const auto less = [](const Vector3& a, const Vector3& b)
+    {
+        if (a.x_ != b.x_)
+            return a.x_ < b.x_;
+        if (a.y_ != b.y_)
+            return a.y_ < b.y_;
+        return a.z_ < b.z_;
+    };
+    const auto edgeLess = [&](const EdgeOwner& a, const EdgeOwner& b)
+    {
+        if (less(a.from_, b.from_) || less(b.from_, a.from_))
+            return less(a.from_, b.from_);
+        if (less(a.to_, b.to_) || less(b.to_, a.to_))
+            return less(a.to_, b.to_);
+        return a.face_ < b.face_;
+    };
+    ea::vector<EdgeOwner> edgeOwners;
+    for (unsigned i = 0; i < faceCount; ++i)
+    {
+        const auto& vertices = faces[i]->vertices_;
+        if (vertices.size() <= 3 || (i < origins.size() && origins[i].solid_))
+            continue;
+        for (unsigned k = 0; k < vertices.size(); ++k)
+        {
+            const Vector3 from = vertices[k].GetPosition();
+            const Vector3 to = vertices[(k + 1) % vertices.size()].GetPosition();
+            // A position with a NaN is never equal to another one.
+            if (!hasNan(from) && !hasNan(to))
+                edgeOwners.push_back({from, to, i});
+        }
+    }
+    ea::sort(edgeOwners.begin(), edgeOwners.end(), edgeLess);
+    // Return the owner of the edge from `from` to `to`, or -1.
+    const auto findOwner = [&](const Vector3& from, const Vector3& to) -> int
+    {
+        if (hasNan(from) || hasNan(to))
+            return -1;
+        // The first entry after the edge. The entry before it is the last face of the edge.
+        const auto it = ea::upper_bound(edgeOwners.begin(), edgeOwners.end(), EdgeOwner{from, to, ~0u}, edgeLess);
+        if (it == edgeOwners.begin())
+            return -1;
+        const EdgeOwner& owner = *(it - 1);
+        const bool match =
+            !less(owner.from_, from) && !less(from, owner.from_) && !less(owner.to_, to) && !less(to, owner.to_);
+        return match ? static_cast<int>(owner.face_) : -1;
+    };
+
+    ea::vector<unsigned> scratch;
+    ea::vector<bool> straight;
+    CsgTriangulationScratch triangulationScratch;
+    const auto triangulateFace = [&](unsigned i)
+    {
+        const auto& vertices = faces[i]->vertices_;
+
+        // A face with an origin copies the triangles and the bounds of its source face.
+        if (i < origins.size() && origins[i].solid_ && CopyOrigin(faces[i], origins[i], firstFace + i, output))
+            return;
+
+        Vector3 min(INF, INF, INF);
+        Vector3 max(-INF, -INF, -INF);
+        for (const ModelVertex& vertex : vertices)
+        {
+            const Vector3& point = vertex.GetPosition();
+            min = MinOf(min, point);
+            max = MaxOf(max, point);
+        }
+        output.faceMin_.push_back(min);
+        output.faceMax_.push_back(max);
+
+        const auto appendTriangle = [&](unsigned a, unsigned b, unsigned c)
+        {
+            output.trianglePositions_.push_back(vertices[a].GetPosition());
+            output.trianglePositions_.push_back(vertices[b].GetPosition());
+            output.trianglePositions_.push_back(vertices[c].GetPosition());
+            output.triangleVertices_.push_back(a);
+            output.triangleVertices_.push_back(b);
+            output.triangleVertices_.push_back(c);
+        };
+
+        if (vertices.size() < 3)
+            return;
+        if (vertices.size() == 3)
+        {
+            appendTriangle(0, 1, 2);
+            return;
+        }
+
+        // Only the later face of a pair refrains from clipping a vertex of a shared run. This is enough to keep
+        // the sliver from being claimed twice, and it leaves the earlier face free to triangulate as it must.
+        const unsigned vertexCount = vertices.size();
+        straight.resize(vertexCount);
+        bool anyStraight = false;
+        for (unsigned k = 0; k < vertexCount; ++k)
+        {
+            const Vector3 previous = vertices[(k + vertexCount - 1) % vertexCount].GetPosition();
+            const Vector3 current = vertices[k].GetPosition();
+            const Vector3 next = vertices[(k + 1) % vertexCount].GetPosition();
+            bool interior = false;
+            if (!edgeOwners.empty())
+            {
+                const int before = findOwner(current, previous);
+                const int after = before >= 0 ? findOwner(next, current) : -1;
+                interior = before >= 0 && before == after && static_cast<unsigned>(before) < i;
+            }
+            straight[k] = interior;
+            anyStraight |= interior;
+        }
+        bool clean = true;
+        if (CsgTriangulatePolygon(*faces[i], scratch,
+                anyStraight ? ea::span<const bool>(straight.data(), vertexCount) : ea::span<const bool>(), clean,
+                triangulationScratch))
+        {
+            if (!clean)
+                output.fallbackFaces_.push_back(firstFace + i);
+            for (unsigned t = 0; t + 2 < scratch.size(); t += 3)
+                appendTriangle(scratch[t], scratch[t + 1], scratch[t + 2]);
+        }
+    };
+
+    for (unsigned i = 0; i < faceCount; ++i)
+    {
+        if (output.corners_)
+        {
+            output.vertexStart_->push_back(output.corners_->size());
+            for (const ModelVertex& vertex : faces[i]->vertices_)
+                output.corners_->push_back(vertex.GetPosition());
+        }
+        triangulateFace(i);
+        output.triangleStart_.push_back(output.triangleVertices_.size() / 3);
+    }
+}
+
 void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
     ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid)
 {
@@ -1451,10 +1773,12 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
     trianglePositions_.clear();
     triangleVertices_.clear();
     fallbackFaces_.clear();
+    faceMin_.clear();
+    faceMax_.clear();
     URHO3D_ASSERT(origins.empty() || origins.size() == faceCount, "CsgSolid origins must have one entry for each face");
     triangleStart_.reserve(faceCount + 1);
-    faceMin_.resize(faceCount);
-    faceMax_.resize(faceCount);
+    faceMin_.reserve(faceCount);
+    faceMax_.reserve(faceCount);
 
     unsigned estimatedTriangles = 0;
     unsigned cornerCount = 0;
@@ -1473,151 +1797,11 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
     ea::vector<unsigned> vertexStart;
     vertexStart.reserve(faceCount + 1);
 
-    {
-        URHO3D_PROFILE("CsgSolid::Triangulate");
-
-        // Two planar faces can share a run of several edges only along the line where their planes meet, so a
-        // vertex whose edges both lead to the same neighbor is straight up to rounding. If both faces clipped it as
-        // an ear, both would claim the sliver under the run and share a diagonal. Both faces of such a pair have
-        // more than three vertices, so only those enter the list. The list is sorted by edge and by face.
-        // For an edge in many faces, the last face is the owner.
-        struct EdgeOwner
-        {
-            Vector3 from_;
-            Vector3 to_;
-            unsigned face_;
-        };
-        const auto hasNan = [](const Vector3& v) { return v.x_ != v.x_ || v.y_ != v.y_ || v.z_ != v.z_; };
-        const auto less = [](const Vector3& a, const Vector3& b)
-        {
-            if (a.x_ != b.x_)
-                return a.x_ < b.x_;
-            if (a.y_ != b.y_)
-                return a.y_ < b.y_;
-            return a.z_ < b.z_;
-        };
-        const auto edgeLess = [&](const EdgeOwner& a, const EdgeOwner& b)
-        {
-            if (less(a.from_, b.from_) || less(b.from_, a.from_))
-                return less(a.from_, b.from_);
-            if (less(a.to_, b.to_) || less(b.to_, a.to_))
-                return less(a.to_, b.to_);
-            return a.face_ < b.face_;
-        };
-        ea::vector<EdgeOwner> edgeOwners;
-        for (unsigned i = 0; i < faceCount; ++i)
-        {
-            const auto& vertices = faces_[i]->vertices_;
-            if (vertices.size() <= 3 || (i < origins.size() && origins[i].solid_))
-                continue;
-            for (unsigned k = 0; k < vertices.size(); ++k)
-            {
-                const Vector3 from = vertices[k].GetPosition();
-                const Vector3 to = vertices[(k + 1) % vertices.size()].GetPosition();
-                // A position with a NaN is never equal to another one.
-                if (!hasNan(from) && !hasNan(to))
-                    edgeOwners.push_back({from, to, i});
-            }
-        }
-        ea::sort(edgeOwners.begin(), edgeOwners.end(), edgeLess);
-        // Return the owner of the edge from `from` to `to`, or -1.
-        const auto findOwner = [&](const Vector3& from, const Vector3& to) -> int
-        {
-            if (hasNan(from) || hasNan(to))
-                return -1;
-            // The first entry after the edge. The entry before it is the last face of the edge.
-            const auto it = ea::upper_bound(edgeOwners.begin(), edgeOwners.end(), EdgeOwner{from, to, ~0u}, edgeLess);
-            if (it == edgeOwners.begin())
-                return -1;
-            const EdgeOwner& owner = *(it - 1);
-            const bool match = !less(owner.from_, from) && !less(from, owner.from_) && !less(owner.to_, to)
-                && !less(to, owner.to_);
-            return match ? static_cast<int>(owner.face_) : -1;
-        };
-
-        ea::vector<unsigned> scratch;
-        ea::vector<bool> straight;
-        CsgTriangulationScratch triangulationScratch;
-        unsigned triangleCount = 0;
-        for (unsigned i = 0; i < faceCount; ++i)
-        {
-            const auto& vertices = faces_[i]->vertices_;
-            triangleStart_.push_back(triangleCount);
-            vertexStart.push_back(corners.size());
-            for (const ModelVertex& vertex : vertices)
-                corners.push_back(vertex.GetPosition());
-
-            // A face with an origin copies the triangles and the bounds of its source face.
-            if (i < origins.size() && origins[i].solid_ && CopyOrigin(i, origins[i]))
-            {
-                triangleCount = triangleVertices_.size() / 3;
-                continue;
-            }
-
-            Vector3 min(INF, INF, INF);
-            Vector3 max(-INF, -INF, -INF);
-            for (const ModelVertex& vertex : vertices)
-            {
-                const Vector3& point = vertex.GetPosition();
-                min = MinOf(min, point);
-                max = MaxOf(max, point);
-            }
-            faceMin_[i] = min;
-            faceMax_[i] = max;
-
-            const auto appendTriangle = [&](unsigned a, unsigned b, unsigned c)
-            {
-                trianglePositions_.push_back(corners[vertexStart[i] + a]);
-                trianglePositions_.push_back(corners[vertexStart[i] + b]);
-                trianglePositions_.push_back(corners[vertexStart[i] + c]);
-                triangleVertices_.push_back(a);
-                triangleVertices_.push_back(b);
-                triangleVertices_.push_back(c);
-                ++triangleCount;
-            };
-
-            if (vertices.size() < 3)
-                continue;
-            if (vertices.size() == 3)
-            {
-                appendTriangle(0, 1, 2);
-                continue;
-            }
-
-            // Only the later face of a pair refrains from clipping a vertex of a shared run. This is enough to keep
-            // the sliver from being claimed twice, and it leaves the earlier face free to triangulate as it must.
-            const unsigned vertexCount = vertices.size();
-            straight.resize(vertexCount);
-            bool anyStraight = false;
-            for (unsigned k = 0; k < vertexCount; ++k)
-            {
-                const Vector3 previous = vertices[(k + vertexCount - 1) % vertexCount].GetPosition();
-                const Vector3 current = vertices[k].GetPosition();
-                const Vector3 next = vertices[(k + 1) % vertexCount].GetPosition();
-                bool interior = false;
-                if (!edgeOwners.empty())
-                {
-                    const int before = findOwner(current, previous);
-                    const int after = before >= 0 ? findOwner(next, current) : -1;
-                    interior = before >= 0 && before == after && static_cast<unsigned>(before) < i;
-                }
-                straight[k] = interior;
-                anyStraight |= interior;
-            }
-            bool clean = true;
-            if (CsgTriangulatePolygon(*faces_[i], scratch,
-                    anyStraight ? ea::span<const bool>(straight.data(), vertexCount) : ea::span<const bool>(), clean,
-                    triangulationScratch))
-            {
-                if (!clean)
-                    fallbackFaces_.push_back(i);
-                for (unsigned t = 0; t + 2 < scratch.size(); t += 3)
-                    appendTriangle(scratch[t], scratch[t + 1], scratch[t + 2]);
-            }
-        }
-        triangleStart_.push_back(triangleCount);
-        vertexStart.push_back(corners.size());
-    }
+    triangleStart_.push_back(0);
+    TriangleOutput output{triangleStart_, trianglePositions_, triangleVertices_, faceMin_, faceMax_, fallbackFaces_,
+        &corners, &vertexStart};
+    Triangulate(faces_, origins, 0, output);
+    vertexStart.push_back(corners.size());
 
     {
         Topology topology;
@@ -1637,21 +1821,22 @@ void CsgSolid::Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::sp
     BuildBounds();
 }
 
-bool CsgSolid::CopyOrigin(unsigned index, const CsgFaceOrigin& origin)
+bool CsgSolid::CopyOrigin(
+    const CsgSharedPolygon& face, const CsgFaceOrigin& origin, unsigned index, TriangleOutput& output)
 {
     const CsgSolid& source = *origin.solid_;
     // An origin that does not fit the face is a programming error. A release build ignores it
     // and triangulates the face like a face without an origin.
     const bool fits = origin.face_ < source.faces_.size()
-        && source.faces_[origin.face_]->vertices_.size() == faces_[index]->vertices_.size();
+        && source.faces_[origin.face_]->vertices_.size() == face->vertices_.size();
     URHO3D_ASSERT(fits, "CsgSolid origin does not fit the face");
     if (!fits)
         return false;
 
-    faceMin_[index] = source.faceMin_[origin.face_];
-    faceMax_[index] = source.faceMax_[origin.face_];
+    output.faceMin_.push_back(source.faceMin_[origin.face_]);
+    output.faceMax_.push_back(source.faceMax_[origin.face_]);
     if (source.IsFallbackFace(origin.face_))
-        fallbackFaces_.push_back(index);
+        output.fallbackFaces_.push_back(index);
 
     const unsigned first = source.triangleStart_[origin.face_];
     const unsigned count = source.triangleStart_[origin.face_ + 1] - first;
@@ -1665,15 +1850,15 @@ bool CsgSolid::CopyOrigin(unsigned index, const CsgFaceOrigin& origin)
         {
             for (unsigned corner = 0; corner < 3; ++corner)
             {
-                trianglePositions_.push_back(positions[t * 3 + 2 - corner]);
-                triangleVertices_.push_back(vertexCount - 1 - locals[t * 3 + 2 - corner]);
+                output.trianglePositions_.push_back(positions[t * 3 + 2 - corner]);
+                output.triangleVertices_.push_back(vertexCount - 1 - locals[t * 3 + 2 - corner]);
             }
         }
     }
     else
     {
-        trianglePositions_.insert(trianglePositions_.end(), positions, positions + count * 3);
-        triangleVertices_.insert(triangleVertices_.end(), locals, locals + count * 3);
+        output.trianglePositions_.insert(output.trianglePositions_.end(), positions, positions + count * 3);
+        output.triangleVertices_.insert(output.triangleVertices_.end(), locals, locals + count * 3);
     }
     return true;
 }

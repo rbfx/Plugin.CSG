@@ -448,6 +448,82 @@ TEST_CASE("Boolean of disjoint boxes", "[boolean]")
     CheckClosed(intersectionAB);
 }
 
+TEST_CASE("Boolean of disjoint boxes keeps the faces of the operands whole", "[boolean][clear]")
+{
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(5.0f, 0.5f, 0.0f), 2);
+
+    // Union keeps both boxes, the first operand keeps all its faces. Intersection is empty.
+    const auto unionAB = Run(a, b, CsgOperation::Union);
+    CHECK(unionAB->FaceCount() == 12);
+    CHECK(Volume(unionAB) == Catch::Approx(16.0).margin(VOLUME_TOLERANCE));
+    for (unsigned face = 0; face < 6; ++face)
+        CHECK(unionAB->GetFace(face).get() == a->GetFace(face).get());
+
+    // Difference keeps the first operand whole and drops the second.
+    const auto differenceAB = Run(a, b, CsgOperation::DifferenceAB);
+    CHECK(differenceAB->FaceCount() == 6);
+    CHECK(differenceAB->ComponentCount() == 1);
+    CHECK(Volume(differenceAB) == Catch::Approx(8.0).margin(VOLUME_TOLERANCE));
+    CHECK(Run(a, b, CsgOperation::Intersection)->FaceCount() == 0);
+}
+
+TEST_CASE("Boolean keeps a face of a touched component whole if it lies clear of the other operand", "[boolean][clear]")
+{
+    // The small box pokes through the top face of the big box. The curve reaches only that face.
+    // The bottom face and the four side faces lie clear of the bounds of the small box.
+    const auto big = MakeBox(Vector3::ZERO, 1);
+    const auto small = MakeSolid(MakeBoxPolygons(Vector3(0.0f, 1.0f, 0.0f), Vector3(0.25f, 0.25f, 0.25f), 2));
+    const double smallVolume = 0.5 * 0.5 * 0.5;
+    const double overlapVolume = 0.5 * 0.5 * 0.25;
+
+    // The faces of the big box that the result must keep as they are, by the identity of the polygon.
+    const auto countWhole = [&](const SolidPtr& result)
+    {
+        unsigned count = 0;
+        for (unsigned face = 0; face < result->FaceCount(); ++face)
+        {
+            for (unsigned source = 0; source < big->FaceCount(); ++source)
+                count += result->GetFace(face).get() == big->GetFace(source).get() ? 1 : 0;
+        }
+        return count;
+    };
+
+    SECTION("Union")
+    {
+        const auto result = Run(big, small, CsgOperation::Union);
+        CHECK(Volume(result) == Catch::Approx(8.0 + smallVolume - overlapVolume).margin(VOLUME_TOLERANCE));
+        CHECK(result->ComponentCount() == 1);
+        CHECK(countWhole(result) == 5);
+        CheckClosed(result);
+    }
+    SECTION("Difference of the big box")
+    {
+        const auto result = Run(big, small, CsgOperation::DifferenceAB);
+        CHECK(Volume(result) == Catch::Approx(8.0 - overlapVolume).margin(VOLUME_TOLERANCE));
+        CHECK(result->ComponentCount() == 1);
+        CHECK(countWhole(result) == 5);
+        CheckClosed(result);
+    }
+    SECTION("Difference of the small box")
+    {
+        // The big box is the second operand. Its faces are flipped and clear of the first operand: they are dropped.
+        const auto result = Run(small, big, CsgOperation::DifferenceAB);
+        CHECK(Volume(result) == Catch::Approx(smallVolume - overlapVolume).margin(VOLUME_TOLERANCE));
+        CHECK(countWhole(result) == 0);
+        CheckClosed(result);
+    }
+    SECTION("Intersection")
+    {
+        const auto result = Run(big, small, CsgOperation::Intersection);
+        CHECK(Volume(result) == Catch::Approx(overlapVolume).margin(VOLUME_TOLERANCE));
+        CHECK(countWhole(result) == 0);
+        CheckClosed(result);
+        // The order of the operands does not matter.
+        CHECK(Volume(Run(small, big, CsgOperation::Intersection)) == Catch::Approx(overlapVolume).margin(VOLUME_TOLERANCE));
+    }
+}
+
 TEST_CASE("Boolean with a corner that is not finite does not crash", "[boolean]")
 {
     const float nan = std::numeric_limits<float>::quiet_NaN();

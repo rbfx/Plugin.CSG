@@ -371,6 +371,9 @@ struct CsgOperandElements
     /// One byte for each component of the operand. Not zero if the curve reaches the component.
     ea::vector<uint8_t> touched_;
     ea::vector<CsgBooleanElement> elements_;
+    /// The faces of the touched components that lie clear of the other operand and that the boolean keeps whole.
+    /// Each entry has the number of elements before the face, so the face keeps its place among the elements.
+    ea::vector<ea::pair<unsigned, int>> clearFaces_;
     /// The id pool of the elements that have no source face.
     ea::vector<int> elementIds_;
     /// The label of each element after the classification: 0 if outside the other operand, 1 if inside,

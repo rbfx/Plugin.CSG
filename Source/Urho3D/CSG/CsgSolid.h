@@ -284,6 +284,11 @@ public:
         void AppendComponent(const CsgSolid& source, unsigned component, bool flip);
         /// Append every face of the source in its own order and keep its components.
         void AppendSolid(const CsgSolid& source);
+        /// Append the kept faces of a boolean after the whole components. Call it once, last, before Finish.
+        /// The arguments are as in FromKeptFaces. The builder triangulates the faces or copies the triangles of
+        /// their origins. The solid groups the faces into components when Finish builds the exact loops.
+        void AppendRegion(ea::vector<CsgSharedPolygon>&& faces, ea::span<const CsgFaceOrigin> origins,
+            ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid);
         /// Return the solid. The builder is empty afterwards.
         SharedPtr<CsgSolid> Finish();
 
@@ -307,6 +312,11 @@ public:
         /// Grid point of each face corner, copied from the source.
         ea::vector<CsgGridPoint> grid_;
         int exactIdSpace_{};
+        /// First face, first id and id count of the region. The region is empty if regionFaces_ is zero.
+        unsigned regionFace_{};
+        int regionIdBase_{};
+        int regionIdSpace_{};
+        unsigned regionFaces_{};
         /// Id offset of each source. A solid has few sources, so the search is linear.
         ea::vector<ea::pair<const CsgSolid*, int>> idOffsets_;
         float epsilon_{CSG_DEFAULT_EPSILON};
@@ -323,6 +333,20 @@ private:
     /// Build a solid over kept faces of a boolean. See FromKeptFaces.
     CsgSolid(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins,
         ea::span<const int> exactIds, int exactIdSpace, ea::span<const CsgGridPoint> exactGrid);
+    /// The arrays that Triangulate fills. They belong to a solid or to a builder.
+    struct TriangleOutput;
+    /// Triangulate the faces, or copy the triangles of their origins. Each face appends its end in triangleStart,
+    /// its bounds and its triangles. The index of the face i in the solid is firstFace + i.
+    /// The optional corners and vertex starts get the flat corner positions, in the layout of the exact loops.
+    static void Triangulate(ea::span<const CsgSharedPolygon> faces, ea::span<const CsgFaceOrigin> origins,
+        unsigned firstFace, TriangleOutput& output);
+    /// Copy the triangles and the bounds of the source face of an origin. Return false if the origin does not fit.
+    static bool CopyOrigin(const CsgSharedPolygon& face, const CsgFaceOrigin& origin, unsigned index,
+        TriangleOutput& output);
+    /// Group the region faces of a builder into components and update the closed flag.
+    /// The exact loops must exist. Balanced loops match every edge, so the faces that each edge joins are known.
+    /// Loops with a crack or with a collapsed face use the topology build over the region faces alone.
+    void GroupRegion(const Builder& builder, ea::span<const Vector3> corners, ea::span<const unsigned> vertexStart);
     /// Return the welded loops of the topology. They are welded within epsilon if the exact loops are not balanced.
     const CsgWeldedLoops& GetWeld() const;
     /// Move each corner to grid / scale of the grid point of its exact id. Return false if every corner is there.
@@ -341,8 +365,6 @@ private:
     /// The optional origins, exact ids and exact grid are as in FromKeptFaces.
     void Build(ea::vector<CsgSharedPolygon>&& faces, float epsilon, ea::span<const CsgFaceOrigin> origins = {},
         ea::span<const int> exactIds = {}, int exactIdSpace = 0, ea::span<const CsgGridPoint> exactGrid = {});
-    /// Copy the triangles and the bounds of the source face of an origin. Return false if the origin does not fit.
-    bool CopyOrigin(unsigned index, const CsgFaceOrigin& origin);
     /// Compute the bounds of the solid and of the components from the bounds of the faces. Reset the trees.
     void BuildBounds();
     ea::vector<CsgSharedPolygon> faces_;

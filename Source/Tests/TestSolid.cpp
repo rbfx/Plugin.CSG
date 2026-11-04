@@ -1208,6 +1208,92 @@ TEST_CASE("Solid exact ids count ids and not positions", "[solid][kept]")
     }
 }
 
+TEST_CASE("Builder region groups the kept faces like a solid of the kept faces", "[solid][kept][region]")
+{
+    const auto a = MakeBoxSolid(Vector3(0.0f, 0.0f, 0.0f), 1.0f);
+    const auto b = MakeBoxSolid(Vector3(5.0f, 0.0f, 0.0f), 2.0f);
+
+    // The solid of the kept faces is the reference. Its topology build gives the components and the closed flag.
+    // The builder appends the same kept faces after a whole component and must give the same grouping.
+    const auto check = [&](KeptFaces& kept, bool expectClosed, unsigned expectComponents)
+    {
+        ea::vector<CsgGridPoint> grid;
+        for (const CsgSharedPolygon& face : kept.faces_)
+        {
+            for (const ModelVertex& vertex : face->vertices_)
+                grid.push_back(CsgGridPoint::From(vertex.GetPosition()));
+        }
+        const auto far = MakeBoxSolid(Vector3(40.0f, 0.0f, 0.0f), 1.0f);
+        const unsigned farFaces = far->FaceCount();
+        ea::vector<CsgSharedPolygon> reference = kept.faces_;
+        const auto expected = CsgSolid::FromKeptFaces(ea::move(reference), CSG_DEFAULT_EPSILON,
+            {kept.origins_.data(), kept.origins_.size()}, {kept.ids_.data(), kept.ids_.size()}, kept.idSpace_,
+            {grid.data(), grid.size()});
+
+        CsgSolid::Builder builder(kept.faces_.size() + farFaces, 400);
+        builder.AppendComponent(*far, 0, false);
+        builder.AppendRegion(ea::move(kept.faces_), {kept.origins_.data(), kept.origins_.size()},
+            {kept.ids_.data(), kept.ids_.size()}, kept.idSpace_, {grid.data(), grid.size()});
+        const auto solid = builder.Finish();
+
+        REQUIRE(solid->FaceCount() == expected->FaceCount() + farFaces);
+        CHECK(solid->IsClosed() == expectClosed);
+        CHECK(expected->IsClosed() == expectClosed);
+        // The far box is component 0. The region components follow in the order of their first face.
+        REQUIRE(solid->ComponentCount() == expected->ComponentCount() + 1);
+        CHECK(expected->ComponentCount() == expectComponents);
+        for (unsigned face = 0; face < expected->FaceCount(); ++face)
+        {
+            CHECK(solid->GetFaceComponents()[farFaces + face] == expected->GetFaceComponents()[face] + 1);
+            const unsigned begin = expected->GetTriangleStart()[face];
+            const unsigned end = expected->GetTriangleStart()[face + 1];
+            const unsigned solidBegin = solid->GetTriangleStart()[farFaces + face];
+            REQUIRE(solid->GetTriangleStart()[farFaces + 1 + face] - solidBegin == end - begin);
+            for (unsigned i = 0; i < (end - begin) * 3; ++i)
+            {
+                CHECK(solid->GetTriangleVertices()[solidBegin * 3 + i] == expected->GetTriangleVertices()[begin * 3 + i]);
+                CHECK(solid->GetTrianglePositions()[solidBegin * 3 + i]
+                    == expected->GetTrianglePositions()[begin * 3 + i]);
+            }
+            CHECK(solid->GetFace(farFaces + face).get() == expected->GetFace(face).get());
+        }
+        for (unsigned component = 0; component < expected->ComponentCount(); ++component)
+        {
+            CHECK(solid->GetComponentMin(component + 1) == expected->GetComponentMin(component));
+            CHECK(solid->GetComponentMax(component + 1) == expected->GetComponentMax(component));
+        }
+    };
+
+    SECTION("Balanced loops use the edge match")
+    {
+        KeptFaces kept = KeepBoxes(a, b);
+        check(kept, true, 2);
+    }
+
+    SECTION("A missing face is a crack and uses the topology build")
+    {
+        KeptFaces kept = KeepBoxes(a, b);
+        // Drop the fifth face of the first box: a quad with four ids.
+        kept.faces_.erase(kept.faces_.begin() + 4);
+        kept.origins_.erase(kept.origins_.begin() + 4);
+        kept.ids_.erase(kept.ids_.begin() + 16, kept.ids_.begin() + 20);
+        check(kept, false, 2);
+    }
+
+    SECTION("A collapsed face joins a component and keeps the solid closed")
+    {
+        KeptFaces kept = KeepBoxes(a, b);
+        // A triangle with three corners at one position and one id. It has a triangle but no loop.
+        ea::vector<ModelVertex> corners(3, a->GetFace(0)->vertices_[0]);
+        kept.faces_.push_back(ea::make_shared<CsgPolygon>(ea::move(corners), 1));
+        // The faces have no origins, so the solids triangulate them.
+        kept.origins_.clear();
+        for (int k = 0; k < 3; ++k)
+            kept.ids_.push_back(a->VertexKey(0, 0));
+        check(kept, true, 2);
+    }
+}
+
 TEST_CASE("Solid answers queries from many threads on a fresh solid", "[solid][kept]")
 {
     const auto polygons = MakeSpherePolygons(Vector3::ZERO, 1.0f, 12, 16, 1);
