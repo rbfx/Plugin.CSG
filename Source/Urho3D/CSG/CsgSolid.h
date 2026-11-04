@@ -304,6 +304,8 @@ public:
         unsigned IdOffset(const CsgSolid& source);
         /// Cancel the triangles of the region that are on the same three points. See the definition.
         void CancelTriangles();
+        /// Remove the closed groups of region faces that enclose no volume. See the definition.
+        void RemoveEmptyGroups();
 
         ea::vector<CsgSharedPolygon> faces_;
         ea::vector<unsigned> triangleStart_;

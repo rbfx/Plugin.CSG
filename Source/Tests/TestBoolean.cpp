@@ -2135,3 +2135,89 @@ TEST_CASE("Thick mode: an open exact result runs again with thick decisions", "[
 }
 #endif
 
+
+namespace
+{
+
+/// Return the six-fold exact volume of the faces of one component of a solid.
+CsgTest::Int128 ComponentVolume6(const SolidPtr& solid, unsigned component)
+{
+    const CsgExactLoops loops = solid->GetExactLoops();
+    const ea::span<const unsigned> triangleStart = solid->GetTriangleStart();
+    const ea::span<const unsigned> triangleVertices = solid->GetTriangleVertices();
+    const ea::span<const unsigned> componentStart = solid->GetComponentStart();
+    const ea::span<const unsigned> componentFaces = solid->GetComponentFaces();
+    CsgTest::Int128 volume6 = 0;
+    for (unsigned i = componentStart[component]; i < componentStart[component + 1]; ++i)
+    {
+        const unsigned face = componentFaces[i];
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+        {
+            const auto corner = [&](unsigned k) -> const CsgGridPoint&
+            { return loops.grid_[loops.ids_[loops.vertexStart_[face] + triangleVertices[3 * t + k]]]; };
+            const CsgGridPoint& a = corner(0);
+            const CsgGridPoint& b = corner(1);
+            const CsgGridPoint& c = corner(2);
+            const int64_t cx = int64_t{b.y_} * c.z_ - int64_t{b.z_} * c.y_;
+            const int64_t cy = int64_t{b.z_} * c.x_ - int64_t{b.x_} * c.z_;
+            const int64_t cz = int64_t{b.x_} * c.y_ - int64_t{b.y_} * c.x_;
+            volume6 += CsgTest::Mul64<CsgTest::Int128>(a.x_, cx) + CsgTest::Mul64<CsgTest::Int128>(a.y_, cy)
+                + CsgTest::Mul64<CsgTest::Int128>(a.z_, cz);
+        }
+    }
+    return volume6;
+}
+
+/// Check that no component of the result is a closed sheet with no volume.
+void CheckNoEmptyComponent(const SolidPtr& solid)
+{
+    for (unsigned component = 0; component < solid->ComponentCount(); ++component)
+        CHECK_FALSE(ComponentVolume6(solid, component) == 0);
+}
+
+} // namespace
+
+TEST_CASE("Boolean of boxes that touch with coincident faces leaves no sheet with no volume",
+    "[boolean][empty]")
+{
+    // The face x = 1 of A and the face x = 1 of B coincide with opposite directions. B is not a cube, so the
+    // two faces have different triangles. In the second case, the face of B reaches out of the face of A.
+    const auto a = MakeSolid(MakeBoxPolygons(Vector3::ZERO, Vector3(1.0f, 1.0f, 1.0f), 1));
+    struct Case
+    {
+        Vector3 center_;
+        Vector3 halfSize_;
+        double volumeB_;
+        double overlap_;
+    };
+    const Case cases[] = {
+        {Vector3(2.0f, 0.3f, 0.2f), Vector3(1.0f, 0.4f, 0.5f), 2.0 * 0.8 * 1.0, 0.0},
+        {Vector3(2.0f, 0.8f, 0.2f), Vector3(1.0f, 0.5f, 0.5f), 2.0 * 1.0 * 1.0, 0.0},
+        // B enters A by a quarter of a unit, so the faces are not coincident. It is the control case.
+        {Vector3(1.75f, 0.3f, 0.2f), Vector3(1.0f, 0.4f, 0.5f), 2.0 * 0.8 * 1.0, 0.25 * 0.8 * 1.0},
+    };
+    for (const Case& test : cases)
+    {
+        const auto b = MakeSolid(MakeBoxPolygons(test.center_, test.halfSize_, 2));
+        const double volumeA = 8.0;
+        for (const bool exactOnly : {true, false})
+        {
+            const CsgExactOnlyScope scope(exactOnly);
+            const auto intersection = CsgBooleanOnceForTest(a, b, CsgOperation::Intersection, CSG_DEFAULT_EPSILON);
+            const auto unionAB = CsgBooleanOnceForTest(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+            const auto differenceAB = CsgBooleanOnceForTest(a, b, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+            const auto differenceBA = CsgBooleanOnceForTest(b, a, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+            for (const SolidPtr& result : {intersection, unionAB, differenceAB, differenceBA})
+            {
+                CheckClosed(result);
+                CheckNoEmptyComponent(result);
+            }
+            CHECK(Volume(intersection) == Catch::Approx(test.overlap_).margin(VOLUME_TOLERANCE));
+            CHECK(Volume(unionAB) == Catch::Approx(volumeA + test.volumeB_ - test.overlap_).margin(VOLUME_TOLERANCE));
+            CHECK(Volume(differenceAB) == Catch::Approx(volumeA - test.overlap_).margin(VOLUME_TOLERANCE));
+            CHECK(Volume(differenceBA) == Catch::Approx(test.volumeB_ - test.overlap_).margin(VOLUME_TOLERANCE));
+            if (test.overlap_ == 0.0)
+                CHECK(intersection->FaceCount() == 0);
+        }
+    }
+}

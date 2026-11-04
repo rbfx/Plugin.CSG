@@ -1563,3 +1563,124 @@ TEST_CASE("Builder region cancels opposite triangles on the same points and stay
     CHECK(solid->ContainsPoint(Vector3(0.1f, 0.1f, 0.1f)));
     CHECK_FALSE(solid->ContainsPoint(Vector3(5.2f, 0.2f, 0.0f)));
 }
+
+TEST_CASE("Builder region removes a closed sheet with no volume", "[solid][kept][region][empty]")
+{
+    const auto far = MakeBoxSolid(Vector3(40.0f, 0.0f, 0.0f), 1.0f);
+    const unsigned farFaces = far->FaceCount();
+
+    const Vector3 a(0, 0, 0), b(1, 0, 0), c(0, 1, 0), d(0, 0, 1);
+    const Vector3 e(5, 0, 0), f(6, 0, 0), g(6, 1, 0), h(5, 1, 0);
+    struct Item
+    {
+        ea::vector<Vector3> positions_;
+        ea::vector<int> ids_;
+    };
+    // A tetrahedron with outward faces, ids 0 to 3.
+    const Item tetrahedron[] = {
+        {{a, c, b}, {0, 2, 1}},
+        {{a, b, d}, {0, 1, 3}},
+        {{a, d, c}, {0, 3, 2}},
+        {{b, c, d}, {1, 2, 3}},
+    };
+    // A quad e, f, g, h in two directions, ids 4 to 7. The first copy has the diagonal e-g, the second one has the
+    // diagonal f-h. No triangle of one copy has the points of a triangle of the other copy. So no triangle
+    // cancels, and the four faces make a closed sheet that has no volume.
+    const Item sheet[] = {
+        {{e, f, g}, {4, 5, 6}},
+        {{e, g, h}, {4, 6, 7}},
+        {{f, e, h}, {5, 4, 7}},
+        {{f, h, g}, {5, 7, 6}},
+    };
+
+    const auto build = [&](bool withSheet)
+    {
+        ea::vector<const Item*> items;
+        if (withSheet)
+        {
+            items.push_back(&sheet[0]);
+            items.push_back(&sheet[2]);
+        }
+        for (const Item& item : tetrahedron)
+            items.push_back(&item);
+        if (withSheet)
+        {
+            items.push_back(&sheet[1]);
+            items.push_back(&sheet[3]);
+        }
+        ea::vector<CsgSharedPolygon> faces;
+        ea::vector<int> ids;
+        ea::vector<CsgGridPoint> grid;
+        for (const Item* item : items)
+        {
+            faces.push_back(
+                ea::make_shared<CsgPolygon>(MakeTestPolygon({item->positions_.data(), item->positions_.size()})));
+            for (unsigned k = 0; k < item->positions_.size(); ++k)
+            {
+                ids.push_back(item->ids_[k]);
+                grid.push_back(CsgGridPoint::From(item->positions_[k]));
+            }
+        }
+        CsgSolid::Builder builder(farFaces + faces.size(), 400);
+        builder.AppendComponent(*far, 0, false);
+        builder.AppendRegion(ea::move(faces), {}, {ids.data(), ids.size()}, 8, {grid.data(), grid.size()});
+        return builder.Finish();
+    };
+
+    const auto withSheet = build(true);
+    const auto without = build(false);
+
+    // The sheet is gone. The result is the same as the one of the tetrahedron alone.
+    REQUIRE(withSheet->FaceCount() == farFaces + 4);
+    CHECK(withSheet->FaceCount() == without->FaceCount());
+    CHECK(withSheet->IsClosed());
+    CHECK_FALSE(withSheet->HasOpenEdges());
+    CHECK(withSheet->ComponentCount() == 2);
+    CHECK(withSheet->GetTriangleStart().size() == without->GetTriangleStart().size());
+    CHECK(withSheet->GetTriangleStart().back() == without->GetTriangleStart().back());
+    CHECK(withSheet->Volume() == Catch::Approx(without->Volume()));
+    for (unsigned face = 0; face < 4; ++face)
+    {
+        for (unsigned k = 0; k < 3; ++k)
+        {
+            CHECK(withSheet->GetFace(farFaces + face)->vertices_[k].GetPosition() == tetrahedron[face].positions_[k]);
+            for (unsigned other = 0; other < 4; ++other)
+            {
+                for (unsigned j = 0; j < 3; ++j)
+                {
+                    CHECK((withSheet->VertexKey(farFaces + face, k) == withSheet->VertexKey(farFaces + other, j))
+                        == (tetrahedron[face].ids_[k] == tetrahedron[other].ids_[j]));
+                }
+            }
+        }
+    }
+    CHECK(withSheet->ContainsPoint(Vector3(0.1f, 0.1f, 0.1f)));
+    CHECK_FALSE(withSheet->ContainsPoint(Vector3(5.5f, 0.5f, 0.0f)));
+}
+
+TEST_CASE("Builder region keeps a closed group that has volume", "[solid][kept][region][empty]")
+{
+    // The tetrahedron alone is a closed group. Its volume is not zero, so it stays, also when it is the whole region.
+    const Vector3 a(0, 0, 0), b(1, 0, 0), c(0, 1, 0), d(0, 0, 1);
+    const Vector3 corners[4][3] = {{a, c, b}, {a, b, d}, {a, d, c}, {b, c, d}};
+    const int ids[4][3] = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};
+    ea::vector<CsgSharedPolygon> faces;
+    ea::vector<int> faceIds;
+    ea::vector<CsgGridPoint> grid;
+    for (unsigned face = 0; face < 4; ++face)
+    {
+        faces.push_back(ea::make_shared<CsgPolygon>(MakeTestPolygon({corners[face], 3})));
+        for (unsigned k = 0; k < 3; ++k)
+        {
+            faceIds.push_back(ids[face][k]);
+            grid.push_back(CsgGridPoint::From(corners[face][k]));
+        }
+    }
+    CsgSolid::Builder builder(4, 12);
+    builder.AppendRegion(ea::move(faces), {}, {faceIds.data(), faceIds.size()}, 4, {grid.data(), grid.size()});
+    const auto solid = builder.Finish();
+    CHECK(solid->FaceCount() == 4);
+    CHECK(solid->IsClosed());
+    CHECK(solid->ComponentCount() == 1);
+    CHECK(solid->Volume() == Catch::Approx(1.0 / 6.0));
+}

@@ -1099,6 +1099,202 @@ bool LinkRegion(const CsgWeldedLoops& loops, ea::span<const unsigned> triangleSt
     return true;
 }
 
+/// A grid edge of the triangles with its ends in the order of IsBefore.
+struct GridEdgeKey
+{
+    CsgGridPoint low_;
+    CsgGridPoint high_;
+
+    friend bool operator==(const GridEdgeKey& l, const GridEdgeKey& r) { return l.low_ == r.low_ && l.high_ == r.high_; }
+};
+
+struct GridEdgeKeyHash
+{
+    size_t operator()(const GridEdgeKey& key) const
+    {
+        return static_cast<size_t>(GridPointNumber(key.low_) * 31 + GridPointNumber(key.high_));
+    }
+};
+
+/// The first face that has the edge, and the number of triangle sides that go from the low end to the high end
+/// minus the number of those that go back.
+struct GridEdgeUse
+{
+    unsigned face_{};
+    int balance_{};
+};
+
+/// A signed sum of integer values, in 128 bits with wrap-around. The values of the exact volumes are below 2^127
+/// together, so the sum is zero only if the 128 bits are zero. The class needs no compiler extension.
+class WideSum
+{
+public:
+    /// Add an expansion of integer terms.
+    void Add(const CsgExactVolume& volume)
+    {
+        for (int i = 0; i < volume.count_; ++i)
+            Add(static_cast<double>(volume.terms_[i]));
+    }
+
+    bool IsZero() const { return low_ == 0 && high_ == 0; }
+
+private:
+    void Add(double term)
+    {
+        if (term == 0.0)
+            return;
+        int exponent = 0;
+        const double fraction = std::frexp(std::fabs(term), &exponent);
+        const uint64_t mantissa = static_cast<uint64_t>(std::ldexp(fraction, 53));
+        const int shift = exponent - 53;
+        uint64_t low = 0;
+        uint64_t high = 0;
+        if (shift < 0)
+            low = -shift < 64 ? mantissa >> -shift : 0;
+        else if (shift < 64)
+        {
+            low = mantissa << shift;
+            high = shift == 0 ? 0 : mantissa >> (64 - shift);
+        }
+        else if (shift < 128)
+            high = mantissa << (shift - 64);
+        else
+            URHO3D_ASSERT(false, "CsgSolid exact volume is out of range");
+        if (term < 0.0)
+        {
+            low = ~low + 1;
+            high = ~high + (low == 0 ? 1 : 0);
+        }
+        low_ += low;
+        high_ += high + (low_ < low ? 1 : 0);
+    }
+
+    uint64_t low_{};
+    uint64_t high_{};
+};
+
+/// Find the closed groups of the region faces that enclose no volume. Return a flag for each region face, or an
+/// empty vector if there is none. The faces join in a group by the grid edges of their triangles. A group is closed
+/// if each edge of its triangles has as many sides in one direction as in the other. It has no volume if the sum of
+/// the signed volumes of its triangles is exactly zero. The function reads each triangle a constant number of times.
+///
+/// The callback point(face, triangle, corner) returns the grid point of a corner of a triangle of the region.
+template <class Point>
+ea::vector<bool> FindEmptyGroups(ea::span<const unsigned> triangleStart, unsigned first, unsigned count, const Point& point)
+{
+    const unsigned firstTriangle = triangleStart[first];
+    const unsigned endTriangle = triangleStart[first + count];
+    if (firstTriangle == endTriangle)
+        return {};
+
+    FaceSets sets(count);
+    ea::vector<bool> hasTriangles(count);
+    ea::hash_map<GridEdgeKey, GridEdgeUse, GridEdgeKeyHash> edges;
+    edges.reserve((endTriangle - firstTriangle) * 3 / 2 + 1);
+    for (unsigned face = first; face < first + count; ++face)
+    {
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+        {
+            hasTriangles[face - first] = true;
+            for (unsigned corner = 0; corner < 3; ++corner)
+            {
+                const CsgGridPoint from = point(face, t, corner);
+                const CsgGridPoint to = point(face, t, corner == 2 ? 0 : corner + 1);
+                if (from == to)
+                    continue;
+                const bool forward = IsBefore(from, to);
+                const GridEdgeKey key = forward ? GridEdgeKey{from, to} : GridEdgeKey{to, from};
+                const auto result = edges.insert(key);
+                if (result.second)
+                    result.first->second.face_ = face - first;
+                else
+                    sets.Union(static_cast<int>(face - first), static_cast<int>(result.first->second.face_));
+                result.first->second.balance_ += forward ? 1 : -1;
+            }
+        }
+    }
+
+    // A group is a candidate if it has a triangle and all its edges balance.
+    ea::vector<bool> candidate(count);
+    for (unsigned i = 0; i < count; ++i)
+        candidate[sets.Find(static_cast<int>(i))] = candidate[sets.Find(static_cast<int>(i))] || hasTriangles[i];
+    for (const auto& entry : edges)
+    {
+        if (entry.second.balance_ != 0)
+            candidate[sets.Find(static_cast<int>(entry.second.face_))] = false;
+    }
+    bool any = false;
+    for (unsigned i = 0; i < count; ++i)
+        any |= candidate[i];
+    if (!any)
+        return {};
+
+    // The volume of the triangle with the first point of the region as the apex is p . (q x r) with the vectors p,
+    // q and r from that point. The double sum is a filter: it settles a group that is clearly not flat.
+    const CsgGridPoint origin = point(first, firstTriangle, 0);
+    const auto vector = [&](const CsgGridPoint& p, double& x, double& y, double& z)
+    {
+        x = static_cast<double>(p.x_) - origin.x_;
+        y = static_cast<double>(p.y_) - origin.y_;
+        z = static_cast<double>(p.z_) - origin.z_;
+    };
+    ea::vector<double> approximate(count, 0.0);
+    ea::vector<double> magnitude(count, 0.0);
+    ea::vector<unsigned> triangles(count, 0);
+    for (unsigned face = first; face < first + count; ++face)
+    {
+        const unsigned root = sets.Find(static_cast<int>(face - first));
+        if (!candidate[root])
+            continue;
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+        {
+            double px, py, pz, qx, qy, qz, rx, ry, rz;
+            vector(point(face, t, 0), px, py, pz);
+            vector(point(face, t, 1), qx, qy, qz);
+            vector(point(face, t, 2), rx, ry, rz);
+            approximate[root] += px * (qy * rz - qz * ry) + py * (qz * rx - qx * rz) + pz * (qx * ry - qy * rx);
+            magnitude[root] += std::fabs(px) * (std::fabs(qy * rz) + std::fabs(qz * ry))
+                + std::fabs(py) * (std::fabs(qz * rx) + std::fabs(qx * rz))
+                + std::fabs(pz) * (std::fabs(qx * ry) + std::fabs(qy * rx));
+            ++triangles[root];
+        }
+    }
+    // Each term has a relative error of a few roundings. The factor covers them and the n additions of the sum.
+    constexpr double unit = 0.5 * std::numeric_limits<double>::epsilon();
+    bool undecided = false;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        if (candidate[i] && std::fabs(approximate[i]) > (32.0 + triangles[i]) * unit * magnitude[i])
+            candidate[i] = false;
+        undecided |= candidate[i];
+    }
+    if (!undecided)
+        return {};
+
+    // The exact sum of the groups that remain.
+    ea::vector<WideSum> sums(count);
+    for (unsigned face = first; face < first + count; ++face)
+    {
+        const unsigned root = sets.Find(static_cast<int>(face - first));
+        if (!candidate[root])
+            continue;
+        for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+            sums[root].Add(CsgExact::Volume(point(face, t, 0), point(face, t, 1), point(face, t, 2), origin));
+    }
+    ea::vector<bool> empty(count);
+    bool anyEmpty = false;
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const unsigned root = sets.Find(static_cast<int>(i));
+        if (candidate[root] && sums[root].IsZero())
+        {
+            empty[i] = true;
+            anyEmpty = true;
+        }
+    }
+    return anyEmpty ? empty : ea::vector<bool>();
+}
+
 } // namespace
 
 CsgPointWelder::CsgPointWelder(float epsilon, unsigned capacity)
@@ -1721,6 +1917,7 @@ void CsgSolid::Builder::AppendRegion(ea::vector<CsgSharedPolygon>&& faces, ea::s
         exactIds_.push_back(regionIdBase_ + id);
     grid_.insert(grid_.end(), exactGrid.begin(), exactGrid.end());
     CancelTriangles();
+    RemoveEmptyGroups();
 }
 
 /// Cancel the triangles of the region that are on the same three points. Two triangles in opposite directions are
@@ -1908,6 +2105,113 @@ void CsgSolid::Builder::CancelTriangles()
                 exactIds_[writeCorner + i] = exactIds_[cornerStart + i];
             if (hasGrid)
                 grid_[writeCorner + i] = grid_[cornerStart + i];
+        }
+        writeCorner += cornerCount;
+        triangleStart_[++writeFace] = writeTriangle;
+    }
+    faces_.erase(faces_.begin() + writeFace, faces_.end());
+    faceMin_.erase(faceMin_.begin() + writeFace, faceMin_.end());
+    faceMax_.erase(faceMax_.begin() + writeFace, faceMax_.end());
+    triangleStart_.erase(triangleStart_.begin() + writeFace + 1, triangleStart_.end());
+    if (hasIds)
+        exactIds_.erase(exactIds_.begin() + writeCorner, exactIds_.end());
+    if (hasGrid)
+        grid_.erase(grid_.begin() + writeCorner, grid_.end());
+    trianglePositions_.erase(trianglePositions_.begin() + writeTriangle * 3, trianglePositions_.end());
+    triangleVertices_.erase(triangleVertices_.begin() + writeTriangle * 3, triangleVertices_.end());
+    regionFaces_ = writeFace - firstFace;
+}
+
+/// Remove the closed groups of region faces that enclose no volume. Coincident faces of the operands can leave
+/// such a sheet, for example two copies of a quad with opposite directions and different diagonals. The triangles
+/// of the sheet do not cancel, and the faces join in a closed group, but the sheet is not part of the shape.
+///
+/// The groups form by the grid edges of the triangles, see FindEmptyGroups: the exact loops of the faces of such a
+/// sheet can keep them apart. The function removes the faces of the groups. The component grouping of the region
+/// runs later in Finish, so it sees only the faces that stay. Both passes of the boolean call this function
+/// through AppendRegion. A region with a position out of the range of the grid keeps its faces.
+void CsgSolid::Builder::RemoveEmptyGroups()
+{
+    const unsigned firstFace = regionFace_;
+    const unsigned endFace = regionFace_ + regionFaces_;
+    URHO3D_ASSERT(endFace == faces_.size() && triangleStart_.size() == faces_.size() + 1);
+    const unsigned firstTriangle = triangleStart_[firstFace];
+    const unsigned endTriangle = trianglePositions_.size() / 3;
+    if (firstTriangle == endTriangle)
+        return;
+    for (unsigned i = firstTriangle * 3; i < endTriangle * 3; ++i)
+    {
+        if (!InGridRange(trianglePositions_[i]))
+            return;
+    }
+
+    // The grid points of the corners are those of the exact ids. A region without grid points uses the positions.
+    unsigned cornerBase = 0;
+    for (unsigned face = 0; face < firstFace; ++face)
+        cornerBase += faces_[face]->vertices_.size();
+    ea::vector<unsigned> cornerStart;
+    cornerStart.reserve(regionFaces_ + 1);
+    unsigned corners = cornerBase;
+    for (unsigned face = firstFace; face < endFace; ++face)
+    {
+        cornerStart.push_back(corners);
+        corners += faces_[face]->vertices_.size();
+    }
+    cornerStart.push_back(corners);
+    const bool hasGrid = grid_.size() == corners;
+    const auto point = [&](unsigned face, unsigned triangle, unsigned corner)
+    {
+        if (hasGrid)
+            return grid_[cornerStart[face - firstFace] + triangleVertices_[triangle * 3 + corner]];
+        return CsgGridPoint::From(trianglePositions_[triangle * 3 + corner]);
+    };
+    const ea::vector<bool> remove = FindEmptyGroups(triangleStart_, firstFace, regionFaces_, point);
+    if (remove.empty())
+        return;
+
+    // The fallback faces are in ascending order. The ones of the region are set again below.
+    ea::vector<unsigned> regionFallback;
+    const auto fallbackBegin = ea::lower_bound(fallbackFaces_.begin(), fallbackFaces_.end(), firstFace);
+    regionFallback.assign(fallbackBegin, fallbackFaces_.end());
+    fallbackFaces_.erase(fallbackBegin, fallbackFaces_.end());
+
+    const bool hasIds = exactIds_.size() == corners;
+    unsigned writeFace = firstFace;
+    unsigned writeTriangle = firstTriangle;
+    unsigned writeCorner = cornerBase;
+    unsigned readTriangle = firstTriangle;
+    for (unsigned face = firstFace; face < endFace; ++face)
+    {
+        const unsigned end = triangleStart_[face + 1];
+        const unsigned cornerFrom = cornerStart[face - firstFace];
+        const unsigned cornerCount = cornerStart[face - firstFace + 1] - cornerFrom;
+        const unsigned readStart = readTriangle;
+        readTriangle = end;
+        if (remove[face - firstFace])
+            continue;
+        for (unsigned t = readStart; t < end; ++t)
+        {
+            for (unsigned corner = 0; corner < 3; ++corner)
+            {
+                trianglePositions_[writeTriangle * 3 + corner] = trianglePositions_[t * 3 + corner];
+                triangleVertices_[writeTriangle * 3 + corner] = triangleVertices_[t * 3 + corner];
+            }
+            ++writeTriangle;
+        }
+        if (writeFace != face)
+        {
+            faces_[writeFace] = ea::move(faces_[face]);
+            faceMin_[writeFace] = faceMin_[face];
+            faceMax_[writeFace] = faceMax_[face];
+        }
+        if (ea::binary_search(regionFallback.begin(), regionFallback.end(), face))
+            fallbackFaces_.push_back(writeFace);
+        for (unsigned i = 0; i < cornerCount; ++i)
+        {
+            if (hasIds)
+                exactIds_[writeCorner + i] = exactIds_[cornerFrom + i];
+            if (hasGrid)
+                grid_[writeCorner + i] = grid_[cornerFrom + i];
         }
         writeCorner += cornerCount;
         triangleStart_[++writeFace] = writeTriangle;
