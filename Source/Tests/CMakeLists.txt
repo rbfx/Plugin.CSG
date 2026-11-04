@@ -28,7 +28,7 @@ set (SOURCE_FILES
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
 # This keeps the tests independent from the plugin entry point and from the plugin loader.
-set (CSG_DIR ${CMAKE_SOURCE_DIR}/Source/Urho3D/CSG)
+set (CSG_DIR ${RbfxCsg_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
     ${CSG_DIR}/Csg.cpp
     ${CSG_DIR}/CsgBrush.cpp
@@ -55,6 +55,6 @@ target_compile_options (${TARGET_NAME} PRIVATE ${CSG_STRICT_FP_OPTIONS})
 if (CSG_EXACT_USE_DOUBLE)
     target_compile_definitions (${TARGET_NAME} PRIVATE CSG_EXACT_USE_DOUBLE=1)
 endif ()
-target_include_directories (${TARGET_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/Source ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories (${TARGET_NAME} PRIVATE ${RbfxCsg_SOURCE_DIR}/Source ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_test (NAME ${TARGET_NAME} COMMAND ${TARGET_NAME})
