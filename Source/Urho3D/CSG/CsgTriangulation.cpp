@@ -17,6 +17,8 @@
 #include <EASTL/sort.h>
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace Urho3D
@@ -167,6 +169,16 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         return false;
     };
 
+    // With four vertices left, clipping the vertex at ring position i leaves the three others as the last triangle.
+    // That triangle is flat if the others lie on one line. Another ear leaves a proper last triangle.
+    const auto leavesFlat = [&](unsigned i)
+    {
+        const unsigned a = ring[(i + 3) % 4];
+        const unsigned c = ring[(i + 1) % 4];
+        const unsigned e = ring[(i + 2) % 4];
+        return std::abs(orient(a, c, e)) <= length(a, c) * extent * STRAIGHT_DISTANCE;
+    };
+
     outIndices.reserve((numVertices - 2) * 3);
     while (ring.size() > 3)
     {
@@ -174,48 +186,59 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         int clip = -1;
         int fallback = -1;
         double fallbackTurn = -std::numeric_limits<double>::infinity();
-        for (unsigned i = 0; i < count; ++i)
+        // The first round keeps the last triangle proper. The second round accepts a flat last triangle.
+        for (int round = 0; round < 2 && clip < 0; ++round)
         {
-            const unsigned a = ring[(i + count - 1) % count];
-            const unsigned b = ring[i];
-            const unsigned c = ring[(i + 1) % count];
-            const double turn = orient(a, b, c);
-            const double scale = length(a, b) * length(b, c);
-            const double normalized = scale > 0.0 ? turn / scale : 0.0;
-            if (normalized > fallbackTurn)
+            for (unsigned i = 0; i < count; ++i)
             {
-                fallbackTurn = normalized;
-                fallback = static_cast<int>(i);
-            }
-            // A tip within rounding of a neighbor closes a zero-length edge: the needle has no area to invert, and
-            // leaving it would block every ear around it.
-            const double needle = extent * STRAIGHT_DISTANCE;
-            if ((!straight || !straight[b]) && turn >= 0.0 && (length(a, b) <= needle || length(b, c) <= needle))
-            {
+                const unsigned a = ring[(i + count - 1) % count];
+                const unsigned b = ring[i];
+                const unsigned c = ring[(i + 1) % count];
+                const double turn = orient(a, b, c);
+                const double scale = length(a, b) * length(b, c);
+                const double normalized = scale > 0.0 ? turn / scale : 0.0;
+                if (normalized > fallbackTurn)
+                {
+                    fallbackTurn = normalized;
+                    fallback = static_cast<int>(i);
+                }
+                // A tip within rounding of a neighbor closes a zero-length edge: the needle has no area to invert, and
+                // leaving it would block every ear around it.
+                const double needle = extent * STRAIGHT_DISTANCE;
+                if ((!straight || !straight[b]) && turn >= 0.0 && (length(a, b) <= needle || length(b, c) <= needle))
+                {
+                    clip = static_cast<int>(i);
+                    break;
+                }
+                // Distance of b from the chord a-c is twice the ear's area over the chord length.
+                const double chord = length(a, c);
+                if (turn <= 0.0 || turn <= chord * extent * STRAIGHT_DISTANCE || isStraight(b)
+                    || (count == 4 && isStraight(ring[(i + 2) % count]))
+                    || (round == 0 && count == 4 && leavesFlat(i)) || containsOther(a, b, c))
+                    continue;
                 clip = static_cast<int>(i);
                 break;
             }
-            // Distance of b from the chord a-c is twice the ear's area over the chord length.
-            const double chord = length(a, c);
-            if (turn <= 0.0 || turn <= chord * extent * STRAIGHT_DISTANCE || isStraight(b)
-                || (count == 4 && isStraight(ring[(i + 2) % count])) || containsOther(a, b, c))
-                continue;
-            clip = static_cast<int>(i);
-            break;
         }
         if (clip < 0)
         {
             clean = false;
             // The shared runs left no ear. An ear that ignores the runs still lies inside the polygon, so it is
             // better than the most convex vertex, which can lie outside.
-            for (unsigned i = 0; i < count && clip < 0; ++i)
+            // The first round also keeps the last triangle proper. The second round takes any such ear.
+            for (int round = 0; round < 2 && clip < 0; ++round)
             {
-                const unsigned a = ring[(i + count - 1) % count];
-                const unsigned b = ring[i];
-                const unsigned c = ring[(i + 1) % count];
-                const double turn = orient(a, b, c);
-                if (turn > length(a, c) * extent * STRAIGHT_DISTANCE && !containsOther(a, b, c))
-                    clip = static_cast<int>(i);
+                for (unsigned i = 0; i < count && clip < 0; ++i)
+                {
+                    const unsigned a = ring[(i + count - 1) % count];
+                    const unsigned b = ring[i];
+                    const unsigned c = ring[(i + 1) % count];
+                    const double turn = orient(a, b, c);
+                    if (round == 0 && count == 4 && leavesFlat(i))
+                        continue;
+                    if (turn > length(a, c) * extent * STRAIGHT_DISTANCE && !containsOther(a, b, c))
+                        clip = static_cast<int>(i);
+                }
             }
             // Not a number turns compare false, so the fallback can stay unset. Then the first vertex is clipped.
             if (clip < 0)
@@ -416,6 +439,13 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(ea::vector<CsgPolygon> po
     return result;
 }
 
+namespace
+{
+
+void RepairFlatTriangles(CsgTriangulatedModel& model);
+
+} // namespace
+
 SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float epsilon)
 {
     auto result = MakeShared<CsgTriangulatedModel>();
@@ -457,6 +487,7 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float
         AddGeometry(*result, ea::move(geometry));
     }
 
+    RepairFlatTriangles(*result);
     return result;
 }
 
@@ -519,6 +550,202 @@ bool HasNoGridNormal(const CheckGridPoint& a, const CheckGridPoint& b, const Che
     const int64_t ux = b.x_ - a.x_, uy = b.y_ - a.y_, uz = b.z_ - a.z_;
     const int64_t vx = c.x_ - a.x_, vy = c.y_ - a.y_, vz = c.z_ - a.z_;
     return ProductsEqual(uy, vz, uz, vy) && ProductsEqual(uz, vx, ux, vz) && ProductsEqual(ux, vy, uy, vx);
+}
+
+
+/// Hash of a position by the bits of its floats.
+uint64_t HashPosition(const Vector3& p)
+{
+    uint32_t bits[3];
+    std::memcpy(bits, &p.x_, sizeof(float));
+    std::memcpy(bits + 1, &p.y_, sizeof(float));
+    std::memcpy(bits + 2, &p.z_, sizeof(float));
+    uint64_t hash = 1469598103934665603ull;
+    for (const uint32_t value : bits)
+    {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t HashEdge(const Vector3& from, const Vector3& to)
+{
+    return HashPosition(from) * 0x9E3779B97F4A7C15ull ^ (HashPosition(to) + 0x632BE59BD9B4E019ull);
+}
+
+bool SamePosition(const Vector3& a, const Vector3& b)
+{
+    return a.x_ == b.x_ && a.y_ == b.y_ && a.z_ == b.z_;
+}
+
+/// A flat triangle: three distinct corners on one line. `middle_` lies between the ends `from_` and `to_`.
+/// The triangle runs from the middle to `from_` to `to_`, so its long edge is from_ to to_.
+struct FlatTriangle
+{
+    unsigned geometry_;
+    unsigned triangle_;
+    Vector3 from_;
+    Vector3 middle_;
+    Vector3 to_;
+};
+
+/// Return true and the flat triangle parts if the three positions are three distinct points on one line.
+bool ClassifyFlat(const Vector3 (&p)[3], Vector3& from, Vector3& middle, Vector3& to)
+{
+    if (!IsGridPosition(p[0]) || !IsGridPosition(p[1]) || !IsGridPosition(p[2]))
+        return false;
+    const CheckGridPoint g0 = CheckGridPoint::From(p[0]);
+    const CheckGridPoint g1 = CheckGridPoint::From(p[1]);
+    const CheckGridPoint g2 = CheckGridPoint::From(p[2]);
+    if (g0 == g1 || g1 == g2 || g2 == g0 || !HasNoGridNormal(g0, g1, g2))
+        return false;
+    for (unsigned k = 0; k < 3; ++k)
+    {
+        const Vector3& m = p[k];
+        const Vector3 x = p[(k + 1) % 3] - m;
+        const Vector3 y = p[(k + 2) % 3] - m;
+        const double dot = static_cast<double>(x.x_) * y.x_ + static_cast<double>(x.y_) * y.y_
+            + static_cast<double>(x.z_) * y.z_;
+        if (dot < 0.0)
+        {
+            middle = m;
+            from = p[(k + 1) % 3];
+            to = p[(k + 2) % 3];
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Remove the flat triangles of a closed model that have a neighbor across their long edge.
+///
+/// The neighbor triangle holds the opposite directed edge from the end `to_` to the end `from_`. The function
+/// splits the neighbor at the middle point. The two new edges pair with the edges of the triangles at the sides of
+/// the flat one, so the surface stays closed and covers the same area. A flat triangle without such a neighbor stays.
+void RepairFlatTriangles(CsgTriangulatedModel& model)
+{
+    constexpr unsigned MAX_PASSES = 8;
+    for (unsigned pass = 0; pass < MAX_PASSES; ++pass)
+    {
+        // Find the flat triangles.
+        ea::vector<FlatTriangle> flats;
+        for (unsigned g = 0; g < model.geometries_.size(); ++g)
+        {
+            const CsgTriangulatedModel::Geometry& geometry = model.geometries_[g];
+            for (unsigned i = 0; i + 2 < geometry.indexData_.size(); i += 3)
+            {
+                const Vector3 p[3] = {geometry.vertices_[geometry.indexData_[i]].GetPosition(),
+                    geometry.vertices_[geometry.indexData_[i + 1]].GetPosition(),
+                    geometry.vertices_[geometry.indexData_[i + 2]].GetPosition()};
+                FlatTriangle flat{g, i};
+                if (ClassifyFlat(p, flat.from_, flat.middle_, flat.to_))
+                    flats.push_back(flat);
+            }
+        }
+        if (flats.empty())
+            return;
+
+        // Find the triangle with the opposite edge of each long edge.
+        ea::hash_map<uint64_t, unsigned> wanted;
+        for (unsigned f = 0; f < flats.size(); ++f)
+            wanted[HashEdge(flats[f].to_, flats[f].from_)] = f;
+        struct Neighbor
+        {
+            unsigned geometry_{~0u};
+            unsigned triangle_{};
+            unsigned corner_{};
+        };
+        ea::vector<Neighbor> neighbors(flats.size());
+        for (unsigned g = 0; g < model.geometries_.size(); ++g)
+        {
+            const CsgTriangulatedModel::Geometry& geometry = model.geometries_[g];
+            for (unsigned i = 0; i + 2 < geometry.indexData_.size(); i += 3)
+            {
+                for (unsigned k = 0; k < 3; ++k)
+                {
+                    const Vector3 from = geometry.vertices_[geometry.indexData_[i + k]].GetPosition();
+                    const Vector3 to = geometry.vertices_[geometry.indexData_[i + (k + 1) % 3]].GetPosition();
+                    const auto found = wanted.find(HashEdge(from, to));
+                    if (found == wanted.end())
+                        continue;
+                    const FlatTriangle& flat = flats[found->second];
+                    Neighbor& neighbor = neighbors[found->second];
+                    if (neighbor.geometry_ == ~0u && SamePosition(from, flat.to_) && SamePosition(to, flat.from_))
+                        neighbor = {g, i, k};
+                }
+            }
+        }
+
+        // Split each neighbor once in a pass. The flat triangle goes away with its split.
+        ea::vector<ea::vector<bool>> touched(model.geometries_.size());
+        ea::vector<ea::vector<bool>> removed(model.geometries_.size());
+        for (unsigned g = 0; g < model.geometries_.size(); ++g)
+        {
+            touched[g].resize(model.geometries_[g].indexData_.size() / 3, false);
+            removed[g].resize(model.geometries_[g].indexData_.size() / 3, false);
+        }
+        bool progress = false;
+        for (unsigned f = 0; f < flats.size(); ++f)
+        {
+            const Neighbor& neighbor = neighbors[f];
+            if (neighbor.geometry_ == ~0u || touched[neighbor.geometry_][neighbor.triangle_ / 3])
+                continue;
+            const FlatTriangle& flat = flats[f];
+            CsgTriangulatedModel::Geometry& geometry = model.geometries_[neighbor.geometry_];
+            const unsigned base = neighbor.triangle_;
+            const unsigned indexTo = geometry.indexData_[base + neighbor.corner_];
+            const unsigned indexFrom = geometry.indexData_[base + (neighbor.corner_ + 1) % 3];
+            const unsigned indexOther = geometry.indexData_[base + (neighbor.corner_ + 2) % 3];
+
+            // The neighbor must be a proper triangle. A flat neighbor waits for the next pass.
+            const Vector3 q[3] = {geometry.vertices_[indexTo].GetPosition(),
+                geometry.vertices_[indexFrom].GetPosition(), geometry.vertices_[indexOther].GetPosition()};
+            Vector3 unusedA, unusedB, unusedC;
+            if (ClassifyFlat(q, unusedA, unusedB, unusedC))
+                continue;
+
+            // The new corner gets the attributes of the neighbor face along its edge, at the middle position.
+            const Vector3 edge = flat.from_ - flat.to_;
+            const double lengthSquared = static_cast<double>(edge.x_) * edge.x_ + static_cast<double>(edge.y_) * edge.y_
+                + static_cast<double>(edge.z_) * edge.z_;
+            const Vector3 offset = flat.middle_ - flat.to_;
+            const double along = (static_cast<double>(offset.x_) * edge.x_ + static_cast<double>(offset.y_) * edge.y_
+                                     + static_cast<double>(offset.z_) * edge.z_)
+                / ea::max(lengthSquared, 1e-30);
+            ModelVertex vertex = LerpModelVertex(geometry.vertices_[indexTo], geometry.vertices_[indexFrom],
+                static_cast<float>(ea::clamp(along, 0.0, 1.0)));
+            vertex.SetPosition(flat.middle_);
+            const unsigned indexMiddle = geometry.vertices_.size();
+            geometry.vertices_.push_back(vertex);
+
+            // The neighbor runs to_, from_, other. The halves run to_, middle, other and middle, from_, other.
+            geometry.indexData_[base + (neighbor.corner_ + 1) % 3] = indexMiddle;
+            geometry.indexData_.push_back(indexMiddle);
+            geometry.indexData_.push_back(indexFrom);
+            geometry.indexData_.push_back(indexOther);
+            touched[neighbor.geometry_][neighbor.triangle_ / 3] = true;
+            removed[flat.geometry_][flat.triangle_ / 3] = true;
+            progress = true;
+        }
+        if (!progress)
+            return;
+
+        for (unsigned g = 0; g < model.geometries_.size(); ++g)
+        {
+            ea::vector<unsigned>& indices = model.geometries_[g].indexData_;
+            unsigned out = 0;
+            for (unsigned i = 0; i + 2 < indices.size(); i += 3)
+            {
+                if (i / 3 < removed[g].size() && removed[g][i / 3])
+                    continue;
+                indices[out++] = indices[i];
+                indices[out++] = indices[i + 1];
+                indices[out++] = indices[i + 2];
+            }
+            indices.resize(out);
+        }
+    }
 }
 
 } // namespace

@@ -319,6 +319,27 @@ TEST_CASE("Triangulate the unit square in the ear order of the reference", "[tri
     CHECK_FALSE(CsgTriangulatePolygon(tiny, indices));
 }
 
+TEST_CASE("Triangulate a ring with a collinear middle vertex without a flat triangle", "[triangulate]")
+{
+    // The vertex 2 lies on the edge from vertex 3 to vertex 1, close to vertex 1. The ear at vertex 0 does not
+    // block on vertex 2, but it would leave the three collinear vertices as the last triangle.
+    // The triangulator must clip another ear first.
+    const CsgPolygon polygon = MakePolygon2D({{1, 1}, {0, 0}, {0.0005f, 0}, {2, 0}});
+    ea::vector<unsigned> indices;
+    bool clean = false;
+    CsgTriangulationScratch scratch;
+    REQUIRE(CsgTriangulatePolygon(polygon, indices, {}, clean, scratch));
+    CHECK(clean);
+    REQUIRE(indices.size() == 6);
+    CHECK(IndicesValid(polygon, indices));
+    CHECK(TriangulatedArea(polygon, indices) == Catch::Approx(1.0).margin(1e-9));
+    for (unsigned t = 0; t < 6; t += 3)
+    {
+        CHECK(std::abs(SignedArea(polygon, indices[t], indices[t + 1], indices[t + 2])) > 1e-9);
+        CHECK((indices[t] == 2 || indices[t + 1] == 2 || indices[t + 2] == 2));
+    }
+}
+
 TEST_CASE("Triangulate a polygon with a zero-width spike", "[triangulate]")
 {
     const CsgPolygon polygon = MakePolygon2D(SPIKE_POLYGON, true);
@@ -400,8 +421,9 @@ TEST_CASE("Triangulate a polygon with duplicate positions", "[triangulate]")
 
 TEST_CASE("Triangulate with shared runs gives a matching split of the run", "[triangulate]")
 {
-    // The vertex (1.9995, 0) is within an end of the diagonal. Without the mark, the ear at the apex has the whole
-    // run as its edge and skips the vertex. With the mark, every triangle uses the vertex.
+    // The vertex (1.9995, 0) is within an end of the diagonal. An ear at the apex would have the whole run as its
+    // edge and leave a flat last triangle. The triangulator avoids that ear, with the mark or without it.
+    // Then every triangle uses the vertex.
     const CsgPolygon polygon = MakePolygon2D({{1, 0.5f}, {2, 0}, {1.9995f, 0}, {0, 0}});
     ea::vector<unsigned> plain;
     ea::vector<unsigned> marked;
@@ -413,7 +435,11 @@ TEST_CASE("Triangulate with shared runs gives a matching split of the run", "[tr
     REQUIRE(CsgTriangulatePolygon(polygon, marked, marks, cleanMarked, scratch));
     CHECK(cleanPlain);
     CHECK(cleanMarked);
-    CHECK(plain != marked);
+    REQUIRE(plain.size() == 6);
+    for (unsigned t = 0; t < 6; t += 3)
+        CHECK(std::abs(SignedArea(polygon, plain[t], plain[t + 1], plain[t + 2])) > 1e-9);
+    CHECK((plain[0] == 2 || plain[1] == 2 || plain[2] == 2));
+    CHECK((plain[3] == 2 || plain[4] == 2 || plain[5] == 2));
     REQUIRE(marked.size() == 6);
     // Both triangles contain the marked vertex 2.
     CHECK((marked[0] == 2 || marked[1] == 2 || marked[2] == 2));

@@ -475,13 +475,16 @@ TEST_CASE("CsgRoot bakes the brushes and appends on the baked result", "[root]")
     // A root without brushes cannot bake.
     CHECK(!root->Bake());
 
-    AddBoxBrush(root, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
     // The root needs a rebuild: the bake fails.
     CHECK(!root->Bake());
     root->Rebuild();
     REQUIRE(RunUntilOutput(root, workQueue, 1000));
     RunFrames(root, workQueue, 10);
+    const CsgBuildStats stats = root->GetLastBuildStats();
+    CHECK(stats.valid_);
+    CHECK(stats.degenerates_ == 0);
 
     const Model* bakedModel = GetOutput(root)->GetModel();
     const unsigned bakedIndices = CountIndices(bakedModel);
@@ -504,11 +507,14 @@ TEST_CASE("CsgRoot bakes the brushes and appends on the baked result", "[root]")
     CHECK(CountIndices(appended) > bakedIndices);
 
     CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
-    AddBoxBrush(fresh, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(fresh, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     AddBoxBrush(fresh, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
     AddBoxBrush(fresh, "Third", Vector3(0.0f, 3.0f, 0.0f), CsgOperation::Union);
     fresh->Rebuild();
     REQUIRE(RunUntilOutput(fresh, workQueue, 1000));
+    const CsgBuildStats freshStats = fresh->GetLastBuildStats();
+    CHECK(freshStats.valid_);
+    CHECK(freshStats.degenerates_ == 0);
     const Model* expected = GetOutput(fresh)->GetModel();
     CHECK(CountIndices(appended) == CountIndices(expected));
     CHECK(appended->GetBoundingBox().min_.Equals(expected->GetBoundingBox().min_, 1e-3f));
@@ -549,10 +555,13 @@ TEST_CASE("CsgRoot discards the bake when the root model changes", "[root]")
     scene->CreateComponent<Octree>();
 
     CsgRoot* root = MakeBoxRoot(scene, "BakeDiscard");
-    AddBoxBrush(root, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     root->Rebuild();
     REQUIRE(RunUntilOutput(root, workQueue, 1000));
     RunFrames(root, workQueue, 10);
+    const CsgBuildStats stats = root->GetLastBuildStats();
+    CHECK(stats.valid_);
+    CHECK(stats.degenerates_ == 0);
     REQUIRE(root->Bake());
     RunFrames(root, workQueue, 60);
     CHECK(CountIndices(GetOutput(root)->GetModel()) > 36);
@@ -584,10 +593,13 @@ TEST_CASE("CsgRoot keeps the baked result for a transformed root", "[root]")
         CsgRoot* root = MakeBoxRoot(scene, i == 0 ? "MovedBake" : "ScaledBake");
         root->GetNode()->SetPosition(positions[i]);
         root->GetNode()->SetScale(scales[i]);
-        AddBoxBrush(root, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
         root->Rebuild();
         REQUIRE(RunUntilOutput(root, workQueue, 1000));
         RunFrames(root, workQueue, 10);
+        const CsgBuildStats stats = root->GetLastBuildStats();
+        CHECK(stats.valid_);
+        CHECK(stats.degenerates_ == 0);
 
         const Model* bakedModel = GetOutput(root)->GetModel();
         const unsigned bakedIndices = CountIndices(bakedModel);
@@ -687,7 +699,7 @@ TEST_CASE("CsgRoot keeps a valid result as the cache and skips the cache of an i
 
     // The valid root has a cached solid. The Bake function needs it.
     CsgRoot* valid = MakeBoxRoot(scene, "Valid");
-    AddBoxBrush(valid, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(valid, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     valid->Rebuild();
     REQUIRE(RunUntilOutput(valid, workQueue, 1000));
     const CsgBuildStats validStats = valid->GetLastBuildStats();
@@ -703,7 +715,7 @@ TEST_CASE("CsgRoot keeps a valid result as the cache and skips the cache of an i
     CsgRoot* open = scene->CreateChild("Open")->CreateComponent<CsgRoot>();
     open->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/OpenBoxA.mdl"));
     open->SetDeferredDelaySec(0.0f);
-    AddBoxBrush(open, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(open, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     open->Rebuild();
     REQUIRE(RunUntilOutput(open, workQueue, 1000));
     const CsgBuildStats stats = open->GetLastBuildStats();
@@ -741,8 +753,8 @@ TEST_CASE("CsgRoot reports a positive volume and a valid result for a union", "[
     CHECK(stats.degenerates_ == 0);
 }
 
-// The solid keeps a flat triangle on the diagonal of a box face where the cut has a corner. See the C3b step.
-TEST_CASE("known limit: a corner cut of a box has no degenerate triangle", "[root][!mayfail]")
+// The corner of the cut lies on the diagonal of a box face. The output has no flat triangle there.
+TEST_CASE("CsgRoot cuts a corner of a box without a degenerate triangle", "[root]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
@@ -926,11 +938,14 @@ TEST_CASE("CsgRoot refuses to bake after a failed build", "[root]")
     scene->CreateComponent<Octree>();
 
     CsgRoot* root = MakeBoxRoot(scene, "BakeAfterFailure");
-    AddBoxBrush(root, "Cut", Vector3(0.5f, 0.3f, 0.1f), CsgOperation::DifferenceAB);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
     root->Rebuild();
     REQUIRE(RunUntilOutput(root, workQueue, 1000));
     RunFrames(root, workQueue, 10);
+    const CsgBuildStats stats = root->GetLastBuildStats();
+    CHECK(stats.valid_);
+    CHECK(stats.degenerates_ == 0);
 
     // The epsilon changes, but the build fails. The cache keeps the old epsilon.
     CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
