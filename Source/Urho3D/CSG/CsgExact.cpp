@@ -3,6 +3,7 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSG/CsgExact.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgExactFilter.h"
 
 #include <algorithm>
@@ -28,6 +29,28 @@ constexpr float FilterBound = 8.0f * std::numeric_limits<float>::epsilon();
 int SignOfFloat(float value)
 {
     return value > 0.0f ? 1 : -1;
+}
+
+/// Gradient components below this many thicknesses times the edge lengths are rounding noise.
+constexpr double GradientNoise = 4.0;
+
+double Square(double x, double y, double z)
+{
+    return x * x + y * y + z * z;
+}
+
+double Determinant(double ux, double uy, double uz, double vx, double vy, double vz, double wx, double wy, double wz)
+{
+    return ux * (vy * wz - vz * wy) + uy * (vz * wx - vx * wz) + uz * (vx * wy - vy * wx);
+}
+
+/// Approximate value of an expansion. The terms are nonoverlapping and grow in magnitude.
+double Approximate(int count, const CsgReal* terms)
+{
+    double sum = 0.0;
+    for (int i = 0; i < count; ++i)
+        sum += static_cast<double>(terms[i]);
+    return sum;
 }
 
 /// Add a minor multiplied by the weight -1 or 1 to an accumulator with at most 12 terms.
@@ -106,7 +129,7 @@ CsgGridInt RoundWithEstimate(CsgGridInt low, CsgGridInt high, double t, const Cs
 
 int CsgInternal::Filter(const CsgFloat4& ux, const CsgFloat4& uy, const CsgFloat4& uz, const CsgFloat4& vx,
     const CsgFloat4& vy, const CsgFloat4& vz, const CsgFloat4& wx, const CsgFloat4& wy, const CsgFloat4& wz,
-    CsgFloat4& det)
+    double extent, CsgFloat4& det)
 {
     const CsgFloat4 m1 = vy * wz - vz * wy;
     const CsgFloat4 m2 = vz * wx - vx * wz;
@@ -115,7 +138,35 @@ int CsgInternal::Filter(const CsgFloat4& ux, const CsgFloat4& uy, const CsgFloat
     const CsgFloat4 permanent = CsgFloat4::Abs(ux) * (CsgFloat4::Abs(vy * wz) + CsgFloat4::Abs(vz * wy))
         + CsgFloat4::Abs(uy) * (CsgFloat4::Abs(vz * wx) + CsgFloat4::Abs(vx * wz))
         + CsgFloat4::Abs(uz) * (CsgFloat4::Abs(vx * wy) + CsgFloat4::Abs(vy * wx));
-    return CsgFloat4::GreaterThanMask(CsgFloat4::Abs(det), permanent * CsgFloat4::Splat(FilterBound)) & 0b111;
+    int decided = CsgFloat4::GreaterThanMask(CsgFloat4::Abs(det), permanent * CsgFloat4::Splat(FilterBound)) & 0b111;
+    if (decided == 0 || g_csgExactOnly)
+        return decided;
+
+    // A lane that can be within the thickness stays undecided. The edges of the lane are within the longest edge of
+    // the common corner, and |u x v| and |u x (w - v)| are below two times the largest squared edge.
+    // Then a volume above the longest squared edge times 4 thicknesses is farther than the thickness.
+    float lanes[10][4];
+    ux.Store(lanes[0]);
+    uy.Store(lanes[1]);
+    uz.Store(lanes[2]);
+    vx.Store(lanes[3]);
+    vy.Store(lanes[4]);
+    vz.Store(lanes[5]);
+    wx.Store(lanes[6]);
+    wy.Store(lanes[7]);
+    wz.Store(lanes[8]);
+    det.Store(lanes[9]);
+    for (int k = 0; k < 3; ++k)
+    {
+        if ((decided & (1 << k)) == 0)
+            continue;
+        const double longest = std::max(Square(lanes[0][k], lanes[1][k], lanes[2][k]),
+            std::max(Square(lanes[3][k], lanes[4][k], lanes[5][k]), Square(lanes[6][k], lanes[7][k], lanes[8][k])));
+        const double thickness = std::max(2.0, (extent + std::sqrt(longest)) * (1.0 / 4194304.0));
+        if (!(std::abs(static_cast<double>(lanes[9][k])) > longest * thickness * 4.0))
+            decided &= ~(1 << k);
+    }
+    return decided;
 }
 
 CsgExactMinor CsgExact::MinorExact(CsgReal a, CsgReal b, CsgReal c, CsgReal d)
@@ -139,6 +190,83 @@ CsgExactMinor CsgExact::MinorExact(CsgReal a, CsgReal b, CsgReal c, CsgReal d)
 int CsgExact::Orient(
     const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second)
 {
+    return OrientThick(a, b, c, d, second, false, false, 0.0);
+}
+
+int CsgExact::OrientPlane(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
+    int second, double faceExtent)
+{
+    if (CsgInternal::g_csgExactOnly)
+        return OrientThick(a, b, c, d, second, false, false, 0.0);
+    return OrientThick(a, b, c, d, second, true, false, PlaneThickness(d, faceExtent));
+}
+
+int CsgExact::OrientLines(
+    const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1, int second)
+{
+    if (CsgInternal::g_csgExactOnly)
+        return OrientThick(e0, e1, t0, t1, second, false, false, 0.0);
+    return OrientThick(e0, e1, t0, t1, second, true, true, 0.0);
+}
+
+bool CsgExact::Flat(double ux, double uy, double uz, double px, double py, double pz, double det, double thickness)
+{
+    return std::abs(det)
+        <= thickness * std::sqrt(Square(uy * pz - uz * py, uz * px - ux * pz, ux * py - uy * px));
+}
+
+bool CsgExact::SegmentsMeet(const CsgGridPoint& a, double ux, double uy, double uz, double vx, double vy, double vz,
+    double px, double py, double pz, double& thickness)
+{
+    const double uu = Square(ux, uy, uz);
+    const double pp = Square(px, py, pz);
+    double s = 0.0;
+    double r = 0.0;
+    if (uu > 0.0 && pp > 0.0)
+    {
+        // Closest points a + s * u and a + v + r * p, each parameter held in [0, 1].
+        const double up = ux * px + uy * py + uz * pz;
+        const double uv = ux * vx + uy * vy + uz * vz;
+        const double pv = px * vx + py * vy + pz * vz;
+        const double denominator = uu * pp - up * up;
+        s = denominator > 0.0 ? std::clamp((uv * pp - up * pv) / denominator, 0.0, 1.0) : 0.0;
+        r = (up * s - pv) / pp;
+        if (r < 0.0)
+        {
+            r = 0.0;
+            s = std::clamp(uv / uu, 0.0, 1.0);
+        }
+        else if (r > 1.0)
+        {
+            r = 1.0;
+            s = std::clamp((up + uv) / uu, 0.0, 1.0);
+        }
+    }
+    const double ex = s * ux, ey = s * uy, ez = s * uz;
+    const double tx = vx + r * px, ty = vy + r * py, tz = vz + r * pz;
+    const double ax = a.x_, ay = a.y_, az = a.z_;
+    thickness = Thickness(std::max(std::max(std::abs(ax + ex), std::max(std::abs(ay + ey), std::abs(az + ez))),
+        std::max(std::abs(ax + tx), std::max(std::abs(ay + ty), std::abs(az + tz)))));
+    return Square(ex - tx, ey - ty, ez - tz) <= thickness * thickness;
+}
+
+bool CsgExact::FlatPlane(
+    const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, double faceExtent)
+{
+    if (CsgInternal::g_csgExactOnly)
+        return false;
+    const double ux = static_cast<double>(b.x_) - a.x_, uy = static_cast<double>(b.y_) - a.y_,
+                 uz = static_cast<double>(b.z_) - a.z_;
+    const double vx = static_cast<double>(c.x_) - a.x_, vy = static_cast<double>(c.y_) - a.y_,
+                 vz = static_cast<double>(c.z_) - a.z_;
+    const double wx = static_cast<double>(d.x_) - a.x_, wy = static_cast<double>(d.y_) - a.y_,
+                 wz = static_cast<double>(d.z_) - a.z_;
+    return Flat(ux, uy, uz, vx, vy, vz, Determinant(ux, uy, uz, vx, vy, vz, wx, wy, wz), PlaneThickness(d, faceExtent));
+}
+
+int CsgExact::OrientThick(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
+    int second, bool thick, bool lines, double thickness)
+{
     const int64_t ux = static_cast<int64_t>(b.x_) - a.x_, uy = static_cast<int64_t>(b.y_) - a.y_,
                   uz = static_cast<int64_t>(b.z_) - a.z_;
     const int64_t vx = static_cast<int64_t>(c.x_) - a.x_, vy = static_cast<int64_t>(c.y_) - a.y_,
@@ -146,47 +274,73 @@ int CsgExact::Orient(
     const int64_t wx = static_cast<int64_t>(d.x_) - a.x_, wy = static_cast<int64_t>(d.y_) - a.y_,
                   wz = static_cast<int64_t>(d.z_) - a.z_;
 
-    // In float mode every difference is below 2^24 and exact in float. In double mode the conversion can round.
-    // The filter bound covers this rounding and the rounding of the products and the sums.
-    const float fux = static_cast<float>(ux), fuy = static_cast<float>(uy), fuz = static_cast<float>(uz);
-    const float fvx = static_cast<float>(vx), fvy = static_cast<float>(vy), fvz = static_cast<float>(vz);
-    const float fwx = static_cast<float>(wx), fwy = static_cast<float>(wy), fwz = static_cast<float>(wz);
-    const float m1 = fvy * fwz - fvz * fwy;
-    const float m2 = fvz * fwx - fvx * fwz;
-    const float m3 = fvx * fwy - fvy * fwx;
-    const float det = fux * m1 + fuy * m2 + fuz * m3;
-    const float permanent = std::abs(fux) * (std::abs(fvy * fwz) + std::abs(fvz * fwy))
-        + std::abs(fuy) * (std::abs(fvz * fwx) + std::abs(fvx * fwz))
-        + std::abs(fuz) * (std::abs(fvx * fwy) + std::abs(fvy * fwx));
-    if (std::abs(det) > permanent * FilterBound)
-        return SignOfFloat(det);
+    // A distance within the thickness is no distance: a vertex that an earlier operation rounded to the grid lies
+    // some steps off the plane that made it. The displacement then decides, and a gradient component below the
+    // noise of that rounding does not count. The gradient is plus or minus u x p.
+    const bool mixed = second != 0 && second != 0b1111;
+    bool flat = false;
+    double limit = 0.0;
+    if (thick && mixed)
+    {
+        // In both modes a difference is exact in double. Only the products round.
+        const double dux = static_cast<double>(ux), duy = static_cast<double>(uy), duz = static_cast<double>(uz);
+        const double dvx = static_cast<double>(vx), dvy = static_cast<double>(vy), dvz = static_cast<double>(vz);
+        const double dwx = static_cast<double>(wx), dwy = static_cast<double>(wy), dwz = static_cast<double>(wz);
+        const double px = lines ? dwx - dvx : dvx, py = lines ? dwy - dvy : dvy, pz = lines ? dwz - dvz : dvz;
+        flat = lines ? SegmentsMeet(a, dux, duy, duz, dvx, dvy, dvz, px, py, pz, thickness)
+                     : Flat(dux, duy, duz, px, py, pz, Determinant(dux, duy, duz, dvx, dvy, dvz, dwx, dwy, dwz),
+                           thickness);
+        if (flat)
+            limit = GradientNoise * thickness * (std::sqrt(Square(dux, duy, duz)) + std::sqrt(Square(px, py, pz)));
+    }
+    if (!flat)
+    {
+        // In float mode every difference is below 2^24 and exact in float. In double mode the conversion can round.
+        // The filter bound covers this rounding and the rounding of the products and the sums.
+        const float fux = static_cast<float>(ux), fuy = static_cast<float>(uy), fuz = static_cast<float>(uz);
+        const float fvx = static_cast<float>(vx), fvy = static_cast<float>(vy), fvz = static_cast<float>(vz);
+        const float fwx = static_cast<float>(wx), fwy = static_cast<float>(wy), fwz = static_cast<float>(wz);
+        const float m1 = fvy * fwz - fvz * fwy;
+        const float m2 = fvz * fwx - fvx * fwz;
+        const float m3 = fvx * fwy - fvy * fwx;
+        const float det = fux * m1 + fuy * m2 + fuz * m3;
+        const float permanent = std::abs(fux) * (std::abs(fvy * fwz) + std::abs(fvz * fwy))
+            + std::abs(fuy) * (std::abs(fvz * fwx) + std::abs(fvx * fwz))
+            + std::abs(fuz) * (std::abs(fvx * fwy) + std::abs(fvy * fwx));
+        if (std::abs(det) > permanent * FilterBound)
+            return SignOfFloat(det);
+
+        const CsgReal rux = static_cast<CsgReal>(ux), ruy = static_cast<CsgReal>(uy), ruz = static_cast<CsgReal>(uz);
+        const CsgReal rvx = static_cast<CsgReal>(vx), rvy = static_cast<CsgReal>(vy), rvz = static_cast<CsgReal>(vz);
+        const CsgReal rwx = static_cast<CsgReal>(wx), rwy = static_cast<CsgReal>(wy), rwz = static_cast<CsgReal>(wz);
+
+        // Each minor has at most 4 terms. Each scaled minor has at most 8 terms. The sums have 16 and 24 terms.
+        const CsgExactMinor minors[3] = {
+            MinorExact(rvy, rwz, rvz, rwy), MinorExact(rvz, rwx, rvx, rwz), MinorExact(rvx, rwy, rvy, rwx)};
+        const CsgReal scales[3] = {rux, ruy, ruz};
+        CsgReal scaled[3][8];
+        int scaledCount[3];
+        for (int i = 0; i < 3; ++i)
+        {
+            scaledCount[i] = CsgScaleExpansion(minors[i].count_, minors[i].terms_, scales[i], scaled[i]);
+            scaledCount[i] = CsgCompress(scaledCount[i], scaled[i]);
+        }
+        CsgReal partial[16];
+        int partialCount = CsgExpansionSum(scaledCount[0], scaled[0], scaledCount[1], scaled[1], partial);
+        partialCount = CsgCompress(partialCount, partial);
+        CsgReal total[24];
+        int totalCount = CsgExpansionSum(partialCount, partial, scaledCount[2], scaled[2], total);
+        totalCount = CsgCompress(totalCount, total);
+        const int exactSign = CsgExpansionSign(totalCount, total);
+        if (exactSign != 0)
+            return exactSign;
+        if (!mixed)
+            return 0;
+    }
 
     const CsgReal rux = static_cast<CsgReal>(ux), ruy = static_cast<CsgReal>(uy), ruz = static_cast<CsgReal>(uz);
     const CsgReal rvx = static_cast<CsgReal>(vx), rvy = static_cast<CsgReal>(vy), rvz = static_cast<CsgReal>(vz);
     const CsgReal rwx = static_cast<CsgReal>(wx), rwy = static_cast<CsgReal>(wy), rwz = static_cast<CsgReal>(wz);
-
-    // Each minor has at most 4 terms. Each scaled minor has at most 8 terms. The sums have 16 and 24 terms.
-    const CsgExactMinor minors[3] = {
-        MinorExact(rvy, rwz, rvz, rwy), MinorExact(rvz, rwx, rvx, rwz), MinorExact(rvx, rwy, rvy, rwx)};
-    const CsgReal scales[3] = {rux, ruy, ruz};
-    CsgReal scaled[3][8];
-    int scaledCount[3];
-    for (int i = 0; i < 3; ++i)
-    {
-        scaledCount[i] = CsgScaleExpansion(minors[i].count_, minors[i].terms_, scales[i], scaled[i]);
-        scaledCount[i] = CsgCompress(scaledCount[i], scaled[i]);
-    }
-    CsgReal partial[16];
-    int partialCount = CsgExpansionSum(scaledCount[0], scaled[0], scaledCount[1], scaled[1], partial);
-    partialCount = CsgCompress(partialCount, partial);
-    CsgReal total[24];
-    int totalCount = CsgExpansionSum(partialCount, partial, scaledCount[2], scaled[2], total);
-    totalCount = CsgCompress(totalCount, total);
-    const int exactSign = CsgExpansionSign(totalCount, total);
-    if (exactSign != 0)
-        return exactSign;
-    if (second == 0 || second == 0b1111)
-        return 0;
 
     // Displacing the marked points by delta adds delta . G to first order, where G sums their gradients.
     // With delta = (eps, eps^2, eps^3) the first nonzero component of G decides.
@@ -209,6 +363,13 @@ int CsgExact::Orient(
     }
     for (int k = 0; k < 3; ++k)
     {
+        if (flat)
+        {
+            const double value = Approximate(gradientCount[k], gradient[k]);
+            if (std::abs(value) > limit)
+                return value > 0.0 ? 1 : -1;
+            continue;
+        }
         const int sign = CsgExpansionSign(gradientCount[k], gradient[k]);
         if (sign != 0)
             return sign;
@@ -369,11 +530,11 @@ CsgExactVolume CsgExact::Volume(
 }
 
 bool CsgExact::Crosses(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1,
-    const CsgGridPoint& t2, bool edgeInSecond, bool& e1Above)
+    const CsgGridPoint& t2, double faceExtent, bool edgeInSecond, bool& e1Above)
 {
     const int sidesMask = edgeInSecond ? 0b1000 : 0b0111;
-    const int s0 = Orient(t0, t1, t2, e0, sidesMask);
-    const int s1 = Orient(t0, t1, t2, e1, sidesMask);
+    const int s0 = OrientPlane(t0, t1, t2, e0, sidesMask, faceExtent);
+    const int s1 = OrientPlane(t0, t1, t2, e1, sidesMask, faceExtent);
     e1Above = s1 > 0;
     if (s0 == 0 || s1 == 0 || s0 == s1)
         return false;
@@ -385,7 +546,7 @@ bool CsgExact::PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, cons
 {
     const int linesMask = edgeInSecond ? 0b0011 : 0b1100;
 
-    // Lane k holds Orient(e0, e1, t_k, t_k+1). Undecided lanes take the exact path when needed.
+    // Lane k holds OrientLines(e0, e1, t_k, t_k+1). Undecided lanes take the exact path when needed.
     const auto diff = [](int64_t t, int64_t e) { return static_cast<float>(t - e); };
     const CsgFloat4 vx = CsgFloat4::Create(diff(t0.x_, e0.x_), diff(t1.x_, e0.x_), diff(t2.x_, e0.x_), 0.0f);
     const CsgFloat4 vy = CsgFloat4::Create(diff(t0.y_, e0.y_), diff(t1.y_, e0.y_), diff(t2.y_, e0.y_), 0.0f);
@@ -395,17 +556,17 @@ bool CsgExact::PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, cons
     const CsgFloat4 wz = CsgFloat4::Create(diff(t1.z_, e0.z_), diff(t2.z_, e0.z_), diff(t0.z_, e0.z_), 0.0f);
     CsgFloat4 detVector;
     const int decided = CsgInternal::Filter(CsgFloat4::Splat(diff(e1.x_, e0.x_)), CsgFloat4::Splat(diff(e1.y_, e0.y_)),
-        CsgFloat4::Splat(diff(e1.z_, e0.z_)), vx, vy, vz, wx, wy, wz, detVector);
+        CsgFloat4::Splat(diff(e1.z_, e0.z_)), vx, vy, vz, wx, wy, wz, Extent(e0), detVector);
     float det[4];
     detVector.Store(det);
 
-    const int s0 = (decided & 1) != 0 ? SignOfFloat(det[0]) : Orient(e0, e1, t0, t1, linesMask);
+    const int s0 = (decided & 1) != 0 ? SignOfFloat(det[0]) : OrientLines(e0, e1, t0, t1, linesMask);
     if (s0 == 0)
         return false;
-    const int s1 = (decided & 2) != 0 ? SignOfFloat(det[1]) : Orient(e0, e1, t1, t2, linesMask);
+    const int s1 = (decided & 2) != 0 ? SignOfFloat(det[1]) : OrientLines(e0, e1, t1, t2, linesMask);
     if (s1 != s0)
         return false;
-    const int s2 = (decided & 4) != 0 ? SignOfFloat(det[2]) : Orient(e0, e1, t2, t0, linesMask);
+    const int s2 = (decided & 4) != 0 ? SignOfFloat(det[2]) : OrientLines(e0, e1, t2, t0, linesMask);
     return s2 == s0;
 }
 

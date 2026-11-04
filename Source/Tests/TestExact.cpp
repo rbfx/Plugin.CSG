@@ -579,7 +579,7 @@ TEST_CASE("Crosses and PassesInside match the int128 oracle", "[exact]")
                 bool above = false;
                 bool expectedAbove = false;
                 const bool expected = ReferenceCrosses(e0, e1, t0, t1, t2, edgeInSecond, expectedAbove);
-                REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, edgeInSecond, above) == expected);
+                REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, 0.0, edgeInSecond, above) == expected);
                 REQUIRE(above == expectedAbove);
                 REQUIRE(CsgExact::PassesInside(e0, e1, t0, t1, t2, edgeInSecond)
                     == ReferencePassesInside(e0, e1, t0, t1, t2, edgeInSecond));
@@ -1072,7 +1072,7 @@ TEST_CASE("Exact filter", "[exact]")
         const CsgFloat4 wy = CsgFloat4::Splat(static_cast<float>(d.y_ - a.y_));
         const CsgFloat4 wz = CsgFloat4::Splat(static_cast<float>(d.z_ - a.z_));
         CsgFloat4 result;
-        const int decided = CsgInternal::Filter(ux, uy, uz, vx, vy, vz, wx, wy, wz, result);
+        const int decided = CsgInternal::Filter(ux, uy, uz, vx, vy, vz, wx, wy, wz, CsgExact::Extent(a), result);
         det = result.Get(0);
         return decided;
     };
@@ -1166,7 +1166,7 @@ TEST_CASE("Exact filter", "[exact]")
         // Lane 0 has det = 1, lane 1 has det = -1, lane 2 has det = 0, lane 3 is ignored.
         const CsgFloat4 ux = CsgFloat4::Create(1.0f, -1.0f, 0.0f, 5.0f);
         CsgFloat4 det;
-        const int decided = CsgInternal::Filter(ux, zero, zero, zero, one, zero, zero, zero, one, det);
+        const int decided = CsgInternal::Filter(ux, zero, zero, zero, one, zero, zero, zero, one, 0.0, det);
         REQUIRE(decided == 0b011);
         REQUIRE(det.Get(0) == 1.0f);
         REQUIRE(det.Get(1) == -1.0f);
@@ -1244,7 +1244,7 @@ TEST_CASE("Filter and Orient decide the sign of near coplanar points with large 
         const auto lane = [&](int i) { return CsgFloat4::Splat(static_cast<float>(differences[i])); };
         CsgFloat4 det;
         const int decided = CsgInternal::Filter(lane(0), lane(1), lane(2), lane(3), lane(4), lane(5), lane(6), lane(7),
-            lane(8), det);
+            lane(8), 0.0, det);
         if ((decided & 1) != 0)
         {
             ++decidedCount;
@@ -1352,10 +1352,10 @@ TEST_CASE("Exact crossing tests", "[exact]")
         const CsgGridPoint e0 = P(Unit, Unit, -Unit);
         const CsgGridPoint e1 = P(Unit, Unit, Unit);
         bool above = false;
-        REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, false, above));
+        REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, 0.0, false, above));
         REQUIRE(above);
-        REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, true, above));
-        REQUIRE(CsgExact::Crosses(e1, e0, t0, t1, t2, false, above));
+        REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, 0.0, true, above));
+        REQUIRE(CsgExact::Crosses(e1, e0, t0, t1, t2, 0.0, false, above));
         REQUIRE_FALSE(above);
         REQUIRE(CsgExact::PassesInside(e0, e1, t0, t1, t2, false));
         // The orientation of the triangle does not matter for the inside test.
@@ -1365,8 +1365,8 @@ TEST_CASE("Exact crossing tests", "[exact]")
     SECTION("An edge beside the triangle or short of the plane")
     {
         bool above = false;
-        REQUIRE_FALSE(CsgExact::Crosses(P(3 * Unit, 3 * Unit, -Unit), P(3 * Unit, 3 * Unit, Unit), t0, t1, t2, false, above));
-        REQUIRE_FALSE(CsgExact::Crosses(P(Unit, Unit, Unit), P(Unit, Unit, 2 * Unit), t0, t1, t2, false, above));
+        REQUIRE_FALSE(CsgExact::Crosses(P(3 * Unit, 3 * Unit, -Unit), P(3 * Unit, 3 * Unit, Unit), t0, t1, t2, 0.0, false, above));
+        REQUIRE_FALSE(CsgExact::Crosses(P(Unit, Unit, Unit), P(Unit, Unit, 2 * Unit), t0, t1, t2, 0.0, false, above));
         REQUIRE(above);
         REQUIRE_FALSE(CsgExact::PassesInside(P(3 * Unit, 3 * Unit, -Unit), P(3 * Unit, 3 * Unit, Unit), t0, t1, t2, false));
     }
@@ -1380,7 +1380,7 @@ TEST_CASE("Exact crossing tests", "[exact]")
         {
             bool aboveA = false;
             bool aboveB = false;
-            REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, edgeInSecond, aboveA)
+            REQUIRE(CsgExact::Crosses(e0, e1, t0, t1, t2, 0.0, edgeInSecond, aboveA)
                 == ReferenceCrosses(e0, e1, t0, t1, t2, edgeInSecond, aboveB));
             REQUIRE(aboveA == aboveB);
         }
@@ -3024,6 +3024,159 @@ TEST_CASE("AxisRayCrossesTriangleCentroid with a centroid on a shared projected 
             CHECK(count == 1);
             CHECK(collinearCount == 1);
         }
+    }
+}
+
+TEST_CASE("Thick predicates are inert by default", "[exact][thick]")
+{
+    // The default is exact only. The guard sets the flag and restores it.
+    REQUIRE(CsgInternal::g_csgExactOnly);
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        REQUIRE_FALSE(CsgInternal::g_csgExactOnly);
+        {
+            CsgInternal::CsgExactOnlyScope exact(true);
+            REQUIRE(CsgInternal::g_csgExactOnly);
+        }
+        REQUIRE_FALSE(CsgInternal::g_csgExactOnly);
+    }
+    REQUIRE(CsgInternal::g_csgExactOnly);
+}
+
+TEST_CASE("OrientPlane with a point one step off the plane", "[exact][thick]")
+{
+    // The triangle (a, b, c) has the normal +z. Its face extent is the largest corner coordinate: Unit.
+    // The point d is one grid step above the plane z = 0, inside the triangle.
+    // u = b - a = (Unit, 0, 0), v = c - a = (0, Unit, 0), w = d - a = (Unit / 4, Unit / 4, 1).
+    // The exact determinant is w . (u x v) = 1 * Unit^2 > 0.
+    // The thickness is max(2, extent / 2^22) = 2 steps, because the extent is far below 2^23.
+    // The distance 1 is within the thickness: |det| = Unit^2 <= 2 * |u x v| = 2 * Unit^2. The point is flat.
+    // The limit of the gradient is 4 * 2 * (|u| + |v|) = 8 * 2 * Unit = 16384 for Unit = 1024.
+    const CsgGridPoint a = P(0, 0, 0);
+    const CsgGridPoint b = P(Unit, 0, 0);
+    const CsgGridPoint c = P(0, Unit, 0);
+    const CsgGridPoint above = P(Unit / 4, Unit / 4, 1);
+    const CsgGridPoint below = P(Unit / 4, Unit / 4, -1);
+    const double faceExtent = CsgExact::Extent(b);
+    // Mask 0b0111: the triangle is in the second operand and the point is in the first.
+    // The points a, b and c move together. This equals d moving by -delta.
+    // The gradient is G = -(u x v) = (0, 0, -Unit^2). The z component is below -limit.
+    // The gradient does not depend on the height of d. The thick sign is -1 for the point above and for the point
+    // below. The point above differs from its exact sign +1. The point below keeps its exact sign -1.
+    const int maskTriangleSecond = 0b0111;
+
+    SECTION("Exact only gives the sign of the determinant")
+    {
+        REQUIRE(CsgInternal::g_csgExactOnly);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, above, maskTriangleSecond, faceExtent) == 1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, below, maskTriangleSecond, faceExtent) == -1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, above, maskTriangleSecond, faceExtent)
+            == CsgExact::Orient(a, b, c, above, maskTriangleSecond));
+        REQUIRE_FALSE(CsgExact::FlatPlane(a, b, c, above, faceExtent));
+    }
+
+    SECTION("Thick gives the sign of the displacement")
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        REQUIRE(CsgExact::FlatPlane(a, b, c, above, faceExtent));
+        REQUIRE(CsgExact::OrientPlane(a, b, c, above, maskTriangleSecond, faceExtent) == -1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, below, maskTriangleSecond, faceExtent) == -1);
+        // The public Orient stays exact in either mode.
+        REQUIRE(CsgExact::Orient(a, b, c, above, maskTriangleSecond) == 1);
+    }
+
+    SECTION("Thick leaves a point of one operand and a far point alone")
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        // Without a mark from each operand, no displacement exists and the exact sign stays.
+        REQUIRE(CsgExact::OrientPlane(a, b, c, above, 0, faceExtent) == 1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, above, 0b1111, faceExtent) == 1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, below, 0, faceExtent) == -1);
+        // A point 16 steps off the plane is farther than the thickness: |det| = 16 * Unit^2 > 2 * Unit^2.
+        const CsgGridPoint far = P(Unit / 4, Unit / 4, 16);
+        REQUIRE_FALSE(CsgExact::FlatPlane(a, b, c, far, faceExtent));
+        REQUIRE(CsgExact::OrientPlane(a, b, c, far, maskTriangleSecond, faceExtent) == 1);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, P(Unit / 4, Unit / 4, -16), maskTriangleSecond, faceExtent) == -1);
+    }
+
+    SECTION("A point on the plane gives the displacement in either mode")
+    {
+        const CsgGridPoint on = P(Unit / 4, Unit / 4, 0);
+        // The determinant is zero. The gradient is (0, 0, -Unit^2) again, so the sign is -1.
+        REQUIRE(CsgExact::OrientPlane(a, b, c, on, maskTriangleSecond, faceExtent) == -1);
+        CsgInternal::CsgExactOnlyScope thick(false);
+        REQUIRE(CsgExact::OrientPlane(a, b, c, on, maskTriangleSecond, faceExtent) == -1);
+    }
+}
+
+TEST_CASE("OrientLines with segments one step apart", "[exact][thick]")
+{
+    // The edge (e0, e1) runs along x at z = 0. The edge (t0, t1) runs along y at z = 1, above the middle of the edge.
+    // u = e1 - e0 = (Unit, 0, 0), v = t0 - e0 = (Unit / 2, -Unit / 2, 1), w = t1 - e0 = (Unit / 2, Unit / 2, 1).
+    // u x v = (0, -Unit, -Unit^2 / 2), so the exact determinant is w . (u x v) = -Unit^2 < 0.
+    // The closest points of the segments are the middles, 1 step apart. The thickness is 2, so the segments meet.
+    // The limit of the gradient is 4 * 2 * (|u| + |p|) = 16384 for p = w - v = (0, Unit, 0).
+    // Mask 0b0011: the edge (e0, e1) is in the second operand. The displaced points are t0 and t1, in the other
+    // direction. The weights of c and d are -1. The gradient is -(w x u + u x v) = -((0, Unit, -Unit^2 / 2)
+    // + (0, -Unit, -Unit^2 / 2)) = (0, 0, Unit^2). Its z component is above the limit, so the thick sign is +1.
+    const CsgGridPoint e0 = P(0, 0, 0);
+    const CsgGridPoint e1 = P(Unit, 0, 0);
+    const CsgGridPoint t0 = P(Unit / 2, -Unit / 2, 1);
+    const CsgGridPoint t1 = P(Unit / 2, Unit / 2, 1);
+    const int mask = 0b0011;
+
+    SECTION("Exact only gives the sign of the determinant")
+    {
+        REQUIRE(CsgExact::OrientLines(e0, e1, t0, t1, mask) == -1);
+        REQUIRE(CsgExact::OrientLines(e0, e1, t0, t1, mask) == CsgExact::Orient(e0, e1, t0, t1, mask));
+    }
+
+    SECTION("Thick gives the sign of the displacement")
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        REQUIRE(CsgExact::OrientLines(e0, e1, t0, t1, mask) == 1);
+        // The other direction of the edge (t0, t1) flips the determinant, the gradient, and so the thick sign.
+        REQUIRE(CsgExact::OrientLines(e0, e1, t1, t0, mask) == -1);
+        // The public Orient stays exact in either mode.
+        REQUIRE(CsgExact::Orient(e0, e1, t0, t1, mask) == -1);
+    }
+
+    SECTION("Thick leaves segments that are far apart alone")
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        // At a gap of 16 steps the segments do not meet, and the determinant is -16 * Unit^2.
+        const CsgGridPoint f0 = P(Unit / 2, -Unit / 2, 16);
+        const CsgGridPoint f1 = P(Unit / 2, Unit / 2, 16);
+        REQUIRE(CsgExact::OrientLines(e0, e1, f0, f1, mask) == -1);
+        // Without a mark from each operand, the exact sign stays.
+        REQUIRE(CsgExact::OrientLines(e0, e1, t0, t1, 0) == -1);
+    }
+}
+
+TEST_CASE("Filter leaves a lane within the thickness undecided only in thick mode", "[exact][thick]")
+{
+    // The triangle edges u = (Unit, 0, 0) and v = (0, Unit, 0) are 1024 long, and the longest squared edge is Unit^2.
+    // The determinant of a point g steps above the plane is g * Unit^2.
+    // The thick filter decides a lane only if det > longest * thickness * 4 = Unit^2 * 2 * 4. That needs g > 8.
+    const auto filter = [](int64_t height, double extent)
+    {
+        const CsgFloat4 ux = CsgFloat4::Splat(static_cast<float>(Unit));
+        const CsgFloat4 zero = CsgFloat4::Splat(0.0f);
+        const CsgFloat4 vy = CsgFloat4::Splat(static_cast<float>(Unit));
+        const CsgFloat4 wx = CsgFloat4::Splat(static_cast<float>(Unit / 4));
+        const CsgFloat4 wz = CsgFloat4::Splat(static_cast<float>(height));
+        CsgFloat4 det;
+        return CsgInternal::Filter(ux, zero, zero, zero, vy, zero, wx, wx, wz, extent, det);
+    };
+
+    REQUIRE((filter(1, Unit) & 1) != 0);
+    REQUIRE((filter(8, Unit) & 1) != 0);
+    REQUIRE((filter(64, Unit) & 1) != 0);
+    {
+        CsgInternal::CsgExactOnlyScope thick(false);
+        REQUIRE((filter(1, Unit) & 1) == 0);
+        REQUIRE((filter(8, Unit) & 1) == 0);
+        REQUIRE((filter(64, Unit) & 1) != 0);
     }
 }
 

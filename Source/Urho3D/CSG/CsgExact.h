@@ -9,6 +9,7 @@
 #include <Urho3D/Core/AssertBase.h>
 #include <Urho3D/Math/Vector3.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -202,6 +203,39 @@ public:
     static int Orient(
         const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d, int second);
 
+    /// Side of the point d of one operand against the plane of the triangle (a, b, c) of the other.
+    /// The sign is the one of Orient. If g_csgExactOnly is true, the result is the result of Orient.
+    /// Otherwise a point that is not farther from the plane than the thickness of the face lies on it.
+    /// The displacement then decides, and a gradient component below the rounding noise does not count.
+    /// The faceExtent is the extent of the face of the triangle, so all triangles of one face use one thickness.
+    /// The thickness applies only if the arguments come from both operands.
+    static int OrientPlane(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
+        int second, double faceExtent);
+
+    /// Side on which the line (e0, e1) of one operand passes the line (t0, t1) of the other.
+    /// The sign is the one of Orient(e0, e1, t0, t1, second).
+    /// If g_csgExactOnly is true, the result is the result of Orient.
+    /// Otherwise segments that are not farther apart than the thickness meet, and the displacement decides.
+    /// The distance and the thickness come from the four points only, so the two triangles on an edge agree.
+    static int OrientLines(
+        const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1, int second);
+
+    /// Tell whether OrientPlane takes the point d as on the plane of the triangle (a, b, c).
+    /// It is always false if g_csgExactOnly is true.
+    static bool FlatPlane(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
+        double faceExtent);
+
+    /// Distance in grid steps within which a point lies on a plane and two lines meet.
+    /// The extent is the largest absolute coordinate that is involved. Two steps cover the rounding of a crossing.
+    static double Thickness(double extent) { return std::max(2.0, extent * (1.0 / 4194304.0)); }
+
+    /// Largest absolute coordinate of a grid point.
+    static double Extent(const CsgGridPoint& p)
+    {
+        return std::max(std::abs(static_cast<double>(p.x_)),
+            std::max(std::abs(static_cast<double>(p.y_)), std::abs(static_cast<double>(p.z_))));
+    }
+
     /// Tell whether the ray from p along +x crosses the triangle (t0, t1, t2).
     /// The configuration is the displaced one of Orient. Only two values of second are valid:
     /// 0b0111 (the triangle is in the second operand and the point is in the first) and
@@ -392,7 +426,7 @@ public:
     /// The output e1Above tells whether e1 lies on the side to which the triangle normal points.
     /// A degenerate triangle is never crossed.
     static bool Crosses(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0, const CsgGridPoint& t1,
-        const CsgGridPoint& t2, bool edgeInSecond, bool& e1Above);
+        const CsgGridPoint& t2, double faceExtent, bool edgeInSecond, bool& e1Above);
 
     /// Whether the line through an edge that crosses the plane of a triangle passes inside that triangle.
     static bool PassesInside(const CsgGridPoint& e0, const CsgGridPoint& e1, const CsgGridPoint& t0,
@@ -422,6 +456,33 @@ public:
     /// The tests use exact signs and no floating point. The difference must not be zero.
     static void CrossingCell(const CsgGridPoint& low, const CsgGridPoint& high, const CsgExactVolume& lowVolume,
         const CsgExactVolume& difference, const CsgGridPoint& rounded, CsgGridPoint& lower, CsgGridPoint& upper);
+
+private:
+    /// Sign of (d - a) . ((b - a) x (c - a)) for points of the two operands.
+    /// If thick is false, the result is the one of Orient and the other arguments do not count.
+    /// If thick is true and the arguments come from both operands, the volume is a distance times a length.
+    /// It is the distance of d to the plane (a, b, c) times |u x v|, or the distance between the lines (a, b) and
+    /// (c, d) times |u x (w - v)|, for u = b - a, v = c - a, w = d - a. The flag lines selects the second reading.
+    /// For lines, the function finds its own thickness.
+    static int OrientThick(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d,
+        int second, bool thick, bool lines, double thickness);
+
+    /// Thickness of a face of the extent faceExtent against the point d of the other operand.
+    static double PlaneThickness(const CsgGridPoint& d, double faceExtent)
+    {
+        return Thickness(std::max(Extent(d), faceExtent));
+    }
+
+    /// Tell whether the volume det is a distance within the thickness: |det| <= thickness * |u x p|.
+    static bool Flat(
+        double ux, double uy, double uz, double px, double py, double pz, double det, double thickness);
+
+    /// Tell whether the segments (a, a + u) and (a + v, a + v + p) come within the thickness of their closest points.
+    /// The distance of the lines is not the measure: lines at a small angle meet far from the segments.
+    /// The largest coordinate of the four ends is not the measure of the thickness. A long edge has the error
+    /// of its near end where it passes that end. The output is the thickness at the closest points.
+    static bool SegmentsMeet(const CsgGridPoint& a, double ux, double uy, double uz, double vx, double vy, double vz,
+        double px, double py, double pz, double& thickness);
 };
 
 } // namespace Urho3D

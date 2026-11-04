@@ -104,6 +104,7 @@ void Sides(const Mesh& corners, int triangle, const Mesh& other, int otherTriang
     const CsgGridPoint& t1 = other.grid_[other.triangleIds_[otherTriangle * 3 + 1]];
     const CsgGridPoint& t2 = other.grid_[other.triangleIds_[otherTriangle * 3 + 2]];
     const int mask = corners.isSecond_ ? 0b1000 : 0b0111;
+    const double faceExtent = other.faceExtent_[other.triangleFace_[otherTriangle]];
     const int* ids = &corners.triangleIds_[triangle * 3];
     const CsgGridPoint& d0 = corners.grid_[ids[0]];
     const CsgGridPoint& d1 = corners.grid_[ids[1]];
@@ -117,12 +118,13 @@ void Sides(const Mesh& corners, int triangle, const Mesh& other, int otherTriang
         CsgFloat4::Splat(diff(t2.y_, t0.y_)), CsgFloat4::Splat(diff(t2.z_, t0.z_)),
         CsgFloat4::Create(diff(d0.x_, t0.x_), diff(d1.x_, t0.x_), diff(d2.x_, t0.x_), 0.0f),
         CsgFloat4::Create(diff(d0.y_, t0.y_), diff(d1.y_, t0.y_), diff(d2.y_, t0.y_), 0.0f),
-        CsgFloat4::Create(diff(d0.z_, t0.z_), diff(d1.z_, t0.z_), diff(d2.z_, t0.z_), 0.0f), detVector);
+        CsgFloat4::Create(diff(d0.z_, t0.z_), diff(d1.z_, t0.z_), diff(d2.z_, t0.z_), 0.0f), faceExtent,
+        detVector);
     float det[4];
     detVector.Store(det);
-    sides[0] = (decided & 1) != 0 ? SignOfFloat(det[0]) : CsgExact::Orient(t0, t1, t2, d0, mask);
-    sides[1] = (decided & 2) != 0 ? SignOfFloat(det[1]) : CsgExact::Orient(t0, t1, t2, d1, mask);
-    sides[2] = (decided & 4) != 0 ? SignOfFloat(det[2]) : CsgExact::Orient(t0, t1, t2, d2, mask);
+    sides[0] = (decided & 1) != 0 ? SignOfFloat(det[0]) : CsgExact::OrientPlane(t0, t1, t2, d0, mask, faceExtent);
+    sides[1] = (decided & 2) != 0 ? SignOfFloat(det[1]) : CsgExact::OrientPlane(t0, t1, t2, d1, mask, faceExtent);
+    sides[2] = (decided & 4) != 0 ? SignOfFloat(det[2]) : CsgExact::OrientPlane(t0, t1, t2, d2, mask, faceExtent);
 }
 
 } // namespace
@@ -164,6 +166,7 @@ Mesh::Mesh(const CsgSolid& solid, bool isSecond, int offset)
     const unsigned triangleCount = triangleStart.empty() ? 0 : triangleStart.back();
     triangleFace_.resize(triangleCount);
     triangleIds_.resize(triangleCount * 3);
+    faceExtent_.assign(solid.FaceCount(), 0.0);
     for (unsigned face = 0; face < solid.FaceCount(); ++face)
     {
         const unsigned start = loops_.vertexStart_[face];
@@ -171,7 +174,11 @@ Mesh::Mesh(const CsgSolid& solid, bool isSecond, int offset)
         {
             triangleFace_[t] = static_cast<int>(face);
             for (unsigned corner = 0; corner < 3; ++corner)
-                triangleIds_[t * 3 + corner] = loops_.ids_[start + triangleVertices[t * 3 + corner]];
+            {
+                const int id = loops_.ids_[start + triangleVertices[t * 3 + corner]];
+                triangleIds_[t * 3 + corner] = id;
+                faceExtent_[face] = ea::max(faceExtent_[face], CsgExact::Extent(loops_.grid_[id]));
+            }
         }
     }
 
@@ -353,7 +360,8 @@ int Corefinement::EdgesThrough(const Mesh& edges, int triangle, const Mesh& othe
         const int high = ea::max(u, v);
         if (!CsgExact::PassesInside(edges.grid_[low], edges.grid_[high], t0, t1, t2, edges.isSecond_))
             continue;
-        const int id = CrossingId(CsgCrossingKey{low, high, otherTriangle, edges.isSecond_}, edges, t0, t1, t2);
+        const int id = CrossingId(CsgCrossingKey{low, high, otherTriangle, edges.isSecond_}, edges, t0, t1, t2,
+            other.faceExtent_[other.triangleFace_[otherTriangle]]);
         if (count < 6)
         {
             const bool headAbove = sides[next] > 0;
@@ -365,9 +373,11 @@ int Corefinement::EdgesThrough(const Mesh& edges, int triangle, const Mesh& othe
     return count;
 }
 
-int Corefinement::CrossingId(
-    const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0, const CsgGridPoint& t1, const CsgGridPoint& t2)
+int Corefinement::CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0,
+    const CsgGridPoint& t1, const CsgGridPoint& t2, double faceExtent)
 {
+    // The faceExtent is for the thick volumes of the crossing ends. A later step uses it with CsgExact::FlatPlane.
+    (void)faceExtent;
     bool existed = false;
     int& idRef = crossingIds_.FindOrAdd(key, existed);
     if (existed)

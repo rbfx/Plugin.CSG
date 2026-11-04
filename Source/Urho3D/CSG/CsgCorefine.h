@@ -92,6 +92,8 @@ public:
     ea::vector<int> triangleIds_;
     /// Grid position of each welded id. The span is the grid of the solid.
     ea::span<const CsgGridPoint> grid_;
+    /// Largest absolute grid coordinate of the corners of each face. It sets the thickness of the face.
+    ea::vector<double> faceExtent_;
     /// Triangles of each undirected edge, by CsgUndirectedKey of the welded ids. BuildEdgeTriangles fills it.
     CsgFlatMap<uint64_t, CsgEdgeTriangles, CsgPackedKeyHash> edgeTriangles_;
     bool edgeTrianglesBuilt_{};
@@ -599,8 +601,9 @@ private:
 
     int EdgesThrough(const Mesh& edges, int triangle, const Mesh& other, int otherTriangle, const int (&sides)[3],
         int (&found)[6], bool (&entering)[6], int count);
+    /// The faceExtent is the extent of the face of the crossed triangle. See Mesh::faceExtent_.
     int CrossingId(const CsgCrossingKey& key, const Mesh& edges, const CsgGridPoint& t0, const CsgGridPoint& t1,
-        const CsgGridPoint& t2);
+        const CsgGridPoint& t2, double faceExtent);
 
     /// Order two records of one edge, as the sort of EdgeCrossings does. Return -1 or 1, or 0 for the same id.
     int CompareRecords(int x, int y) const;
@@ -739,6 +742,29 @@ bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, i
 /// CsgClassifyGridPointForTest. The three points are in the same operand.
 bool CsgClassifyGridCentroidForTest(
     const CsgSolid& other, const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, int second);
+
+/// Switch of the thick predicates of CsgExact. The switch is local to a thread.
+/// If it is true, each predicate gives the exact result and ignores any thickness.
+/// If it is false, a point or an edge within the thickness of a plane or an edge of the other operand counts as on it.
+/// The switch stays true until the thick mode is complete.
+inline thread_local bool g_csgExactOnly = true;
+
+/// Set g_csgExactOnly for the life of the object, and restore the old value after it.
+class CsgExactOnlyScope
+{
+public:
+    explicit CsgExactOnlyScope(bool exactOnly)
+        : previous_(g_csgExactOnly)
+    {
+        g_csgExactOnly = exactOnly;
+    }
+    ~CsgExactOnlyScope() { g_csgExactOnly = previous_; }
+    CsgExactOnlyScope(const CsgExactOnlyScope&) = delete;
+    CsgExactOnlyScope& operator=(const CsgExactOnlyScope&) = delete;
+
+private:
+    bool previous_;
+};
 
 #ifdef CSG_DIAGNOSTICS
 /// Counters of events inside the boolean. Only the diagnostic tests define CSG_DIAGNOSTICS.
