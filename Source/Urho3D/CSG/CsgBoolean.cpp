@@ -1281,12 +1281,14 @@ void ClassifyAndEmit(const Corefinement& core, const SharedPtr<const CsgSolid>& 
             if (!CsgSolid::Keep(side == ComponentSide::Inside, operation, second))
                 continue;
             // A face on the vertices of a face of the other operand can cancel against it. The component then
-            // goes with the kept faces, where the two faces meet.
+            // goes with the kept faces, where the two faces meet. The exact pass has no aliases: it tests the
+            // grid points of the other operand.
             const auto componentStart = solid.GetComponentStart();
             const auto componentFaces = solid.GetComponentFaces();
             bool meets = false;
             for (unsigned c = componentStart[component]; c < componentStart[component + 1] && !meets; ++c)
-                meets = core.SharedLoop(mesh, static_cast<int>(componentFaces[c]), flip);
+                meets = core.SharedLoop(mesh, static_cast<int>(componentFaces[c]), flip)
+                    || core.OnOtherVertices(mesh, static_cast<int>(componentFaces[c]));
             if (!meets)
             {
                 result.AppendComponent(solid, component, flip);

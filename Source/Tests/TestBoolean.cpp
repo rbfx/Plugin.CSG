@@ -324,7 +324,7 @@ TEST_CASE("Shared loops: two boxes with one face on the same four vertices", "[b
         CHECK(CountFacesOnPlaneX(differenceAB, 1.0f) == 1);
     }
 
-    SECTION("Exact-only mode keeps the old twin faces")
+    SECTION("Exact-only mode cancels the twin faces")
     {
         // Boolean sets the flag itself. The one-pass hook keeps the flag of the scope.
         for (const CsgOperation operation : {CsgOperation::Union, CsgOperation::DifferenceAB})
@@ -335,11 +335,24 @@ TEST_CASE("Shared loops: two boxes with one face on the same four vertices", "[b
             // Boolean keeps the exact pass if it is closed.
             CHECK(SolidsIdentical(*byDefault, *exact));
             CheckClosed(exact);
-            // Exact-only mode keeps both whole faces on the plane x = 1 in the union: the faces are twins.
-            CHECK(CountFacesOnPlaneX(exact, 1.0f) == (operation == CsgOperation::Union ? 2u : 1u));
+            // The faces on the plane x = 1 are twins. The union cancels them. The difference keeps the face of A.
+            CHECK(CountFacesOnPlaneX(exact, 1.0f) == (operation == CsgOperation::Union ? 0u : 1u));
+            CHECK(CountDuplicateFaces(exact) == 0);
             CHECK(Volume(exact) == Catch::Approx(operation == CsgOperation::Union ? 16.0 : 8.0).margin(VOLUME_TOLERANCE));
         }
     }
+}
+
+TEST_CASE("Exact pass: two boxes that touch on a full face have no twin faces", "[boolean][shared]")
+{
+    const auto a = MakeBox(Vector3::ZERO, 1);
+    const auto b = MakeBox(Vector3(2.0f, 0.0f, 0.0f), 2);
+    const CsgExactOnlyScope scope(true);
+    const auto unionAB = CsgBooleanOnceForTest(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
+    CheckClosed(unionAB);
+    CHECK(Volume(unionAB) == Catch::Approx(16.0).margin(VOLUME_TOLERANCE));
+    CHECK(CountDuplicateFaces(unionAB) == 0);
+    CHECK(CountFacesOnPlaneX(unionAB, 1.0f) == 0);
 }
 
 TEST_CASE("Boolean of a box and a rotated box keeps the volume identities", "[boolean]")

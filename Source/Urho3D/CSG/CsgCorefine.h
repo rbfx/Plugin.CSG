@@ -383,8 +383,8 @@ struct CsgOperandElements
     /// Each entry has the number of elements before the face, so the face keeps its place among the elements.
     ea::vector<ea::pair<unsigned, int>> clearFaces_;
     /// The faces of the kept components that the curve does not reach. A component is here if one of its faces has a shared loop. They go to the
-    /// kept set whole, so the clean-up can cancel them against faces of the other operand. It is empty if
-    /// g_csgExactOnly is true.
+    /// kept set whole, so the clean-up can cancel them against faces of the other operand. A face on the vertices
+    /// of the other operand also puts its component here.
     ea::vector<int> wholeFaces_;
     /// The id pool of the elements that have no source face.
     ea::vector<int> elementIds_;
@@ -541,6 +541,10 @@ public:
     /// cancel against a face of the other operand. If loop is not null, it gets the global ids of the face in the
     /// order of its kept polygon (reversed if flip is true). If the result is false, the loop stays unchanged.
     bool SharedLoop(const Mesh& mesh, int face, bool flip, ea::vector<int>* loop = nullptr) const;
+    /// Return true if the grid point of each loop id of a whole face is a vertex grid point of the other operand.
+    /// This test does not use the alias arrays, so it also works if g_csgExactOnly is true. The Global ids stay
+    /// unchanged. The map of the grid points of each mesh is built at the first call.
+    bool OnOtherVertices(const Mesh& mesh, int face) const;
     const Crossing& CrossingAt(int globalId) const { return crossings_[globalId - CrossingBase()]; }
     /// Return the crossing of the id if it satisfies the predicate, or null. A vertex id gives null.
     template <class Predicate> const Crossing* FindRecord(int globalId, const Predicate& predicate) const
@@ -682,6 +686,9 @@ private:
     ea::vector<int> alias_;
     /// By vertex of the first operand: the vertex of the second operand on the same grid point, or -1.
     ea::vector<int> aliasBack_;
+    /// Vertex grid points of each operand for OnOtherVertices. Built at the first call, by operand.
+    mutable CsgFlatMap<CsgVec3Key, int, CsgVec3KeyHash> pointMap_[2];
+    mutable bool pointMapBuilt_[2]{};
     /// A grid point of placed_ and the record of the crossing that registered it.
     struct PlacedPoint
     {

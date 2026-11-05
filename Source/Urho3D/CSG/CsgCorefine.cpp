@@ -326,6 +326,41 @@ bool Corefinement::SharedLoop(const Mesh& mesh, int face, bool flip, ea::vector<
     return true;
 }
 
+bool Corefinement::OnOtherVertices(const Mesh& mesh, int face) const
+{
+    const unsigned start = mesh.loops_.vertexStart_[face];
+    const unsigned end = mesh.loops_.vertexStart_[face + 1];
+    if (end - start < 3)
+        return false;
+    const Mesh& other = mesh.isSecond_ ? a_ : b_;
+    const unsigned otherIndex = mesh.isSecond_ ? 0 : 1;
+    if (!pointMapBuilt_[otherIndex])
+    {
+        pointMapBuilt_[otherIndex] = true;
+        pointMap_[otherIndex].Reserve(other.VertexCount());
+        for (int id = 0; id < other.VertexCount(); ++id)
+        {
+            const CsgGridPoint& point = other.grid_[id];
+            CsgVec3Key key;
+            key.x_ = static_cast<uint32_t>(point.x_);
+            key.y_ = static_cast<uint32_t>(point.y_);
+            key.z_ = static_cast<uint32_t>(point.z_);
+            pointMap_[otherIndex].TryAdd(key, id);
+        }
+    }
+    for (unsigned i = start; i < end; ++i)
+    {
+        const CsgGridPoint& point = mesh.grid_[mesh.loops_.ids_[i]];
+        CsgVec3Key key;
+        key.x_ = static_cast<uint32_t>(point.x_);
+        key.y_ = static_cast<uint32_t>(point.y_);
+        key.z_ = static_cast<uint32_t>(point.z_);
+        if (!pointMap_[otherIndex].Find(key))
+            return false;
+    }
+    return true;
+}
+
 void Corefinement::CollectCrossings(CsgScratch& scratch, const CsgParallelOptions& parallel)
 {
     const CsgSolid& solidA = a_.solid_;
