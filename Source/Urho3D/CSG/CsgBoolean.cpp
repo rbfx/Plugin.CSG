@@ -666,8 +666,72 @@ void NormalizeLoop(ea::vector<LoopCorner>& loop)
     }
 }
 
+/// Return true if the exact grid point lies inside the projected loop corners [begin, end) or on its boundary.
+bool ContainsProjected(const ea::vector<LoopCorner>& loop, unsigned begin, unsigned end, const CsgGridPoint2& point,
+    int dropAxis)
+{
+    bool inside = false;
+    for (unsigned i = begin, j = end - 1; i < end; j = i++)
+    {
+        const CsgGridPoint2 p = CsgExact::Project(loop[i].grid_, dropAxis, false);
+        const CsgGridPoint2 q = CsgExact::Project(loop[j].grid_, dropAxis, false);
+        const int side = CsgExact::Orient2(q, p, point);
+        if (side == 0 && ea::min(p.u_, q.u_) <= point.u_ && point.u_ <= ea::max(p.u_, q.u_)
+            && ea::min(p.v_, q.v_) <= point.v_ && point.v_ <= ea::max(p.v_, q.v_))
+            return true;
+        if ((p.v_ > point.v_) != (q.v_ > point.v_) && ((p.v_ > q.v_) ? side > 0 : side < 0))
+            inside = !inside;
+    }
+    return inside;
+}
+
+/// Return true if the loop is a region with a hole that touches it at the repeated id of the positions first and
+/// second. Then the loop is weakly simple, and a split would make the hole a separate face of the wrong winding.
+/// One lobe turns with the face and the other lobe turns against it. Each corner of the hole lobe lies inside the
+/// region lobe or on its boundary. The tests are exact on the grid points, projected along the main axis of
+/// the normal. Two lobes side by side, or a twisted sliver, fail the tests and split.
+bool IsTouchingHole(const ea::vector<LoopCorner>& loop, unsigned first, unsigned second, const Vector3& normal)
+{
+    const Vector3 a = normal.Abs();
+    const int dropAxis = a.x_ >= a.y_ && a.x_ >= a.z_ ? 0 : (a.y_ >= a.z_ ? 1 : 2);
+    const float along = dropAxis == 0 ? normal.x_ : (dropAxis == 1 ? normal.y_ : normal.z_);
+    if (along == 0.0f || !std::isfinite(along))
+        return false;
+    const int expected = along > 0.0f ? 1 : -1;
+
+    // The inner lobe is [first, second). The outer lobe is [second, size) + [0, first). The copy rotates it.
+    const unsigned size = loop.size();
+    ea::vector<CsgGridPoint2> points;
+    points.reserve(size);
+    for (unsigned k = first; k < second; ++k)
+        points.push_back(CsgExact::Project(loop[k].grid_, dropAxis, false));
+    const int innerSign = CsgExact::LoopAreaSign(points.data(), static_cast<int>(points.size()));
+    points.clear();
+    ea::vector<LoopCorner> outer(loop.begin() + second, loop.end());
+    outer.insert(outer.end(), loop.begin(), loop.begin() + first);
+    for (const LoopCorner& corner : outer)
+        points.push_back(CsgExact::Project(corner.grid_, dropAxis, false));
+    const int outerSign = CsgExact::LoopAreaSign(points.data(), static_cast<int>(points.size()));
+    if (innerSign * outerSign != -1)
+        return false;
+
+    const bool innerIsHole = innerSign != expected;
+    const ea::vector<LoopCorner> inner(loop.begin() + first, loop.begin() + second);
+    const ea::vector<LoopCorner>& hole = innerIsHole ? inner : outer;
+    const ea::vector<LoopCorner>& region = innerIsHole ? outer : inner;
+    for (const LoopCorner& corner : hole)
+    {
+        if (!ContainsProjected(region, 0, region.size(), CsgExact::Project(corner.grid_, dropAxis, false), dropAxis))
+            return false;
+    }
+    return true;
+}
+
 /// Find the first two positions first < second with one id. Return false if all ids are distinct.
-bool FindRepeatedId(const ea::vector<LoopCorner>& loop, ea::vector<int>& sorted, unsigned& first, unsigned& second)
+/// A pair where `keep(first, second)` is true is not a match.
+template <class Keep>
+bool FindRepeatedId(
+    const ea::vector<LoopCorner>& loop, ea::vector<int>& sorted, unsigned& first, unsigned& second, Keep&& keep)
 {
     const unsigned size = loop.size();
     if (size > 16)
@@ -683,7 +747,7 @@ bool FindRepeatedId(const ea::vector<LoopCorner>& loop, ea::vector<int>& sorted,
     {
         for (unsigned j = i + 1; j < size; ++j)
         {
-            if (loop[i].id_ == loop[j].id_)
+            if (loop[i].id_ == loop[j].id_ && !keep(i, j))
             {
                 first = i;
                 second = j;
@@ -880,9 +944,12 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
             if (piece.size() < 3)
                 continue;
             // A loop that passes twice through one id is not simple. It splits at that id into two loops.
+            // A hole that touches its region at the id stays in the loop: the loop is then weakly simple.
             unsigned first = 0;
             unsigned second = 0;
-            if (FindRepeatedId(piece, sorted, first, second))
+            const Vector3& normal = kept[face].polygon_->plane_.normal_;
+            if (FindRepeatedId(piece, sorted, first, second,
+                    [&](unsigned i, unsigned j) { return IsTouchingHole(piece, i, j, normal); }))
             {
                 const unsigned inner = pool.size();
                 pool.insert(pool.end(), piece.begin() + first, piece.begin() + second);

@@ -981,3 +981,140 @@ TEST_CASE("Check model: a thin triangle is degenerate only below the grid step o
     // A far position is counted as degenerate, as a position that is not finite.
     CHECK(CsgCheckModel(*MakeTriangleModel(a, b, Vector3(0.0f, 1e9f, 0.0f))).degenerates_ == 1);
 }
+
+namespace
+{
+
+/// Add the triangle a, b, c as one polygon. The winding gives the normal.
+void AddTriangle(ea::vector<CsgPolygon>& polygons, const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    const Vector3 normal = (b - a).CrossProduct(c - a).Normalized();
+    polygons.push_back(MakePolygon3D({a, b, c}, normal));
+}
+
+/// A box with the size `size` at the origin. Each side is a grid of cells with two triangles each.
+/// The cells are the same as in BrushShapes::GridBox of BiteSizedWar.
+ea::vector<CsgPolygon> MakeGridBoxPolygons(const Vector3& size, const int (&counts)[3])
+{
+    ea::vector<CsgPolygon> polygons;
+    for (int axis = 0; axis < 3; ++axis)
+    {
+        for (const float sign : {-1.0f, 1.0f})
+        {
+            const int u = (axis + 1) % 3;
+            const int v = (axis + 2) % 3;
+            const auto at = [&](int i, int j)
+            {
+                float values[3] = {};
+                values[axis] = sign * 0.5f;
+                values[u] = -0.5f + static_cast<float>(i) / static_cast<float>(counts[u]);
+                values[v] = -0.5f + static_cast<float>(j) / static_cast<float>(counts[v]);
+                return Vector3(values[0] * size.x_, values[1] * size.y_, values[2] * size.z_);
+            };
+            for (int j = 0; j < counts[v]; ++j)
+            {
+                for (int i = 0; i < counts[u]; ++i)
+                {
+                    const Vector3 p00 = at(i, j), p10 = at(i + 1, j), p01 = at(i, j + 1), p11 = at(i + 1, j + 1);
+                    if (sign > 0.0f)
+                    {
+                        AddTriangle(polygons, p00, p10, p11);
+                        AddTriangle(polygons, p00, p11, p01);
+                    }
+                    else
+                    {
+                        AddTriangle(polygons, p00, p11, p10);
+                        AddTriangle(polygons, p00, p01, p11);
+                    }
+                }
+            }
+        }
+    }
+    return polygons;
+}
+
+/// A closed prism along Z with a regular cross-section of `sides` corners on a circle of `radius`.
+/// The first corner is at the angle 0, so it lies at center + (radius, 0).
+ea::vector<CsgPolygon> MakePrismPolygons(const Vector3& center, float radius, float halfLength, int sides)
+{
+    std::vector<Vector3> bottom, top;
+    for (int i = 0; i < sides; ++i)
+    {
+        const double angle = 2.0 * M_PI * i / sides;
+        const Vector3 offset(static_cast<float>(radius * std::cos(angle)), static_cast<float>(radius * std::sin(angle)), 0.0f);
+        bottom.push_back(center + offset - Vector3(0.0f, 0.0f, halfLength));
+        top.push_back(center + offset + Vector3(0.0f, 0.0f, halfLength));
+    }
+    ea::vector<CsgPolygon> polygons;
+    for (int i = 1; i + 1 < sides; ++i)
+    {
+        AddTriangle(polygons, top[0], top[i], top[i + 1]);
+        AddTriangle(polygons, bottom[0], bottom[i + 1], bottom[i]);
+    }
+    for (int i = 0; i < sides; ++i)
+    {
+        const int n = (i + 1) % sides;
+        AddTriangle(polygons, bottom[i], bottom[n], top[n]);
+        AddTriangle(polygons, bottom[i], top[n], top[i]);
+    }
+    return polygons;
+}
+
+/// Return true if the point (x, y) is strictly inside the projection of the triangle onto the XY plane.
+bool InsideTriangleXY(const Vector3& a, const Vector3& b, const Vector3& c, double x, double y)
+{
+    const auto side = [&](const Vector3& p, const Vector3& q)
+    { return (double(q.x_) - p.x_) * (y - p.y_) - (double(q.y_) - p.y_) * (x - p.x_); };
+    const double d0 = side(a, b), d1 = side(b, c), d2 = side(c, a);
+    return (d0 > 0.0 && d1 > 0.0 && d2 > 0.0) || (d0 < 0.0 && d1 < 0.0 && d2 < 0.0);
+}
+
+} // namespace
+
+TEST_CASE("Triangulated face with a hole that touches a cell edge at one corner leaves the hole open",
+    "[triangulate][boolean]")
+{
+    // A slab of 12.5 x 5 x 1 with 10 x 4 x 1 cells. The cell lines on X are at -6.25 + 1.25 k.
+    // An octagon hole of radius 0.2 at x = -5.2 has its first corner at x = -5, exactly on a cell edge.
+    // The hole touches the outer loop of its cell triangle at this one corner.
+    const int counts[3] = {10, 4, 1};
+    const SolidPtr slab(CsgSolid::FromOperand(MakeGridBoxPolygons(Vector3(12.5f, 5.0f, 1.0f), counts)));
+    const float radius = 0.2f;
+    const double octagonArea = 2.0 * std::sqrt(2.0) * radius * radius;
+    for (const float y : {-2.0f, 0.5f})
+    {
+        INFO("y = " << y);
+        const Vector3 center(-5.2f, y, 0.0f);
+        const SolidPtr hole(CsgSolid::FromOperand(MakePrismPolygons(center, radius, 1.0f, 8)));
+        const SolidPtr result = Boolean(slab, hole, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+        REQUIRE(result->FaceCount() > 0);
+
+        const SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*result);
+        REQUIRE(model);
+        const TriangleMesh mesh = ReadModel(*model);
+        CHECK(IsMeshClosed(mesh));
+        CHECK(mesh.volume_ == Catch::Approx(62.5 - octagonArea).margin(1e-3));
+
+        // The front face (z = 0.5) and the back face (z = -0.5) each cover the slab face less the octagon.
+        // A ray along Z through the octagon center hits no triangle.
+        double frontArea = 0.0;
+        double backArea = 0.0;
+        unsigned hits = 0;
+        for (size_t t = 0; t + 2 < mesh.positions_.size(); t += 3)
+        {
+            const Vector3& a = mesh.positions_[t];
+            const Vector3& b = mesh.positions_[t + 1];
+            const Vector3& c = mesh.positions_[t + 2];
+            if (InsideTriangleXY(a, b, c, center.x_, center.y_))
+                ++hits;
+            const double area = 0.5 * double((b - a).CrossProduct(c - a).Length());
+            if (a.z_ == 0.5f && b.z_ == 0.5f && c.z_ == 0.5f)
+                frontArea += area;
+            else if (a.z_ == -0.5f && b.z_ == -0.5f && c.z_ == -0.5f)
+                backArea += area;
+        }
+        CHECK(hits == 0);
+        CHECK(frontArea == Catch::Approx(62.5 - octagonArea).margin(1e-4));
+        CHECK(backArea == Catch::Approx(62.5 - octagonArea).margin(1e-4));
+    }
+}
