@@ -2127,25 +2127,58 @@ TEST_CASE("Thick mode: union and intersection of identical boxes give the box", 
 }
 
 #ifdef CSG_DIAGNOSTICS
-// Each cut with the same rotated hole is near-coincident with the earlier cuts. From the sixth cut, the exact pass
-// opens the result in the float and the double mode. The boolean then runs again with thick decisions, and the
-// thick result is closed.
+// Each cut with the same rotated hole is near-coincident with the earlier cuts. In the float mode, the exact pass
+// opens the result from the sixth cut. The boolean then runs again with thick decisions, and the thick result is
+// closed. The test cuts until the first retry, at most 16 times.
+// In the double mode, the wanted side rule (CsgPreferWantedSide) keeps the exact pass closed at all 16 cuts.
+// The result is closed and has the right volume, so the test expects no retry there.
 TEST_CASE("Thick mode: an open exact result runs again with thick decisions", "[boolean][thick]")
 {
     const auto hole = MakeHole(1.0f, 0.5f, Quaternion(17.0f, Vector3::FORWARD));
     const double single = Volume(Run(MakeWall(), hole, CsgOperation::DifferenceAB));
     SolidPtr solid = MakeWall();
     int retries = 0;
-    for (int step = 1; step <= 6; ++step)
+    for (int step = 1; step <= 16 && retries == 0; ++step)
     {
         g_csgDiagnostics.Reset();
         solid = Run(solid, hole, CsgOperation::DifferenceAB);
         retries += g_csgDiagnostics.thickRetries_.load();
     }
-    CHECK(retries >= 1);
+    if constexpr (CsgPreferWantedSide)
+        CHECK(retries == 0);
+    else
+        CHECK(retries >= 1);
     CheckNoOpenEdges(solid);
     CHECK(NearVolume(Volume(solid), single));
 }
+
+#if defined(CSG_EXACT_USE_DOUBLE)
+// The same prism cuts the wall 12 times at 17 degrees, as the row RepeatRotated plain_17 of the game tests.
+// With the nearest rounding, the curve vertices are on both sides of the faces of the prism. Then each cut cuts
+// the result again and adds triangles, and the exact pass opens from the sixth cut.
+// The wanted side rule puts the vertices on the kept side. The triangle count at cut 12 must equal the count at
+// cut 3. The exact pass with the rule must stay closed at each cut: no nearest retry and no thick retry.
+TEST_CASE("The same rotated hole cut 12 times keeps the triangle count of cut 3", "[boolean][thick]")
+{
+    const auto hole = MakeHole(1.0f, 0.5f, Quaternion(17.0f, Vector3::FORWARD));
+    const double single = Volume(Run(MakeWall(), hole, CsgOperation::DifferenceAB));
+    SolidPtr solid = MakeWall();
+    unsigned trianglesAt3 = 0;
+    for (int step = 1; step <= 12; ++step)
+    {
+        CAPTURE(step);
+        g_csgDiagnostics.Reset();
+        solid = Run(solid, hole, CsgOperation::DifferenceAB);
+        CHECK(g_csgDiagnostics.wantedSideRetries_.load() == 0);
+        CHECK(g_csgDiagnostics.thickRetries_.load() == 0);
+        if (step == 3)
+            trianglesAt3 = TriangleCount(solid);
+    }
+    CHECK(TriangleCount(solid) == trianglesAt3);
+    CheckNoOpenEdges(solid);
+    CHECK(NearVolume(Volume(solid), single));
+}
+#endif
 #endif
 
 

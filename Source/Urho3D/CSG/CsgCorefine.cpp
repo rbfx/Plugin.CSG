@@ -2400,30 +2400,6 @@ bool CachedMapHasConflict(CsgMapCache& cache, const CsgGridPoint& candidate)
     return false;
 }
 
-/// Flag each crossing at an end of two items of a prepared map that conflict (not strict). Only the pairs with an
-/// item at the moved crossing can change. See MarkMapConflicts.
-void MarkCacheConflicts(const CsgMapCache& cache, int base, ea::vector<uint8_t>& suspects)
-{
-    const int count = static_cast<int>(cache.items_.size() / 2);
-    for (const int m : cache.incident_)
-    {
-        for (int k = 0; k < count; ++k)
-        {
-            if (!ItemsConflict(cache.items_, cache.points_, m, k, false))
-                continue;
-            for (const int item : {m, k})
-            {
-                for (int end = 0; end < 2; ++end)
-                {
-                    const int id = cache.items_[item * 2 + end];
-                    if (id >= base)
-                        suspects[id - base] = 1;
-                }
-            }
-        }
-    }
-}
-
 /// Whether a segment or a chain edge at the crossing crosses another item of the map of the triangle.
 /// The map has the boundary chain of the triangle and the curve segments on it. The crossing moves to the candidate.
 bool MapHasConflict(const Corefinement& core, const Mesh& mesh, int triangle, int dropAxis, bool flip, int crossingId,
@@ -2684,6 +2660,28 @@ void FindFragileCycles(const Corefinement& core, const Mesh& mesh, CsgScratch& s
     }
 }
 
+/// Sign of CsgExact::Volume(a, b, c, d), with a double filter in front of the exact sum.
+/// A difference of two grid coordinates is exact in double. Only the products and the sums round.
+/// The bound is larger than the bound (7 + 56 eps) eps of Shewchuk for this sum, so a filtered sign is correct.
+int VolumeSign(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c, const CsgGridPoint& d)
+{
+    const double ux = static_cast<double>(b.x_) - a.x_, uy = static_cast<double>(b.y_) - a.y_,
+                 uz = static_cast<double>(b.z_) - a.z_;
+    const double vx = static_cast<double>(c.x_) - a.x_, vy = static_cast<double>(c.y_) - a.y_,
+                 vz = static_cast<double>(c.z_) - a.z_;
+    const double wx = static_cast<double>(d.x_) - a.x_, wy = static_cast<double>(d.y_) - a.y_,
+                 wz = static_cast<double>(d.z_) - a.z_;
+    const double det = wx * (uy * vz - uz * vy) + wy * (uz * vx - ux * vz) + wz * (ux * vy - uy * vx);
+    const double permanent = std::abs(wx) * (std::abs(uy * vz) + std::abs(uz * vy))
+        + std::abs(wy) * (std::abs(uz * vx) + std::abs(ux * vz)) + std::abs(wz) * (std::abs(ux * vy) + std::abs(uy * vx));
+    constexpr double FilterBound = 1e-15;
+    if (det > permanent * FilterBound)
+        return 1;
+    if (-det > permanent * FilterBound)
+        return -1;
+    return CsgExact::Volume(a, b, c, d).Sign();
+}
+
 } // namespace
 
 unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
@@ -2886,7 +2884,7 @@ int Corefinement::CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], 
     return invalid;
 }
 
-void Corefinement::ConstrainCrossings(CsgScratch& scratch)
+void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide)
 {
     if constexpr (!ConstrainCrossingsOnGrid)
         return;
@@ -2912,6 +2910,79 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
 #endif
     // Masks of the axes that a candidate flips: none, one axis, two axes, three axes.
     static constexpr int FlipMasks[8] = {0, 1, 2, 4, 3, 5, 6, 7};
+
+    // The planes of the wanted side rule: the crossed triangle and the triangles at the two sides of the edge.
+    struct WantedPlanes
+    {
+        const Mesh* mesh_[3];
+        int triangle_[3];
+        int count_;
+        const CsgEdgeTriangles* sides_;
+    };
+    const auto wantedPlanes = [&](const Crossing& record)
+    {
+        const CsgCrossingKey& key = record.key_;
+        const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+        WantedPlanes planes{};
+        planes.mesh_[0] = key.edgeInSecond_ ? &a_ : &b_;
+        planes.triangle_[0] = key.triangle_;
+        planes.count_ = 1;
+        planes.sides_ = edges.FindEdgeTriangles(key.low_, key.high_);
+        if (planes.sides_)
+        {
+            for (const int triangle : {planes.sides_->first_, planes.sides_->second_})
+            {
+                if (triangle < 0)
+                    continue;
+                planes.mesh_[planes.count_] = &edges;
+                planes.triangle_[planes.count_++] = triangle;
+            }
+        }
+        return planes;
+    };
+    // The score of a corner for the wanted side rule (see the declaration). A higher score is better.
+    // An unwanted plane costs 4 points and a wanted plane adds 1 point, so the unwanted count decides first.
+    const auto wantedScore = [&](const WantedPlanes& planes, const CsgGridPoint& point, int& unwanted)
+    {
+        int wanted = 0;
+        unwanted = 0;
+        for (int i = 0; i < planes.count_; ++i)
+        {
+            const Mesh& mesh = *planes.mesh_[i];
+            const int* ids = &mesh.triangleIds_[planes.triangle_[i] * 3];
+            const int sign = VolumeSign(mesh.grid_[ids[0]], mesh.grid_[ids[1]], mesh.grid_[ids[2]], point);
+            if (sign == 0)
+                continue;
+            // The volume is positive outside an operand. Outside B and inside A are wanted.
+            if ((sign > 0) == mesh.isSecond_)
+                ++wanted;
+            else
+                ++unwanted;
+        }
+        return 4 * (3 - unwanted) + wanted;
+    };
+    // A twin crossing: an edge of the other operand is coplanar with the edge of the crossing, and it crosses a
+    // triangle of this edge. The twins are at one exact point and have the same nearest rounding.
+    const auto hasTwin = [&](const Crossing& record, const WantedPlanes& planes)
+    {
+        const CsgCrossingKey& key = record.key_;
+        const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
+        const Mesh& other = key.edgeInSecond_ ? a_ : b_;
+        for (int i = 1; i < planes.count_; ++i)
+        {
+            const int triangle = planes.triangle_[i];
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int u = other.triangleIds_[key.triangle_ * 3 + corner];
+                const int v = other.triangleIds_[key.triangle_ * 3 + (corner + 1) % 3];
+                if (!crossingIds_.Find(CsgCrossingKey{ea::min(u, v), ea::max(u, v), triangle, !key.edgeInSecond_}))
+                    continue;
+                if (VolumeSign(edges.grid_[key.low_], edges.grid_[key.high_], other.grid_[u], other.grid_[v]) == 0)
+                    return true;
+            }
+        }
+        return false;
+    };
 
     CsgValidityScratch& cache = scratch.validity_;
     cache.projection_[0].assign(a_.triangleIds_.size() / 3, 0);
@@ -3028,16 +3099,26 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
             return false;
         };
         // The cheap rules decide for a crossing that is no suspect.
-        if (CrossingInvalidRules(crossing, nearest, scratch, true, false, false) == 0
-            && (!suspects[index] || !segmentsConflict(nearest)))
-        {
+        const bool nearestValid = CrossingInvalidRules(crossing, nearest, scratch, true, false, false) == 0
+            && (!suspects[index] || !segmentsConflict(nearest));
 #ifdef CSG_CHECK_SUSPECTS
-            // Debug check: the full test must not find a fold in a crossing that is no suspect.
-            if (!suspects[index] && CrossingInvalidRules(crossing, nearest, scratch, true, false) != 0)
-                fprintf(stderr, "SUSPECT MISS crossing %d\n", static_cast<int>(index));
+        // Debug check: the full test must not find a fold in a crossing that is no suspect.
+        if (nearestValid && !suspects[index] && CrossingInvalidRules(crossing, nearest, scratch, true, false) != 0)
+            fprintf(stderr, "SUSPECT MISS crossing %d\n", static_cast<int>(index));
 #endif
-            continue;
+        // With the wanted side rule, a valid nearest rounding with an unwanted plane looks for a better corner.
+        int nearestScore = 0;
+        bool improve = false;
+        WantedPlanes planes{};
+        if (preferWantedSide)
+        {
+            planes = wantedPlanes(crossing);
+            int unwanted = 0;
+            nearestScore = wantedScore(planes, nearest, unwanted);
+            improve = nearestValid && unwanted != 0 && !hasTwin(crossing, planes);
         }
+        if (nearestValid && !improve)
+            continue;
         // A crossing exactly on the grid has no other corner to move to.
         CsgGridPoint lower;
         CsgGridPoint upper;
@@ -3045,7 +3126,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
         if (lower == upper)
             continue;
 #ifdef CSG_DIAGNOSTICS
-        if (state.empty())
+        if (!improve && state.empty())
             state.resize(crossings_.size(), 0);
 #endif
 
@@ -3070,7 +3151,10 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
         const CsgGridInt nearestAxis[3] = {nearest.x_, nearest.y_, nearest.z_};
         const CsgGridInt otherAxis[3] = {nearest.x_ == lower.x_ ? upper.x_ : lower.x_,
             nearest.y_ == lower.y_ ? upper.y_ : lower.y_, nearest.z_ == lower.z_ ? upper.z_ : lower.z_};
-        bool found = false;
+        // The candidates in the order of the flip masks. With the rule, a stable sort puts a higher score first.
+        CsgGridPoint candidates[7];
+        int scores[7];
+        int candidateCount = 0;
         for (const int mask : FlipMasks)
         {
             if (mask == 0)
@@ -3096,6 +3180,27 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
                 atCorner = atCorner || corners[k] == candidate;
             if (atCorner)
                 continue;
+            int score = 0;
+            if (preferWantedSide)
+            {
+                int unwanted = 0;
+                score = wantedScore(planes, candidate, unwanted);
+                if (improve && score <= nearestScore)
+                    continue;
+            }
+            int slot = candidateCount++;
+            for (; slot > 0 && scores[slot - 1] < score; --slot)
+            {
+                candidates[slot] = candidates[slot - 1];
+                scores[slot] = scores[slot - 1];
+            }
+            candidates[slot] = candidate;
+            scores[slot] = score;
+        }
+        bool found = false;
+        for (int c = 0; c < candidateCount; ++c)
+        {
+            const CsgGridPoint& candidate = candidates[c];
             if (CrossingInvalidRules(crossing, candidate, scratch, true, false, false) != 0
                 || segmentsConflict(candidate))
                 continue;
@@ -3104,14 +3209,12 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch)
             found = true;
             break;
         }
-        if (found)
-        {
-            // The caches hold the winner as the position of the crossing.
-            for (int i = 0; i < mapCount; ++i)
-                MarkCacheConflicts(cache.maps_[i], CrossingBase(), suspects);
-        }
+        // A found candidate passed segmentsConflict, so no pair at the moved crossing conflicts. No suspect changes.
+        static_cast<void>(found);
 #ifdef CSG_DIAGNOSTICS
-        state[index] = found ? 1 : 2;
+        // A move of the rule is no fold, so the fold count does not see it.
+        if (!improve)
+            state[index] = found ? 1 : 2;
 #endif
     }
 

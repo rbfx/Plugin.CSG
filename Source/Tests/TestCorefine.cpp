@@ -856,6 +856,69 @@ TEST_CASE("Corefine moves the crossings of one edge with intersecting cells to o
     CHECK(Sum(result.segmentCountsA_) == Sum(result.segmentCountsB_));
 }
 
+// The wanted side rule of ConstrainCrossings for DifferenceAB. The top of the wedge B rises 3 steps in each unit
+// along x. The four vertical edges of the box A cross the top at x = -0.875 (0.375 steps above z = 0) and at
+// x = 0.375 (4.125 steps). The nearest rounding is below the top, so inside B. The wanted side of a plane of B is
+// outside B, so the rule puts each of these crossings one step higher, above the top.
+TEST_CASE("ConstrainCrossings with the wanted side rule puts a crossing outside B", "[corefine][grid]")
+{
+    const float step = static_cast<float>(1.0 / CsgGridScale);
+    const auto polygon = [](std::initializer_list<Vector3> corners)
+    {
+        ea::vector<ModelVertex> vertices;
+        for (const Vector3& corner : corners)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(corner);
+            vertices.push_back(vertex);
+        }
+        return CsgPolygon(ea::move(vertices), 2);
+    };
+    const float top = 6 * step;
+    ea::vector<CsgPolygon> wedge;
+    wedge.push_back(polygon({{-1, -1, -0.5f}, {-1, 1, -0.5f}, {1, 1, -0.5f}, {1, -1, -0.5f}}));
+    wedge.push_back(polygon({{1, -1, -0.5f}, {1, 1, -0.5f}, {1, 1, top}, {1, -1, top}}));
+    wedge.push_back(polygon({{-1, -1, 0}, {1, -1, top}, {1, 1, top}, {-1, 1, 0}}));
+    wedge.push_back(polygon({{-1, -1, -0.5f}, {-1, -1, 0}, {-1, 1, 0}, {-1, 1, -0.5f}}));
+    wedge.push_back(polygon({{-1, -1, -0.5f}, {1, -1, -0.5f}, {1, -1, top}, {-1, -1, 0}}));
+    wedge.push_back(polygon({{-1, 1, -0.5f}, {-1, 1, 0}, {1, 1, top}, {1, 1, -0.5f}}));
+    const CsgSolid b(wedge);
+    const CsgSolid a(MakeBoxPolygons(Vector3(-0.25f, 0.0f, 0.0f), Vector3(0.625f, 0.25f, 1.0f), 1));
+
+    // Count the crossings of the vertical edges of A with the top of B, by the side of B that they are on.
+    const auto countSides = [&](bool preferWantedSide, unsigned& outside, unsigned& inside)
+    {
+        Corefinement core(a, b, CSG_DEFAULT_EPSILON);
+        CsgScratch scratch;
+        core.CollectCrossings(scratch);
+        core.ConstrainCrossings(scratch, preferWantedSide);
+        outside = 0;
+        inside = 0;
+        const CsgGridInt bottom = CsgGridPoint::From(Vector3(0.0f, 0.0f, -0.5f)).z_;
+        for (const Crossing& crossing : core.crossings_)
+        {
+            const CsgCrossingKey& key = crossing.key_;
+            const CsgGridPoint& low = core.a_.grid_[key.low_];
+            const CsgGridPoint& high = core.a_.grid_[key.high_];
+            if (key.edgeInSecond_ || low.x_ != high.x_ || low.y_ != high.y_ || crossing.grid_.z_ == bottom)
+                continue;
+            const int* ids = &core.b_.triangleIds_[key.triangle_ * 3];
+            const int sign = CsgExact::Volume(core.b_.grid_[ids[0]], core.b_.grid_[ids[1]], core.b_.grid_[ids[2]],
+                crossing.grid_).Sign();
+            outside += sign > 0 ? 1 : 0;
+            inside += sign < 0 ? 1 : 0;
+        }
+    };
+    unsigned outside = 0;
+    unsigned inside = 0;
+    countSides(false, outside, inside);
+    CHECK(outside == 0);
+    CHECK(inside == 4);
+    countSides(true, outside, inside);
+    CHECK(outside == 4);
+    CHECK(inside == 0);
+}
+
 namespace
 {
 

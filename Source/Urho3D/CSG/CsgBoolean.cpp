@@ -1473,13 +1473,14 @@ bool ClassifyGridCentroid(
 
 /// Run the boolean once with the current value of g_csgExactOnly. Each call builds a new corefinement, so the
 /// aliases and the placed crossings of an earlier call do not carry over.
+/// With preferWantedSide, ConstrainCrossings uses the wanted side rule. Only DifferenceAB may set it.
 SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
-    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel)
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel, bool preferWantedSide = false)
 {
     Corefinement core(*a, *b, epsilon);
     CsgScratch scratch;
     core.CollectCrossings(scratch, parallel);
-    core.ConstrainCrossings(scratch);
+    core.ConstrainCrossings(scratch, preferWantedSide);
     core.SplitFaces(scratch);
 
     CsgSolid::Builder result(a->FaceCount() + b->FaceCount(),
@@ -1489,6 +1490,27 @@ SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const 
     AppendOperand(core, core.b_, core.segmentsB_, core.splitB_, operation, true, s.operands_[1], s);
     ClassifyAndEmit(core, a, b, operation, epsilon, result, s);
     return result.Finish();
+}
+
+/// The exact pass. Call it with the exact decisions. DifferenceAB uses the wanted side rule of ConstrainCrossings
+/// on the fine grid. Then a repeated identical cut does not add triangles. A move of the rule can open a result that
+/// the nearest rounding keeps closed. If the result has more open edges than the operands, the pass runs again with
+/// the nearest rounding. The result with fewer open edges stays.
+/// Union and Intersection do not use the rule. In the sweep of rotated boxes, a union with the rule gave a closed
+/// result, but the next union of that result opened in all passes.
+SharedPtr<const CsgSolid> ExactPass(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel)
+{
+    const bool prefer = CsgPreferWantedSide && operation == CsgOperation::DifferenceAB;
+    SharedPtr<const CsgSolid> result = BooleanOnce(a, b, operation, epsilon, parallel, prefer);
+    if (!prefer)
+        return result;
+    const unsigned open = result->OpenPositionEdgeCount();
+    if (open == 0 || open <= a->OpenPositionEdgeCount() + b->OpenPositionEdgeCount())
+        return result;
+    CSG_DIAG_COUNT(wantedSideRetries_);
+    SharedPtr<const CsgSolid> nearest = BooleanOnce(a, b, operation, epsilon, parallel);
+    return nearest->OpenPositionEdgeCount() < open ? nearest : result;
 }
 
 } // namespace
@@ -1516,7 +1538,7 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     SharedPtr<const CsgSolid> result;
     {
         const CsgExactOnlyScope exact(true);
-        result = BooleanOnce(a, b, operation, epsilon, parallel);
+        result = ExactPass(a, b, operation, epsilon, parallel);
     }
     // Rounded near-coincident input can open the exact result. If the result has more open edges than the operands,
     // run again with the thick decisions: elements within the thickness of each other are coincident.

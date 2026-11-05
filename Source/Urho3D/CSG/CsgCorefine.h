@@ -602,7 +602,18 @@ public:
     /// before SplitFaces. It builds the edge triangles of both meshes.
     /// A crossing with the placedGroup_ mark does not move, and ConstrainClusters keeps it as a fixed point.
     /// Its grid point is the grid point of the group and not the nearest rounding of its exact position.
-    void ConstrainCrossings(CsgScratch& scratch);
+    ///
+    /// The wanted side rule (preferWantedSide, for DifferenceAB only). The three planes of a crossing are the crossed
+    /// triangle and the two triangles of the edge. The wanted side of a plane of A is inside A. The wanted side of a
+    /// plane of B is outside B. These are the sides of the kept pieces. Each candidate corner gets a score: fewer
+    /// unwanted planes first, then more wanted planes. A plane through the corner counts as neither.
+    /// A fold tries its candidates in the order of the score. A valid nearest rounding with an unwanted plane moves
+    /// only to a valid corner with a better score. A twin crossing keeps its nearest rounding, so the twins stay at
+    /// one point. The rule never accepts a corner that the validity tests reject.
+    /// The reason: the nearest rounding puts the vertices of a curve on both sides of the face plane of B. A next
+    /// identical cut then cuts this crinkled sheet again, and each cut adds triangles. With the rule, the curve
+    /// vertices are on the kept side of the planes. Then the next identical cut does not cut them again.
+    void ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide = false);
     /// Split every triangle of both operands that has curve segments into regions. Fill splitA_ and splitB_.
     /// Call this after CollectCrossings.
     void SplitFaces(CsgScratch& scratch);
@@ -823,6 +834,11 @@ bool CsgClassifyGridCentroidForTest(
 /// Boolean sets the switch for each pass. See Boolean.
 inline thread_local bool g_csgExactOnly = true;
 
+/// Whether the exact pass of DifferenceAB uses the wanted side rule of ConstrainCrossings. The rule moves a curve
+/// vertex by up to one grid step. On the coarse grid of the float build, this changes the volume by more than the
+/// tolerance. So only the fine grid uses the rule.
+constexpr bool CsgPreferWantedSide = CsgGridScaleBits >= 16;
+
 /// Set g_csgExactOnly for the life of the object, and restore the old value after it.
 class CsgExactOnlyScope
 {
@@ -880,6 +896,9 @@ struct CsgBooleanDiagnostics
     /// Booleans that ran again with the thick decisions, because the exact result had more open edges than
     /// the operands.
     std::atomic<int> thickRetries_{};
+    /// Exact passes of DifferenceAB that ran again with the nearest rounding, because the wanted side rule gave
+    /// more open edges than the operands.
+    std::atomic<int> wantedSideRetries_{};
     /// Switch of the validity count. A test sets it. Reset does not change it.
     std::atomic<bool> countInvalid_{false};
 
@@ -890,7 +909,7 @@ struct CsgBooleanDiagnostics
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
                  &unconstrainableCrossings_, &zeroSumUnclassifiedPatches_, &zeroSumDegeneratePatches_,
-                 &componentsRemoved_, &thickRetries_})
+                 &componentsRemoved_, &thickRetries_, &wantedSideRetries_})
             counter->store(0, std::memory_order_relaxed);
     }
 };
