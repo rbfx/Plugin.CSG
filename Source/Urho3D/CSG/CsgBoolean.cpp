@@ -795,6 +795,60 @@ int64_t PlaceOnSegment(const CsgGridPoint& u, const CsgGridPoint& v, const CsgGr
     return place > 0 && place < length ? place : 0;
 }
 
+/// Split each edge of a loop at the corners of the same loop that are exactly on the edge. The loop of a split region
+/// can run along one line twice: once on an edge of its triangle, and once back on curve segments whose ends are on
+/// that edge. After the split, the clean-up sees the repeated ids and removes the zero-width part. The split does not
+/// change the shape. The corners are sorted by x, so an edge tests only the corners in its x range.
+/// Return true if an edge splits. The loop is then replaced by the split loop.
+bool SplitAtOwnCorners(ea::vector<LoopCorner>& loop, ea::vector<unsigned>& byX, ea::vector<LoopCorner>& output)
+{
+    const unsigned count = loop.size();
+    if (count < 4)
+        return false;
+    byX.resize(count);
+    for (unsigned i = 0; i < count; ++i)
+        byX[i] = i;
+    ea::sort(byX.begin(), byX.end(), [&](unsigned x, unsigned y) { return loop[x].grid_.x_ < loop[y].grid_.x_; });
+    struct Cut
+    {
+        int64_t place_;
+        unsigned corner_;
+    };
+    ea::fixed_vector<Cut, 8> cuts;
+    bool split = false;
+    output.clear();
+    for (unsigned k = 0; k < count; ++k)
+    {
+        const LoopCorner& from = loop[k];
+        const LoopCorner& to = loop[(k + 1) % count];
+        output.push_back(from);
+        if (from.id_ == to.id_)
+            continue;
+        const CsgGridInt low = ea::min(from.grid_.x_, to.grid_.x_);
+        const CsgGridInt high = ea::max(from.grid_.x_, to.grid_.x_);
+        auto it = ea::lower_bound(
+            byX.begin(), byX.end(), low, [&](unsigned x, CsgGridInt value) { return loop[x].grid_.x_ < value; });
+        cuts.clear();
+        for (; it != byX.end() && loop[*it].grid_.x_ <= high; ++it)
+        {
+            const LoopCorner& corner = loop[*it];
+            if (corner.id_ == from.id_ || corner.id_ == to.id_)
+                continue;
+            if (const int64_t place = PlaceOnSegment(from.grid_, to.grid_, corner.grid_))
+                cuts.push_back({place, *it});
+        }
+        if (cuts.empty())
+            continue;
+        ea::sort(cuts.begin(), cuts.end(), [](const Cut& x, const Cut& y) { return x.place_ < y.place_; });
+        for (const Cut& cut : cuts)
+            output.push_back({loop[cut.corner_].id_, from.from_, to.from_, loop[cut.corner_].grid_});
+        split = true;
+    }
+    if (split)
+        loop.swap(output);
+    return split;
+}
+
 /// A loop of a cleaned face. The loop owns the corners [start_, start_ + count_) in loopIds_ and loopCorners_.
 struct CsgCleanLoop
 {
@@ -845,6 +899,7 @@ struct CsgRegionClean
 /// The faces are welded and cleaned exactly, by grid point and id:
 /// - ids with equal grid points become one id, the first id with that grid point;
 /// - a loop loses its repeated ids and its zero-width spikes;
+/// - an edge of a loop splits at the corners of the same loop that are exactly on it;
 /// - a loop that passes twice through one id splits into two loops at that id;
 /// - a face with less than three ids or with all corners on one line bounds no surface and is left out;
 /// - two faces that visit the same ids in opposite directions cancel;
@@ -929,6 +984,8 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
     ea::vector<LoopCorner> pool;
     ea::vector<ea::pair<unsigned, unsigned>> ranges;
     ea::vector<int> sorted;
+    ea::vector<unsigned> byX;
+    ea::vector<LoopCorner> splitPiece;
     // The input loop is in piece. The clean simple loops go to the end of loops.
     const auto appendClean = [&](unsigned face)
     {
@@ -982,6 +1039,7 @@ void Clean(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const 
         piece.clear();
         for (unsigned k = cornerStart[f]; k < cornerStart[f + 1]; ++k)
             piece.push_back({cornerIds[k], static_cast<int>(k - cornerStart[f]), -1, cornerGrid[k]});
+        SplitAtOwnCorners(piece, byX, splitPiece);
         appendClean(f);
     }
 

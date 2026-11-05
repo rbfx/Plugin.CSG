@@ -2283,3 +2283,111 @@ TEST_CASE("Boolean of boxes with faces that differ by a fraction of epsilon keep
         }
     }
 }
+
+namespace
+{
+
+/// The triangles of a prism with eight sides along x from -0.5 to 0.5, with the corners on a circle of radius 0.5.
+/// Each side is a quad of two triangles with the diagonal from its first corner. The transform places the prism.
+ea::vector<CsgPolygon> MakePrismTriangles(const Matrix3x4& transform)
+{
+    constexpr int sides = 8;
+    ea::vector<Vector3> ring;
+    for (int i = 0; i < sides; ++i)
+    {
+        const float angle = 2.0f * M_PI * static_cast<float>(i) / static_cast<float>(sides);
+        ring.push_back(Vector3(0.0f, 0.5f * std::cos(angle), 0.5f * std::sin(angle)));
+    }
+    ea::vector<ea::array<Vector3, 3>> triangles;
+    for (int i = 1; i + 1 < sides; ++i)
+    {
+        triangles.push_back({ring[0] + Vector3(0.5f, 0, 0), ring[i] + Vector3(0.5f, 0, 0), ring[i + 1] + Vector3(0.5f, 0, 0)});
+        triangles.push_back(
+            {ring[0] - Vector3(0.5f, 0, 0), ring[i + 1] - Vector3(0.5f, 0, 0), ring[i] - Vector3(0.5f, 0, 0)});
+    }
+    for (int i = 0; i < sides; ++i)
+    {
+        const Vector3& c0 = ring[i];
+        const Vector3& c1 = ring[(i + 1) % sides];
+        const Vector3 quad[4] = {c0 - Vector3(0.5f, 0, 0), c1 - Vector3(0.5f, 0, 0), c1 + Vector3(0.5f, 0, 0),
+            c0 + Vector3(0.5f, 0, 0)};
+        triangles.push_back({quad[0], quad[1], quad[2]});
+        triangles.push_back({quad[0], quad[2], quad[3]});
+    }
+    ea::vector<CsgPolygon> polygons;
+    for (const auto& triangle : triangles)
+    {
+        Vector3 p[3];
+        for (int k = 0; k < 3; ++k)
+            p[k] = transform * triangle[k];
+        const Vector3 normal = (p[1] - p[0]).CrossProduct(p[2] - p[0]).NormalizedOrDefault(Vector3::UP);
+        ea::vector<ModelVertex> vertices;
+        for (int k = 0; k < 3; ++k)
+        {
+            ModelVertex vertex;
+            vertex.SetPosition(p[k]);
+            vertex.SetNormal(normal);
+            vertices.push_back(vertex);
+        }
+        polygons.push_back(CsgPolygon(ea::move(vertices), 0));
+    }
+    return polygons;
+}
+
+/// The grid coordinate of a position coordinate.
+int64_t ToGrid(float x)
+{
+    return static_cast<int64_t>(std::floor(static_cast<double>(x) * CsgGridScale + 0.5));
+}
+
+/// Count the triangles of a solid with no grid area and the triangles with the corners of an earlier triangle.
+void CountBadTriangles(const SolidPtr& solid, int& degenerate, int& duplicate)
+{
+    degenerate = 0;
+    duplicate = 0;
+    const auto positions = solid->GetTrianglePositions();
+    std::vector<std::array<std::array<int64_t, 3>, 3>> seen;
+    for (size_t t = 0; t + 2 < positions.size(); t += 3)
+    {
+        std::array<std::array<int64_t, 3>, 3> corners;
+        for (int k = 0; k < 3; ++k)
+        {
+            const Vector3& p = positions[t + k];
+            corners[k] = {ToGrid(p.x_), ToGrid(p.y_), ToGrid(p.z_)};
+        }
+        int64_t u[3];
+        int64_t v[3];
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            u[axis] = corners[1][axis] - corners[0][axis];
+            v[axis] = corners[2][axis] - corners[0][axis];
+        }
+        if (u[1] * v[2] == u[2] * v[1] && u[2] * v[0] == u[0] * v[2] && u[0] * v[1] == u[1] * v[0])
+            ++degenerate;
+        std::sort(corners.begin(), corners.end());
+        if (std::find(seen.begin(), seen.end(), corners) != seen.end())
+            ++duplicate;
+        seen.push_back(corners);
+    }
+}
+
+} // namespace
+
+// A plug of the same prism into its hole. The side faces of the prism are coplanar with the walls of the hole.
+// A kept region of a prism side then runs along its triangle edge and back on curve segments whose ends are on that edge.
+// Clean splits the edge at these corners, so the zero-width part goes away. Without the split, the region gives zero-area
+// triangles and two triangles with the same corners.
+TEST_CASE("Boolean plug of a prism into its own hole gives no zero-area or duplicate triangle", "[boolean][clean]")
+{
+    const Matrix3x4 place(Vector3(1.0f, 0.5f, 0.0f), Quaternion(Vector3::RIGHT, Vector3(0.0f, 0.0f, 1.0f)), Vector3(1.0f, 0.3f, 0.3f));
+    const SolidPtr wall = MakeSolid(MakeBoxPolygons(Vector3::ZERO, Vector3(6.25f, 2.5f, 0.15f), 0, Matrix3x4::IDENTITY));
+    const SolidPtr cut = Run(wall, MakeSolid(MakePrismTriangles(place)), CsgOperation::DifferenceAB);
+    const SolidPtr plug = Run(cut, MakeSolid(MakePrismTriangles(place)), CsgOperation::Union);
+    REQUIRE(plug->GetTrianglePositions().size() > 0);
+    int degenerate = 0;
+    int duplicate = 0;
+    CountBadTriangles(plug, degenerate, duplicate);
+    CHECK(degenerate == 0);
+    CHECK(duplicate == 0);
+    CHECK(IsClosed(plug));
+}
