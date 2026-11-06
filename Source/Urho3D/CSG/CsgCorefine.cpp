@@ -2326,7 +2326,9 @@ bool BuildMapItems(const Corefinement& core, const Mesh& mesh, int triangle, Csg
 }
 
 /// Whether the items m and k of the map have a conflict. See SegmentsConflict.
-bool ItemsConflict(const ea::vector<int>& items, const ea::vector<CsgGridPoint2>& points, int m, int k, bool strict)
+/// Items and Points are vectors or pointers: two global ids and two projected points for each item.
+template <class Items, class Points>
+bool ItemsConflict(const Items& items, const Points& points, int m, int k, bool strict)
 {
     const int a = items[m * 2];
     const int b = items[m * 2 + 1];
@@ -2380,24 +2382,50 @@ bool PrepareMapCache(const Corefinement& core, const Mesh& mesh, int triangle, i
     return true;
 }
 
-/// Whether the items at the crossing in a prepared map cross another item when the crossing is at the candidate.
-bool CachedMapHasConflict(CsgMapCache& cache, const CsgGridPoint& candidate)
+/// Whether the items at the crossing cross another item of a map when the crossing is at the candidate.
+/// The map has count items. The ends are the indices in points of the crossing, in ascending order. The function
+/// writes the projected candidate at the ends.
+bool MapEndsConflict(const int* items, CsgGridPoint2* points, int count, const int* ends, int endCount, int dropAxis,
+    bool flip, const CsgGridPoint& candidate)
 {
-    if (cache.incident_.empty())
+    if (endCount == 0)
         return false;
-    const CsgGridPoint2 moved = CsgExact::Project(candidate, cache.dropAxis_, cache.flip_);
-    for (const int end : cache.ends_)
-        cache.points_[end] = moved;
-    const int count = static_cast<int>(cache.items_.size() / 2);
-    for (const int m : cache.incident_)
+    const CsgGridPoint2 moved = CsgExact::Project(candidate, dropAxis, flip);
+    for (int e = 0; e < endCount; ++e)
+        points[ends[e]] = moved;
+    // The ends are in ascending order, so the items at the crossing are the distinct values of end / 2.
+    for (int e = 0; e < endCount; ++e)
     {
+        const int m = ends[e] / 2;
+        if (e > 0 && ends[e - 1] / 2 == m)
+            continue;
+        // Most items are far from the crossing. This box test rejects them before the call. ItemsConflict
+        // rejects the same items, so the result does not change.
+        const CsgGridPoint2& pa = points[m * 2];
+        const CsgGridPoint2& pb = points[m * 2 + 1];
+        const CsgGridInt minU = pa.u_ < pb.u_ ? pa.u_ : pb.u_;
+        const CsgGridInt maxU = pa.u_ < pb.u_ ? pb.u_ : pa.u_;
+        const CsgGridInt minV = pa.v_ < pb.v_ ? pa.v_ : pb.v_;
+        const CsgGridInt maxV = pa.v_ < pb.v_ ? pb.v_ : pa.v_;
         for (int k = 0; k < count; ++k)
         {
-            if (ItemsConflict(cache.items_, cache.points_, m, k, false))
+            const CsgGridPoint2& pc = points[k * 2];
+            const CsgGridPoint2& pd = points[k * 2 + 1];
+            if ((pc.u_ < pd.u_ ? pd.u_ : pc.u_) < minU || (pc.u_ < pd.u_ ? pc.u_ : pd.u_) > maxU
+                || (pc.v_ < pd.v_ ? pd.v_ : pc.v_) < minV || (pc.v_ < pd.v_ ? pc.v_ : pd.v_) > maxV)
+                continue;
+            if (ItemsConflict(items, points, m, k, false))
                 return true;
         }
     }
     return false;
+}
+
+/// Whether the items at the crossing in a prepared map cross another item when the crossing is at the candidate.
+bool CachedMapHasConflict(CsgMapCache& cache, const CsgGridPoint& candidate)
+{
+    return MapEndsConflict(cache.items_.data(), cache.points_.data(), static_cast<int>(cache.items_.size() / 2),
+        cache.ends_.data(), static_cast<int>(cache.ends_.size()), cache.dropAxis_, cache.flip_, candidate);
 }
 
 /// Whether a segment or a chain edge at the crossing crosses another item of the map of the triangle.
@@ -2431,11 +2459,13 @@ bool MapHasConflict(const Corefinement& core, const Mesh& mesh, int triangle, in
 
 /// Flag each crossing at an end of two items of the map that conflict (not strict) at the current positions.
 /// The flag is 1 at the index of the crossing. A crossing without a flag has no segment rule failure in this map.
-void MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, CsgScratch& scratch,
+/// The function returns false if the map has no area. Else the items and the projected points of the map stay in
+/// items_ and points_ of the validity scratch.
+bool MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, CsgScratch& scratch,
     ea::vector<uint8_t>& suspects)
 {
     if (!BuildMapItems(core, mesh, triangle, scratch))
-        return;
+        return false;
     CsgValidityScratch& v = scratch.validity_;
     int dropAxis = 0;
     bool flip = false;
@@ -2480,6 +2510,7 @@ void MarkMapConflicts(const Corefinement& core, const Mesh& mesh, int triangle, 
             }
         }
     }
+    return true;
 }
 
 /// Trace the closed cycle of directed segments through the crossing in the map of the triangle. Each point of the
@@ -2681,6 +2712,49 @@ int VolumeSign(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint&
         return -1;
     return CsgExact::Volume(a, b, c, d).Sign();
 }
+
+/// The terms of VolumeSign(a, b, c, d) that do not use d. Sign(d) gives the sign of VolumeSign(a, b, c, d) with the
+/// same arithmetic, so a plane with many test points computes these terms once.
+struct VolumeSignPlane
+{
+    const CsgGridPoint* a_{};
+    const CsgGridPoint* b_{};
+    const CsgGridPoint* c_{};
+    double cross_[3]{};
+    double permanent_[3]{};
+
+    void Set(const CsgGridPoint& a, const CsgGridPoint& b, const CsgGridPoint& c)
+    {
+        a_ = &a;
+        b_ = &b;
+        c_ = &c;
+        const double ux = static_cast<double>(b.x_) - a.x_, uy = static_cast<double>(b.y_) - a.y_,
+                     uz = static_cast<double>(b.z_) - a.z_;
+        const double vx = static_cast<double>(c.x_) - a.x_, vy = static_cast<double>(c.y_) - a.y_,
+                     vz = static_cast<double>(c.z_) - a.z_;
+        cross_[0] = uy * vz - uz * vy;
+        cross_[1] = uz * vx - ux * vz;
+        cross_[2] = ux * vy - uy * vx;
+        permanent_[0] = std::abs(uy * vz) + std::abs(uz * vy);
+        permanent_[1] = std::abs(uz * vx) + std::abs(ux * vz);
+        permanent_[2] = std::abs(ux * vy) + std::abs(uy * vx);
+    }
+
+    int Sign(const CsgGridPoint& d) const
+    {
+        const double wx = static_cast<double>(d.x_) - a_->x_, wy = static_cast<double>(d.y_) - a_->y_,
+                     wz = static_cast<double>(d.z_) - a_->z_;
+        const double det = wx * cross_[0] + wy * cross_[1] + wz * cross_[2];
+        const double permanent =
+            std::abs(wx) * permanent_[0] + std::abs(wy) * permanent_[1] + std::abs(wz) * permanent_[2];
+        constexpr double FilterBound = 1e-15;
+        if (det > permanent * FilterBound)
+            return 1;
+        if (-det > permanent * FilterBound)
+            return -1;
+        return CsgExact::Volume(*a_, *b_, *c_, d).Sign();
+    }
+};
 
 } // namespace
 
@@ -2916,6 +2990,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
     {
         const Mesh* mesh_[3];
         int triangle_[3];
+        VolumeSignPlane plane_[3];
         int count_;
         const CsgEdgeTriangles* sides_;
     };
@@ -2938,6 +3013,12 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
                 planes.triangle_[planes.count_++] = triangle;
             }
         }
+        for (int i = 0; i < planes.count_; ++i)
+        {
+            const Mesh& mesh = *planes.mesh_[i];
+            const int* ids = &mesh.triangleIds_[planes.triangle_[i] * 3];
+            planes.plane_[i].Set(mesh.grid_[ids[0]], mesh.grid_[ids[1]], mesh.grid_[ids[2]]);
+        }
         return planes;
     };
     // The score of a corner for the wanted side rule (see the declaration). A higher score is better.
@@ -2949,8 +3030,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
         for (int i = 0; i < planes.count_; ++i)
         {
             const Mesh& mesh = *planes.mesh_[i];
-            const int* ids = &mesh.triangleIds_[planes.triangle_[i] * 3];
-            const int sign = VolumeSign(mesh.grid_[ids[0]], mesh.grid_[ids[1]], mesh.grid_[ids[2]], point);
+            const int sign = planes.plane_[i].Sign(point);
             if (sign == 0)
                 continue;
             // The volume is positive outside an operand. Outside B and inside A are wanted.
@@ -2968,16 +3048,17 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
         const CsgCrossingKey& key = record.key_;
         const Mesh& edges = key.edgeInSecond_ ? b_ : a_;
         const Mesh& other = key.edgeInSecond_ ? a_ : b_;
-        for (int i = 1; i < planes.count_; ++i)
+        // The coplanar test does not use the triangle of the edge, so it runs once for each corner, before the lookups.
+        for (int corner = 0; corner < 3; ++corner)
         {
-            const int triangle = planes.triangle_[i];
-            for (int corner = 0; corner < 3; ++corner)
+            const int u = other.triangleIds_[key.triangle_ * 3 + corner];
+            const int v = other.triangleIds_[key.triangle_ * 3 + (corner + 1) % 3];
+            if (VolumeSign(edges.grid_[key.low_], edges.grid_[key.high_], other.grid_[u], other.grid_[v]) != 0)
+                continue;
+            for (int i = 1; i < planes.count_; ++i)
             {
-                const int u = other.triangleIds_[key.triangle_ * 3 + corner];
-                const int v = other.triangleIds_[key.triangle_ * 3 + (corner + 1) % 3];
-                if (!crossingIds_.Find(CsgCrossingKey{ea::min(u, v), ea::max(u, v), triangle, !key.edgeInSecond_}))
-                    continue;
-                if (VolumeSign(edges.grid_[key.low_], edges.grid_[key.high_], other.grid_[u], other.grid_[v]) == 0)
+                if (crossingIds_.Find(
+                        CsgCrossingKey{ea::min(u, v), ea::max(u, v), planes.triangle_[i], !key.edgeInSecond_}))
                     return true;
             }
         }
@@ -3042,22 +3123,82 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
         CsgExact::CrossingCell(low, high, crossing.lowVolume_, crossing.difference_, crossing.grid_, lower, upper);
         inexact[index] = lower == upper ? 0 : 1;
     }
+    // In the exact mode, the items of a map do not change in the loop below: the order of the crossings on an edge
+    // does not use their grid points. So the loop keeps the maps of the cheap pass for its segment tests. A crossing
+    // is only in its own maps, so a move updates its projected points in these maps only.
+    // Only the wanted side rule keeps the maps. It tests most crossings. The nearest rounding tests few crossings,
+    // and there the copies of the maps cost more than they save.
+    // The kept maps share the pools keptItems and keptPoints. The slot of a triangle: -1 before the cheap pass, -2 if
+    // no map is kept, else the index in kept.
+    struct KeptMap
     {
-        ea::vector<uint8_t> doneA(a_.triangleIds_.size() / 3, 0);
-        ea::vector<uint8_t> doneB(b_.triangleIds_.size() / 3, 0);
-        for (size_t index = 0; index < crossings_.size(); ++index)
+        int start_;
+        int size_;
+        int dropAxis_;
+        bool flip_;
+    };
+    const bool keepMaps = preferWantedSide && g_csgExactOnly;
+    ea::vector<int> keptSlot[2];
+    ea::vector<KeptMap> kept;
+    ea::vector<int> keptItems;
+    ea::vector<CsgGridPoint2> keptPoints;
+    keptSlot[0].assign(a_.triangleIds_.size() / 3, -1);
+    keptSlot[1].assign(b_.triangleIds_.size() / 3, -1);
+    for (size_t index = 0; index < crossings_.size(); ++index)
+    {
+        if (!inexact[index])
+            continue;
+        forEachMap(crossings_[index],
+            [&](const Mesh& mesh, int triangle)
+            {
+                int& slot = keptSlot[mesh.isSecond_ ? 1 : 0][triangle];
+                if (slot != -1)
+                    return;
+                slot = -2;
+                if (!MarkMapConflicts(*this, mesh, triangle, scratch, suspects) || !keepMaps)
+                    return;
+                const CsgValidityScratch& v = scratch.validity_;
+                KeptMap map;
+                map.start_ = static_cast<int>(keptItems.size());
+                map.size_ = static_cast<int>(v.items_.size());
+                CachedTriangleProjection(mesh, triangle, scratch, map.dropAxis_, map.flip_);
+                keptItems.insert(keptItems.end(), v.items_.begin(), v.items_.end());
+                keptPoints.insert(keptPoints.end(), v.points_.begin(), v.points_.end());
+                slot = static_cast<int>(kept.size());
+                kept.push_back(map);
+            });
+    }
+    // The ends of each crossing in the kept maps: the slot of the map and the index in the map. The entries of one
+    // crossing are in the order of the slots, and in the order of the indices in one map, as PrepareMapCache finds them.
+    ea::vector<int> endStart;
+    ea::vector<int> endSlot;
+    ea::vector<int> endIndex;
+    if (keepMaps)
+    {
+        const int base = CrossingBase();
+        endStart.assign(crossings_.size() + 1, 0);
+        for (const int id : keptItems)
         {
-            if (!inexact[index])
-                continue;
-            forEachMap(crossings_[index],
-                [&](const Mesh& mesh, int triangle)
-                {
-                    uint8_t& done = (mesh.isSecond_ ? doneB : doneA)[triangle];
-                    if (done)
-                        return;
-                    done = 1;
-                    MarkMapConflicts(*this, mesh, triangle, scratch, suspects);
-                });
+            if (id >= base)
+                ++endStart[id - base + 1];
+        }
+        for (size_t i = 1; i < endStart.size(); ++i)
+            endStart[i] += endStart[i - 1];
+        endSlot.resize(endStart.back());
+        endIndex.resize(endStart.back());
+        ea::vector<int> fill(endStart.begin(), endStart.end() - 1);
+        for (int slot = 0; slot < static_cast<int>(kept.size()); ++slot)
+        {
+            const KeptMap& map = kept[slot];
+            for (int i = 0; i < map.size_; ++i)
+            {
+                const int id = keptItems[map.start_ + i];
+                if (id < base)
+                    continue;
+                const int at = fill[id - base]++;
+                endSlot[at] = slot;
+                endIndex[at] = i;
+            }
         }
     }
 
@@ -3074,7 +3215,11 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
         const CsgGridPoint nearest = crossing.grid_;
         const int crossingId = CrossingBase() + static_cast<int>(index);
         // Prepare the maps of the crossing. The tests of the segment rule use them for each candidate.
+        // A kept map has its ends in endIndex, from mapEnds[i] to mapEnds[i] + mapEndCount[i].
         int mapCount = 0;
+        int keptMaps[3];
+        int mapEnds[3];
+        int mapEndCount[3];
         bool prepared = false;
         const auto prepare = [&]()
         {
@@ -3083,8 +3228,25 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
             forEachMap(crossing,
                 [&](const Mesh& mesh, int triangle)
                 {
-                    if (PrepareMapCache(*this, mesh, triangle, crossingId, scratch, cache.maps_[mapCount]))
-                        ++mapCount;
+                    if (!keepMaps)
+                    {
+                        if (PrepareMapCache(*this, mesh, triangle, crossingId, scratch, cache.maps_[mapCount]))
+                            ++mapCount;
+                        return;
+                    }
+                    const int slot = keptSlot[mesh.isSecond_ ? 1 : 0][triangle];
+                    if (slot < 0)
+                        return;
+                    int first = endStart[index];
+                    const int last = endStart[index + 1];
+                    while (first < last && endSlot[first] != slot)
+                        ++first;
+                    int count = 0;
+                    while (first + count < last && endSlot[first + count] == slot)
+                        ++count;
+                    keptMaps[mapCount] = slot;
+                    mapEnds[mapCount] = first;
+                    mapEndCount[mapCount++] = count;
                 });
         };
         const auto segmentsConflict = [&](const CsgGridPoint& candidate)
@@ -3093,10 +3255,31 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
                 prepare();
             for (int i = 0; i < mapCount; ++i)
             {
-                if (CachedMapHasConflict(cache.maps_[i], candidate))
+                if (!keepMaps)
+                {
+                    if (CachedMapHasConflict(cache.maps_[i], candidate))
+                        return true;
+                    continue;
+                }
+                const KeptMap& map = kept[keptMaps[i]];
+                if (MapEndsConflict(keptItems.data() + map.start_, keptPoints.data() + map.start_, map.size_ / 2,
+                        endIndex.data() + mapEnds[i], mapEndCount[i], map.dropAxis_, map.flip_, candidate))
                     return true;
             }
             return false;
+        };
+        // The tests write the candidate in the kept maps. Put the current position of the crossing back.
+        const auto restoreMaps = [&]()
+        {
+            if (!keepMaps || !prepared)
+                return;
+            for (int i = 0; i < mapCount; ++i)
+            {
+                const KeptMap& map = kept[keptMaps[i]];
+                const CsgGridPoint2 at = CsgExact::Project(crossing.grid_, map.dropAxis_, map.flip_);
+                for (int e = 0; e < mapEndCount[i]; ++e)
+                    keptPoints[map.start_ + endIndex[mapEnds[i] + e]] = at;
+            }
         };
         // The cheap rules decide for a crossing that is no suspect.
         const bool nearestValid = CrossingInvalidRules(crossing, nearest, scratch, true, false, false) == 0
@@ -3209,6 +3392,7 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
             found = true;
             break;
         }
+        restoreMaps();
         // A found candidate passed segmentsConflict, so no pair at the moved crossing conflicts. No suspect changes.
         static_cast<void>(found);
 #ifdef CSG_DIAGNOSTICS

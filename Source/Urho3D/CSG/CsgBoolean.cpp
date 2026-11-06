@@ -1492,6 +1492,28 @@ SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const 
     return result.Finish();
 }
 
+/// The open position edge counts of an exact pass. The tail of Boolean uses them, so a count does not run twice.
+struct CsgOpenCounts
+{
+    /// The count of the result. Only valid if hasResult_ is set.
+    unsigned result_{};
+    bool hasResult_{};
+    /// The sum of the counts of the operands. Only valid if hasOperands_ is set.
+    unsigned operands_{};
+    bool hasOperands_{};
+
+    /// Return the sum of the counts of the operands. Count them on the first call only.
+    unsigned Operands(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b)
+    {
+        if (!hasOperands_)
+        {
+            operands_ = a->OpenPositionEdgeCount() + b->OpenPositionEdgeCount();
+            hasOperands_ = true;
+        }
+        return operands_;
+    }
+};
+
 /// The exact pass. Call it with the exact decisions. DifferenceAB uses the wanted side rule of ConstrainCrossings
 /// on the fine grid. Then a repeated identical cut does not add triangles. A move of the rule can open a result that
 /// the nearest rounding keeps closed. If the result has more open edges than the operands, the pass runs again with
@@ -1499,18 +1521,23 @@ SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const 
 /// Union and Intersection do not use the rule. In the sweep of rotated boxes, a union with the rule gave a closed
 /// result, but the next union of that result opened in all passes.
 SharedPtr<const CsgSolid> ExactPass(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
-    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel)
+    CsgOperation operation, float epsilon, const CsgParallelOptions& parallel, CsgOpenCounts& counts)
 {
     const bool prefer = CsgPreferWantedSide && operation == CsgOperation::DifferenceAB;
     SharedPtr<const CsgSolid> result = BooleanOnce(a, b, operation, epsilon, parallel, prefer);
     if (!prefer)
         return result;
-    const unsigned open = result->OpenPositionEdgeCount();
-    if (open == 0 || open <= a->OpenPositionEdgeCount() + b->OpenPositionEdgeCount())
+    counts.result_ = result->OpenPositionEdgeCount();
+    counts.hasResult_ = true;
+    if (counts.result_ == 0 || counts.result_ <= counts.Operands(a, b))
         return result;
     CSG_DIAG_COUNT(wantedSideRetries_);
     SharedPtr<const CsgSolid> nearest = BooleanOnce(a, b, operation, epsilon, parallel);
-    return nearest->OpenPositionEdgeCount() < open ? nearest : result;
+    const unsigned nearestOpen = nearest->OpenPositionEdgeCount();
+    if (nearestOpen >= counts.result_)
+        return result;
+    counts.result_ = nearestOpen;
+    return nearest;
 }
 
 } // namespace
@@ -1536,16 +1563,17 @@ SharedPtr<const CsgSolid> Boolean(const SharedPtr<const CsgSolid>& a, const Shar
     // is exact: a thick pass can give a closed result with a wrong volume, and no count detects that.
     // The scope sets the flag explicitly, because a nested boolean on one thread can see the scope of an outer one.
     SharedPtr<const CsgSolid> result;
+    CsgOpenCounts counts;
     {
         const CsgExactOnlyScope exact(true);
-        result = ExactPass(a, b, operation, epsilon, parallel);
+        result = ExactPass(a, b, operation, epsilon, parallel, counts);
     }
     // Rounded near-coincident input can open the exact result. If the result has more open edges than the operands,
     // run again with the thick decisions: elements within the thickness of each other are coincident.
     // Keep the result with fewer open edges. The count is by position, as in the C# code: the exact ids of a result
     // can hide a sheet or a crack.
-    const unsigned open = result->OpenPositionEdgeCount();
-    if (open == 0 || open <= a->OpenPositionEdgeCount() + b->OpenPositionEdgeCount())
+    const unsigned open = counts.hasResult_ ? counts.result_ : result->OpenPositionEdgeCount();
+    if (open == 0 || open <= counts.Operands(a, b))
         return result;
     CSG_DIAG_COUNT(thickRetries_);
     const CsgExactOnlyScope thick(false);
