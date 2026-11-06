@@ -951,29 +951,32 @@ void RunSweep(float step, unsigned maxFailures)
 // the orientation of a closed cycle of segments inside a triangle.
 // The measured count of failed samples is 0 of 1028 in float mode. Without the pass it is 9.
 // A closed result must have the exact volume of the union. The test checks this in all samples.
-// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 1 sample fails (11 without the pass): the axis
-// (1, 1, 1) at 5.9 degrees. The union of A and B is right. In the next boolean three sheets of one operand lie in one
-// grid cell and give a T-junction.
-// The test fails if more samples fail than the measured count plus one, or if a closed result has a wrong volume.
+// With CSG_EXACT_USE_DOUBLE the grid step is 2^-16 units. Then 0 samples fail (11 without the pass).
+// At the axis (1, 1, 1) and 5.9 degrees, three sheets of A + B lie in one grid cell. They cross two edges of one
+// triangle of C at one grid point each. The order of such a run of crossings must match the curve paths, else the
+// split traces a spike and the left union opens. The splitter orders such runs again (OrderCoincidentRuns).
+// The test fails if a closed result has a wrong volume, or if more samples fail than the limit: 0 in double mode,
+// and the measured count plus one in float mode.
 TEST_CASE("Union of boxes with coplanar contact is associative over a sweep of rotations",
     "[boolean][sweep]")
 {
 #if defined(CSG_EXACT_USE_DOUBLE)
-    RunSweep(0.7f, 2);
+    RunSweep(0.7f, 0);
 #else
     RunSweep(0.7f, 1);
 #endif
 }
 
-// Three samples of the sweep must stay exactly closed:
-// the axis (1, 1, 1) at 87.8 degrees for the left union, at 5.2 degrees for the right union, and in double mode
-// at 138.9 degrees for the left union.
+// Four samples of the sweep must stay exactly closed:
+// the axis (1, 1, 1) at 87.8 degrees for the left union, at 5.2 degrees for the right union, at 5.9 degrees for the
+// left union, and in double mode at 138.9 degrees for the left union.
+// Without the order of coincident runs in the splitter, the double build fails the sample at 5.9 degrees.
 // Without the weld of the splitter, the float build fails the test. Without the cluster pass, the double build fails it.
 // The result must have no unmatched directed edge in the exact loops.
 // The result must also have the volume of the union.
 TEST_CASE("Union of boxes with coplanar contact is exactly closed in the samples of the sweep", "[boolean][sweep]")
 {
-    // The index is the step of the sweep of 0.7 degrees from 0.3 degrees: 87.8, 5.2 and 138.9 degrees.
+    // The index is the step of the sweep of 0.7 degrees from 0.3 degrees: 87.8, 5.2, 5.9 and 138.9 degrees.
     struct Sample
     {
         unsigned index_;
@@ -982,6 +985,7 @@ TEST_CASE("Union of boxes with coplanar contact is exactly closed in the samples
     const Sample samples[] = {
         {125, true},
         {7, false},
+        {8, true},
 #if defined(CSG_EXACT_USE_DOUBLE)
         {198, true},
 #endif
@@ -2477,3 +2481,4 @@ TEST_CASE("Boolean plug of a prism into its own hole gives no zero-area or dupli
     CHECK(duplicate == 0);
     CHECK(IsClosed(plug));
 }
+

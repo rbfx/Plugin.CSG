@@ -15,6 +15,7 @@
 #ifdef CSG_CHECK_SUSPECTS
 #include <cstdio>
 #endif
+#include <climits>
 #include <cmath>
 #include <limits>
 
@@ -857,7 +858,10 @@ public:
         for (int node = segments.Head(triangle); node >= 0; node = segments.At(node).next_)
             AddCurve(Weld(segments.At(node).p_), Weld(segments.At(node).q_));
         ChooseProjection(face, triangle);
-        if (!TraceAll())
+        bool traced = TraceAll();
+        if (HasCoincidentRun() && (!traced || !CyclesSimple() || !CyclesConsistent()))
+            traced = OrderCoincidentRuns(segments, traced);
+        if (!traced)
         {
             return false;
         }
@@ -970,6 +974,328 @@ private:
         else if (!(GridOf(slot) == point))
             return id;
         return slot;
+    }
+
+    /// Return true if the chain has two neighbor crossings at one grid point.
+    bool HasCoincidentRun() const
+    {
+        const int count = static_cast<int>(s_.boundary_.size());
+        for (int i = 0; i + 1 < count; ++i)
+        {
+            if (GridOf(s_.boundary_[i]) == GridOf(s_.boundary_[i + 1]) && !IsCorner(s_.boundary_[i])
+                && !IsCorner(s_.boundary_[i + 1]))
+                return true;
+        }
+        return false;
+    }
+
+    /// Return true if the global id is a corner of the triangle of the split.
+    bool IsCorner(int id) const
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            if (core_.Global(mesh_, mesh_.triangleIds_[triangle_ * 3 + i]) == id)
+                return true;
+        }
+        return false;
+    }
+
+    /// Order the crossings of each run of the chain at one grid point. Split calls it only if the first trace fails,
+    /// passes twice through one id, or gives a cycle with curve edges of both directions. So a valid split costs
+    /// nothing.
+    /// Crossings of an edge at one grid point come from sheets of the other operand that lie in one grid cell.
+    /// The chain orders them by the exact parameter on the edge. The sheets are snapped, so they can cross inside
+    /// the cell. Then the order of a run does not match the side of the curve paths. The paths of two runs can
+    /// interleave on the chain, and the trace gives a spike. A patch of the classification then leaks.
+    /// The ids of a run have one grid point, so any order in the run keeps the geometry.
+    /// The pass follows each curve path from a chain id to its other chain id. A path can come back to its own run.
+    /// It counts the pairs of interleaved paths for each order of the runs. It traces the orders with the lowest
+    /// count. A valid order gives consistent cycles: in each cycle, the curve edges all have one direction. The
+    /// snapped sheets can cross, so the consistent order can give a cycle without a positive area. The first
+    /// consistent order with positive cycles on the boundary stays, else the first consistent order. If no order
+    /// is consistent, the first order with the lowest count stays if it is lower than the count of the chain.
+    /// Else the chain keeps its order. Return the result of the last trace.
+    bool OrderCoincidentRuns(const CsgSegmentLists& segments, bool traced)
+    {
+        const int count = static_cast<int>(s_.boundary_.size());
+        // The runs as ranges [first, last] of chain indices. A run has no corner.
+        ea::vector<ea::pair<int, int>> runs;
+        for (int i = 0; i < count;)
+        {
+            int j = i;
+            if (!IsCorner(s_.boundary_[i]))
+            {
+                while (j + 1 < count && !IsCorner(s_.boundary_[j + 1])
+                    && GridOf(s_.boundary_[j + 1]) == GridOf(s_.boundary_[i]))
+                    ++j;
+            }
+            if (j > i)
+                runs.emplace_back(i, j);
+            i = j + 1;
+        }
+        // The undirected curve edges, both directions, sorted by the first id.
+        ea::vector<ea::pair<int, int>> edges;
+        for (int node = segments.Head(triangle_); node >= 0; node = segments.At(node).next_)
+        {
+            const int p = Weld(segments.At(node).p_);
+            const int q = Weld(segments.At(node).q_);
+            if (p == q)
+                continue;
+            edges.emplace_back(p, q);
+            edges.emplace_back(q, p);
+        }
+        ea::sort(edges.begin(), edges.end());
+        edges.erase(ea::unique(edges.begin(), edges.end()), edges.end());
+        const auto position = [&](int id)
+        {
+            for (int i = 0; i < count; ++i)
+            {
+                if (s_.boundary_[i] == id)
+                    return i;
+            }
+            return -1;
+        };
+        const auto runOf = [&](int index)
+        {
+            for (unsigned r = 0; r < runs.size(); ++r)
+            {
+                if (index >= runs[r].first && index <= runs[r].second)
+                    return static_cast<int>(r);
+            }
+            return -1;
+        };
+        // An id that the chain visits twice has no single position. A run then keeps its order.
+        for (int i = 0; i < count; ++i)
+        {
+            for (int j = i + 1; j < count; ++j)
+            {
+                if (s_.boundary_[i] == s_.boundary_[j])
+                    return traced;
+            }
+        }
+        // The paths as pairs of chain ids. A path goes through ids off the chain with two curve edges.
+        ea::vector<ea::pair<int, int>> paths;
+        for (int i = 0; i < count; ++i)
+        {
+            const int start = s_.boundary_[i];
+            const bool inRun = runOf(i) >= 0;
+            const auto first = ea::lower_bound(edges.begin(), edges.end(), ea::make_pair(start, INT_MIN));
+            for (auto it = first; it != edges.end() && it->first == start; ++it)
+            {
+                int previous = start;
+                int current = it->second;
+                int steps = 0;
+                while (position(current) < 0 && steps++ < static_cast<int>(edges.size()))
+                {
+                    const auto next = ea::lower_bound(edges.begin(), edges.end(), ea::make_pair(current, INT_MIN));
+                    if (next == edges.end() || next->first != current || next + 1 == edges.end()
+                        || (next + 1)->first != current || (next + 2 != edges.end() && (next + 2)->first == current))
+                    {
+                        current = -1;
+                        break;
+                    }
+                    const int other = next->second == previous ? (next + 1)->second : next->second;
+                    previous = current;
+                    current = other;
+                }
+                const int end = current >= 0 ? position(current) : -1;
+                // A path from a run must end on the chain. A single segment from a run must not be a chain edge
+                // or join two ids of the run: the new order can change the chain edges.
+                if (end < 0 || (inRun && previous == start
+                    && (runOf(end) == runOf(i) || end == (i + 1) % count || i == (end + 1) % count)))
+                {
+                    if (inRun)
+                        return traced;
+                    continue;
+                }
+                if (i < end)
+                    paths.emplace_back(start, current);
+            }
+        }
+        // The position of each id for an order of the runs. order[r] is a permutation of the run r.
+        ea::vector<ea::vector<int>> order(runs.size());
+        int combinations = 1;
+        for (unsigned r = 0; r < runs.size(); ++r)
+        {
+            for (int k = runs[r].first; k <= runs[r].second; ++k)
+                order[r].push_back(k);
+            for (int k = 2; k <= runs[r].second - runs[r].first + 1; ++k)
+                combinations *= k;
+            if (combinations > 720)
+                return traced;
+        }
+        const ea::vector<ea::vector<int>> identity = order;
+        const ea::vector<int> original(s_.boundary_.begin(), s_.boundary_.end());
+        const auto interleaved = [&]()
+        {
+            int crossings = 0;
+            for (unsigned a = 0; a < paths.size(); ++a)
+            {
+                int pa = position(paths[a].first);
+                int pb = position(paths[a].second);
+                if (pa > pb)
+                    ea::swap(pa, pb);
+                for (unsigned b = a + 1; b < paths.size(); ++b)
+                {
+                    const int pc = position(paths[b].first);
+                    const int pd = position(paths[b].second);
+                    const bool cIn = pc > pa && pc < pb;
+                    const bool dIn = pd > pa && pd < pb;
+                    if (pc != pa && pc != pb && pd != pa && pd != pb && cIn != dIn)
+                        ++crossings;
+                }
+            }
+            return crossings;
+        };
+        const auto apply = [&]()
+        {
+            for (unsigned r = 0; r < runs.size(); ++r)
+            {
+                for (int k = runs[r].first; k <= runs[r].second; ++k)
+                    s_.boundary_[k] = original[order[r][k - runs[r].first]];
+            }
+        };
+        // Step to the next combination of the permutations of the runs, as an odometer.
+        const auto advance = [&]()
+        {
+            for (unsigned r = 0; r < runs.size(); ++r)
+            {
+                if (ea::next_permutation(order[r].begin(), order[r].end()))
+                    break;
+            }
+        };
+        const int originalCount = interleaved();
+        int best = originalCount;
+        for (int c = 1; c < combinations; ++c)
+        {
+            advance();
+            apply();
+            best = ea::min(best, interleaved());
+        }
+        // The orders with the fewest interleaved paths, in the odometer order. The first order whose trace closes
+        // with a positive exact area of each cycle on the boundary stays.
+        constexpr int MaxTraces = 64;
+        int traces = 0;
+        ea::vector<ea::vector<int>> fallback;
+        ea::vector<ea::vector<int>> consistent;
+        order = identity;
+        for (int c = 1; c < combinations && traces < MaxTraces; ++c)
+        {
+            advance();
+            apply();
+            if (interleaved() != best)
+                continue;
+            if (fallback.empty())
+                fallback = order;
+            ++traces;
+            if (!Retrace(segments) || !CyclesConsistent())
+                continue;
+            if (CyclesPositive())
+                return true;
+            if (consistent.empty())
+                consistent = order;
+        }
+        // No order gives consistent and positive cycles. The first consistent order stays. Else an order with
+        // fewer interleaved paths stays, else the original order.
+        if (!consistent.empty())
+            order = consistent;
+        else if (best < originalCount && !fallback.empty())
+            order = fallback;
+        else
+            order = identity;
+        apply();
+        return Retrace(segments);
+    }
+
+    /// Link the chain and add the curve again, then trace again. The weld and the projection stay.
+    bool Retrace(const CsgSegmentLists& segments)
+    {
+        s_.boundaryOut_.Clear();
+        s_.passes_.Clear();
+        s_.boundaryEdges_.Clear();
+        s_.curve_.Clear();
+        s_.curveKeys_.Clear();
+        s_.curveEnds_.clear();
+        s_.visited_.Clear();
+        s_.pool_.Clear();
+        s_.loopAreas_.clear();
+        s_.areaTerms_.clear();
+        s_.cycles_.clear();
+        s_.closedCycles_.clear();
+        failed_ = false;
+        if (!LinkChain())
+            return false;
+        for (int node = segments.Head(triangle_); node >= 0; node = segments.At(node).next_)
+            AddCurve(Weld(segments.At(node).p_), Weld(segments.At(node).q_));
+        return TraceAll();
+    }
+
+    /// Return true if the curve edges of each traced cycle all have the direction of the cycle, or all have the
+    /// other direction. Then the votes of the classification in each cycle have one sign. As in the vote, a curve
+    /// edge shorter than epsilon does not count.
+    bool CyclesConsistent() const
+    {
+        const int curveCount = static_cast<int>(s_.curveEnds_.size());
+        for (const auto* list : {&s_.cycles_, &s_.closedCycles_})
+        {
+            for (const int loop : *list)
+            {
+                const int* ids = s_.pool_.Data(loop);
+                const int count = s_.pool_.Count(loop);
+                int signs = 0;
+                for (int i = 0; i < count; ++i)
+                {
+                    const int u = ids[i];
+                    const int v = ids[(i + 1) % count];
+                    // A curve edge shorter than epsilon has no vote in the classification, so it has no direction.
+                    if ((GridOf(u).ToPosition() - GridOf(v).ToPosition()).Length() < core_.epsilon_)
+                        continue;
+                    for (int k = 0; k < curveCount; k += 2)
+                    {
+                        if (s_.curveEnds_[k] == u && s_.curveEnds_[k + 1] == v)
+                            signs |= 1;
+                        else if (s_.curveEnds_[k] == v && s_.curveEnds_[k + 1] == u)
+                            signs |= 2;
+                    }
+                }
+                if (signs == 3)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    /// Return true if no traced cycle passes twice through one id.
+    bool CyclesSimple() const
+    {
+        for (const auto* list : {&s_.cycles_, &s_.closedCycles_})
+        {
+            for (const int loop : *list)
+            {
+                const int* ids = s_.pool_.Data(loop);
+                const int count = s_.pool_.Count(loop);
+                for (int i = 0; i < count; ++i)
+                {
+                    for (int j = i + 1; j < count; ++j)
+                    {
+                        if (ids[i] == ids[j])
+                            return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Return true if each traced cycle on the boundary has a positive exact area.
+    bool CyclesPositive()
+    {
+        for (const int loop : s_.cycles_)
+        {
+            if (AreaSignOf(s_.pool_.Data(loop), s_.pool_.Count(loop)) <= 0)
+                return false;
+        }
+        return true;
     }
 
     /// Append an id to the boundary chain. The chain has no two equal ids next to each other.
