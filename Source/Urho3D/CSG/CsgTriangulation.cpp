@@ -533,23 +533,43 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float
     if (faceCount == 0)
         return result;
 
-    // Faces of one group in face order, groups in ascending order of the shared key.
-    ea::vector<ea::pair<unsigned, unsigned>> order;
+    // Faces of one group in face order, groups in ascending order of the component, then the shared key.
+    struct FaceOrder
+    {
+        unsigned component_;
+        unsigned shared_;
+        unsigned face_;
+
+        bool operator<(const FaceOrder& other) const
+        {
+            if (component_ != other.component_)
+                return component_ < other.component_;
+            if (shared_ != other.shared_)
+                return shared_ < other.shared_;
+            return face_ < other.face_;
+        }
+    };
+
+    const auto components = solid.GetFaceComponents();
+    ea::vector<FaceOrder> order;
     order.reserve(faceCount);
     for (unsigned i = 0; i < faceCount; ++i)
-        order.emplace_back(solid.GetFace(i)->shared_, i);
+        order.push_back({i < components.size() ? components[i] : 0u, solid.GetFace(i)->shared_, i});
     ea::sort(order.begin(), order.end());
 
     const unsigned keySpace = solid.VertexKeySpace();
     ea::vector<unsigned> members;
     for (unsigned begin = 0; begin < faceCount;)
     {
-        const unsigned sharedKey = order[begin].first;
+        const unsigned component = order[begin].component_;
+        const unsigned sharedKey = order[begin].shared_;
         members.clear();
-        for (; begin < faceCount && order[begin].first == sharedKey; ++begin)
-            members.push_back(order[begin].second);
+        for (; begin < faceCount && order[begin].component_ == component && order[begin].shared_ == sharedKey;
+             ++begin)
+            members.push_back(order[begin].face_);
 
         CsgTriangulatedModel::Geometry geometry;
+        geometry.component_ = component;
         geometry.shared_ = sharedKey;
 
         if (!TriangulateGeometryImpl(

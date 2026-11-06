@@ -290,13 +290,15 @@ SharedPtr<const CsgSolid> CsgBooleanOperation(
 
 SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& triangulated,
     ea::span<const Model* const> sourceModels, ea::span<const ResourceRefList* const> sourceMaterials,
-    ResourceRefList* outMaterials)
+    ResourceRefList* outMaterials, ea::vector<unsigned>* outComponents)
 {
     if (outMaterials)
     {
         outMaterials->type_ = Material::GetTypeStatic();
         outMaterials->names_.clear();
     }
+    if (outComponents)
+        outComponents->clear();
 
     if (triangulated.geometries_.empty() || !triangulated.hasAnyVertex_)
         return MakeShared<Model>(context);
@@ -310,6 +312,8 @@ SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& tri
 
     if (outMaterials)
         outMaterials->names_.reserve(triangulated.geometries_.size());
+    if (outComponents)
+        outComponents->reserve(triangulated.geometries_.size());
 
     for (const auto& src : triangulated.geometries_)
     {
@@ -355,6 +359,8 @@ SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& tri
             else
                 outMaterials->names_.push_back(ea::string{});
         }
+        if (outComponents)
+            outComponents->push_back(src.component_);
     }
 
     if (modelGeometries.empty())

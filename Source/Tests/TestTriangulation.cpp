@@ -610,10 +610,105 @@ TEST_CASE("Triangulated union of boxes has no hole and no inverted triangle", "[
     CHECK(model->boundingBox_.min_.x_ == Catch::Approx(-1.0f));
     CHECK(model->boundingBox_.max_.x_ == Catch::Approx(2.0f));
 
-    // One geometry for each shared key, in ascending order.
+    // One geometry for each shared key, in ascending order. The union is one component.
     REQUIRE(model->geometries_.size() == 2);
+    CHECK(model->geometries_[0].component_ == 0);
     CHECK(model->geometries_[0].shared_ == 1);
+    CHECK(model->geometries_[1].component_ == 0);
     CHECK(model->geometries_[1].shared_ == 2);
+}
+
+namespace
+{
+
+/// Cut the box of half size 1 with a wide flat box. The result has two components, each of volume 3.6.
+/// The cut faces come from the cutter, so the cutter has the shared keys of the box.
+SolidPtr CutBoxInTwo(ea::vector<CsgPolygon> boxPolygons, ea::vector<CsgPolygon> cutterPolygons)
+{
+    const SolidPtr cube(CsgSolid::FromOperand(ea::move(boxPolygons)));
+    const SolidPtr cutter(CsgSolid::FromOperand(ea::move(cutterPolygons)));
+    return Boolean(cube, cutter, CsgOperation::DifferenceAB, CSG_DEFAULT_EPSILON);
+}
+
+/// Copy the geometries that pass the filter to a new model.
+template <class Filter>
+SharedPtr<CsgTriangulatedModel> CopyGeometries(const CsgTriangulatedModel& model, Filter filter)
+{
+    auto result = MakeShared<CsgTriangulatedModel>();
+    for (const CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+    {
+        if (filter(geometry))
+            result->geometries_.push_back(geometry);
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("Triangulate a solid gives one geometry for each component", "[triangulate][solid]")
+{
+    const SolidPtr result = CutBoxInTwo(MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 5),
+        MakeBoxPolygons(Vector3::ZERO, Vector3(2.0f, 0.1f, 2.0f), 5));
+    REQUIRE(result->ComponentCount() == 2);
+
+    const SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*result);
+    REQUIRE(model);
+    REQUIRE(model->geometries_.size() == 2);
+    CHECK(model->geometries_[0].component_ == 0);
+    CHECK(model->geometries_[1].component_ == 1);
+    CHECK(model->geometries_[0].shared_ == model->geometries_[1].shared_);
+
+    // Each geometry alone is one closed shape of the volume 2 * 0.9 * 2.
+    for (const CsgTriangulatedModel::Geometry& geometry : model->geometries_)
+    {
+        const SharedPtr<CsgTriangulatedModel> single =
+            CopyGeometries(*model, [&](const CsgTriangulatedModel::Geometry& g) { return &g == &geometry; });
+        const CsgModelCheck check = CsgCheckModel(*single);
+        CHECK(check.openEdges_ == 0);
+        CHECK(check.volume_ == Catch::Approx(3.6).margin(2e-3));
+    }
+}
+
+TEST_CASE("Triangulate a solid with two shared keys groups by component first", "[triangulate][solid]")
+{
+    // The side faces have the key 1. The top and bottom faces have the key 2.
+    const auto setKeys = [](ea::vector<CsgPolygon> polygons)
+    {
+        for (CsgPolygon& polygon : polygons)
+            polygon.shared_ = std::fabs(polygon.plane_.normal_.y_) > 0.5f ? 2 : 1;
+        return polygons;
+    };
+
+    const SolidPtr result = CutBoxInTwo(setKeys(MakeBoxPolygons(Vector3::ZERO, Vector3::ONE, 1)),
+        setKeys(MakeBoxPolygons(Vector3::ZERO, Vector3(2.0f, 0.1f, 2.0f), 1)));
+    REQUIRE(result->ComponentCount() == 2);
+
+    const SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*result);
+    REQUIRE(model);
+    REQUIRE(model->geometries_.size() == 4);
+    const std::pair<unsigned, unsigned> expected[] = {{0, 1}, {0, 2}, {1, 1}, {1, 2}};
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CAPTURE(i);
+        CHECK(model->geometries_[i].component_ == expected[i].first);
+        CHECK(model->geometries_[i].shared_ == expected[i].second);
+    }
+
+    // The geometries of one component together form the closed shape.
+    for (unsigned component = 0; component < 2; ++component)
+    {
+        const SharedPtr<CsgTriangulatedModel> shape = CopyGeometries(
+            *model, [&](const CsgTriangulatedModel::Geometry& g) { return g.component_ == component; });
+        REQUIRE(shape->geometries_.size() == 2);
+        const CsgModelCheck check = CsgCheckModel(*shape);
+        CHECK(check.openEdges_ == 0);
+        CHECK(check.volume_ == Catch::Approx(3.6).margin(2e-3));
+    }
+
+    // The geometry of one key alone is not closed. The component gives the full shape, not the material.
+    const SharedPtr<CsgTriangulatedModel> sides = CopyGeometries(
+        *model, [](const CsgTriangulatedModel::Geometry& g) { return g.component_ == 0 && g.shared_ == 1; });
+    CHECK(CsgCheckModel(*sides).openEdges_ > 0);
 }
 
 TEST_CASE("Triangulate a solid shares the vertices of the corners", "[triangulate][solid]")

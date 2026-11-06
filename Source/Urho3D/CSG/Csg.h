@@ -78,12 +78,15 @@ PLUGIN_RBFXCSG_API SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(
 /// `sourceModels` index corresponds to `sourceMeshId` decoded from `CsgPolygon::shared_`.
 /// `sourceMaterials` index corresponds to `sourceMeshId`, and resource list index corresponds
 /// to `sourceGeometryIndex` decoded from `CsgPolygon::shared_`.
+///
+/// If `outComponents` is not null, entry i is the component of model geometry i.
 PLUGIN_RBFXCSG_API SharedPtr<Model> CsgBuildModel(
     Context* context,
     const CsgTriangulatedModel& triangulated,
     ea::span<const Model* const> sourceModels,
     ea::span<const ResourceRefList* const> sourceMaterials,
-    ResourceRefList* outMaterials = nullptr);
+    ResourceRefList* outMaterials = nullptr,
+    ea::vector<unsigned>* outComponents = nullptr);
 
 /// Register CSG library objects.
 void PLUGIN_RBFXCSG_API RegisterCsgLibrary(Context* context);

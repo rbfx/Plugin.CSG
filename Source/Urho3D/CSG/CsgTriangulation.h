@@ -30,6 +30,10 @@ public:
 		/// Used on the main thread to resolve the shared output vertex layout and material.
 		unsigned shared_{};
 
+		/// The component of the solid (see `CsgSolid::GetFaceComponents`). The geometries of one component form
+		/// one connected closed shape.
+		unsigned component_{};
+
 		/// Triangulated vertex stream in unpacked `ModelVertex` format.
 		ea::vector<ModelVertex> vertices_;
 		ea::vector<unsigned> indexData_;
