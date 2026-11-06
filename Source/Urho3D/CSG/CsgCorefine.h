@@ -836,6 +836,10 @@ bool CsgContainsGridPoint(const CsgSolid& solid, const CsgGridPoint& p);
 /// if the solid is the second operand and the point is in the first, or 0b1000 for the reverse.
 bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, int second);
 
+/// Whether a grid point lies within the thickness of the plane of a triangle of a solid. The test is the thick surface
+/// test of ClassifyComponent, with the query margin from the largest face extent of the solid.
+bool CsgInThickSurfaceForTest(const CsgSolid& other, const CsgGridPoint& p);
+
 /// Whether the centroid (a + b + c) / 3 of a grid triangle is inside a solid. The mask second is as in
 /// CsgClassifyGridPointForTest. The three points are in the same operand.
 bool CsgClassifyGridCentroidForTest(

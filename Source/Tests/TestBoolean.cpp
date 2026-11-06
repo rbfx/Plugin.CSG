@@ -1617,6 +1617,32 @@ TEST_CASE("ClassifyGridPoint of the vertices of boxes that share a face", "[bool
     }
 }
 
+#if defined(CSG_EXACT_USE_DOUBLE)
+TEST_CASE("The thick surface test finds a point near the plane of a very wide face", "[boolean][classify]")
+{
+    // The top face of the box has the plane z = 0 and the half size 1000. In double mode, the grid step is 2^-16.
+    // The extent of the face is about 6.5e7 steps, so FlatPlane has the thickness of about 15.6 steps.
+    // The query margin of a point near the origin alone is only 8 steps. The test uses 12 steps.
+    const CsgSolid box(MakeBoxPolygons(Vector3(0.0f, 0.0f, -1000.0f), Vector3(1000.0f, 1000.0f, 1000.0f), 1));
+    // The thick mode is the only mode where FlatPlane can be true.
+    const CsgExactOnlyScope thick(false);
+    CsgGridPoint p;
+    p.x_ = 100;
+    p.y_ = -50;
+    for (const int steps : {1, 8, 12, 15})
+    {
+        p.z_ = steps;
+        CAPTURE(steps);
+        CHECK(CsgInThickSurfaceForTest(box, p));
+    }
+    // A point clear of the thickness is not near the plane.
+    p.z_ = 64;
+    CHECK_FALSE(CsgInThickSurfaceForTest(box, p));
+    p.z_ = -12;
+    CHECK(CsgInThickSurfaceForTest(box, p));
+}
+#endif
+
 TEST_CASE("ClassifyGridCentroid of triangles around a box", "[boolean][classify]")
 {
     const Vector3 half(1.0f, 1.0f, 1.0f);

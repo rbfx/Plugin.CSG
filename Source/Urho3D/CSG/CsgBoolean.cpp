@@ -394,19 +394,32 @@ enum class ComponentSide
     None
 };
 
+/// The largest face extent of a mesh. See Mesh::faceExtent_.
+double MaxFaceExtent(const Mesh& mesh)
+{
+    double result = 0.0;
+    for (const double extent : mesh.faceExtent_)
+        result = ea::max(result, extent);
+    return result;
+}
+
 /// Tell if a grid point lies within the thickness of the plane of a triangle of a mesh near the point.
 /// Only the thick mode uses it: in the exact mode, FlatPlane is always false.
 /// The test is conservative. It uses the plane of each triangle with a face box near the point.
-bool InThickSurface(const Mesh& other, const CsgGridPoint& p, ea::vector<int>& components, ea::vector<int>& faces)
+/// The maxFaceExtent is the largest face extent of the other mesh. The query margin uses it, as PlaneThickness does.
+/// The components, faces and stack are scratch vectors that the caller reuses between queries.
+bool InThickSurface(const Mesh& other, const CsgGridPoint& p, double maxFaceExtent, ea::vector<int>& components,
+    ea::vector<int>& faces, ea::vector<int>& stack)
 {
     const CsgSolid& solid = other.solid_;
     const Vector3 position = p.ToPosition();
-    const float margin = static_cast<float>(4.0 * CsgExact::Thickness(CsgExact::Extent(p)) / CsgGridScale);
+    const float margin = static_cast<float>(
+        4.0 * CsgExact::Thickness(ea::max(CsgExact::Extent(p), maxFaceExtent)) / CsgGridScale);
     const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
-    solid.GetComponentTree().CollectBox(position, position, margin, components);
+    solid.GetComponentTree().CollectBox(position, position, margin, components, stack);
     for (const int component : components)
     {
-        solid.GetFaceTree(static_cast<unsigned>(component)).CollectBox(position, position, margin, faces);
+        solid.GetFaceTree(static_cast<unsigned>(component)).CollectBox(position, position, margin, faces, stack);
         for (const int face : faces)
         {
             for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
@@ -439,6 +452,9 @@ ComponentSide ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsi
     int chosen = -1;
     ea::vector<int> components;
     ea::vector<int> faces;
+    ea::vector<int> stack;
+    stack.reserve(64);
+    const double maxFaceExtent = MaxFaceExtent(other);
     for (unsigned i = componentStart[component]; i < componentStart[component + 1] && chosen < 0; ++i)
     {
         const unsigned face = componentFaces[i];
@@ -453,7 +469,7 @@ ComponentSide ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsi
         for (int k = 0; k < length && chosen < 0; ++k)
         {
             const int id = mesh.loops_.vertexIds_[start + k];
-            if (!InThickSurface(other, mesh.grid_[id], components, faces))
+            if (!InThickSurface(other, mesh.grid_[id], maxFaceExtent, components, faces, stack))
                 chosen = id;
         }
     }
@@ -1660,6 +1676,15 @@ bool CsgClassifyGridPointForTest(const CsgSolid& other, const CsgGridPoint& p, i
 {
     const Mesh mesh(other, second == 0b0111, 0);
     return ClassifyGridPoint(mesh, p, second);
+}
+
+bool CsgInThickSurfaceForTest(const CsgSolid& other, const CsgGridPoint& p)
+{
+    const Mesh mesh(other, false, 0);
+    ea::vector<int> components;
+    ea::vector<int> faces;
+    ea::vector<int> stack;
+    return InThickSurface(mesh, p, MaxFaceExtent(mesh), components, faces, stack);
 }
 
 bool CsgClassifyGridCentroidForTest(
