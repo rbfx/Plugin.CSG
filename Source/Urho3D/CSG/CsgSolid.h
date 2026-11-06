@@ -209,6 +209,9 @@ public:
     /// Return the signed volume of the solid: the sum of a . (b x c) / 6 over its triangles.
     /// The sum uses double precision. A closed solid with outward faces has a positive volume.
     double Volume() const;
+    /// Return the signed volume of a component: the sum of a . (b x c) / 6 over the triangles of its faces.
+    /// A shell with outward faces has a positive volume. A cavity has a negative volume.
+    double ComponentVolume(unsigned component) const;
     /// Return the total length of the open edges.
     float OpenEdgeLength() const;
     /// Return true if the point is inside the solid. The solid must be closed.
@@ -220,6 +223,21 @@ public:
     /// Build a solid from polygons with FromOperand or with the polygon constructor. Both repair the faces.
     /// A solid that is not closed can have a crack of one grid step. A ray through the crack gives a wrong parity.
     bool ContainsPoint(const Vector3& point) const;
+
+    /// Return a solid of the listed components of the source, in the given order.
+    /// The function copies faces, triangles, exact ids and grid points. It does not snap or change any position.
+    /// The result keeps the closed flag and the out of range flag of the source.
+    static SharedPtr<CsgSolid> FromComponents(const CsgSolid& source, ea::span<const unsigned> components);
+
+    /// Return the solid without the shells that are small, and without the cavities inside them.
+    ///
+    /// A shell is a component with a positive volume. It is kept if its volume is at least the fraction of the
+    /// largest shell volume. A cavity is a component with a negative volume. It is kept if a point of it is inside
+    /// the kept shells. The function returns the same solid if the fraction is zero or less, if the solid is not
+    /// closed, if it has one component or less, if it has no shell, or if it drops nothing.
+    /// The count of the dropped components goes to droppedCount if it is not null.
+    static SharedPtr<const CsgSolid> DropSmallComponents(
+        const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);
 
     /// Return a copy of the face with the winding, the normals and the plane reversed.
     static CsgSharedPolygon Flipped(const CsgPolygon& face);

@@ -1684,3 +1684,103 @@ TEST_CASE("Builder region keeps a closed group that has volume", "[solid][kept][
     CHECK(solid->ComponentCount() == 1);
     CHECK(solid->Volume() == Catch::Approx(1.0 / 6.0));
 }
+
+namespace
+{
+
+ea::vector<CsgPolygon> MakeFlippedBox(const Vector3& center, float half)
+{
+    ea::vector<CsgPolygon> polygons = MakeBoxPolygons(center, Vector3::ONE * half, 1);
+    for (CsgPolygon& polygon : polygons)
+        polygon = *CsgSolid::Flipped(polygon);
+    return polygons;
+}
+
+} // namespace
+
+TEST_CASE("Component volume sums to the solid volume", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1);
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 0.1f, 1));
+    const CsgSolid solid(polygons);
+
+    REQUIRE(solid.ComponentCount() == 2);
+    CHECK(solid.ComponentVolume(0) == Catch::Approx(1.0).epsilon(1e-4));
+    CHECK(solid.ComponentVolume(1) == Catch::Approx(0.008).epsilon(0.05));
+    CHECK(solid.ComponentVolume(0) + solid.ComponentVolume(1) == Catch::Approx(solid.Volume()));
+}
+
+TEST_CASE("Solid from components keeps the exact grid points", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1);
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 0.1f, 1));
+    const CsgSolid solid(polygons);
+
+    const unsigned components[] = {0};
+    const auto part = CsgSolid::FromComponents(solid, components);
+    REQUIRE(part->ComponentCount() == 1);
+    CHECK(part->IsClosed());
+    CHECK(part->Volume() == Catch::Approx(1.0).epsilon(1e-4));
+    REQUIRE(part->FaceCount() == 6);
+
+    const CsgExactLoops source = solid.GetExactLoops();
+    const CsgExactLoops copy = part->GetExactLoops();
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        const unsigned count = source.vertexStart_[face + 1] - source.vertexStart_[face];
+        REQUIRE(copy.vertexStart_[face + 1] - copy.vertexStart_[face] == count);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const CsgGridPoint& a = source.grid_[source.ids_[source.vertexStart_[face] + i]];
+            const CsgGridPoint& b = copy.grid_[copy.ids_[copy.vertexStart_[face] + i]];
+            CHECK(a.ToPosition() == b.ToPosition());
+        }
+    }
+}
+
+TEST_CASE("Drop small components removes a small shell", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1);
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 0.1f, 1));
+    const SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+
+    unsigned dropped = 99;
+    const auto result = CsgSolid::DropSmallComponents(solid, 0.5, &dropped);
+    CHECK(dropped == 1);
+    CHECK(result->ComponentCount() == 1);
+    CHECK(result->Volume() == Catch::Approx(1.0).epsilon(1e-4));
+
+    dropped = 99;
+    CHECK(CsgSolid::DropSmallComponents(solid, 0.0, &dropped) == solid);
+    CHECK(dropped == 0);
+}
+
+TEST_CASE("Drop small components keeps the cavity of a kept shell", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 2.0f, 1);
+    Append(polygons, MakeFlippedBox(Vector3::ZERO, 0.5f));
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 0.5f, 1));
+    Append(polygons, MakeFlippedBox(Vector3(10.0f, 0.0f, 0.0f), 0.1f));
+    const SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    REQUIRE(solid->ComponentCount() == 4);
+
+    unsigned dropped = 0;
+    const auto result = CsgSolid::DropSmallComponents(solid, 1.0, &dropped);
+    CHECK(dropped == 2);
+    REQUIRE(result->ComponentCount() == 2);
+    CHECK(result->Volume() == Catch::Approx(64.0 - 1.0).epsilon(1e-4));
+    CHECK(result->IsClosed());
+}
+
+TEST_CASE("Drop small components returns an open solid unchanged", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1);
+    polygons.pop_back();
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 0.1f, 1));
+    const SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    REQUIRE_FALSE(solid->IsClosed());
+
+    unsigned dropped = 99;
+    CHECK(CsgSolid::DropSmallComponents(solid, 0.5, &dropped) == solid);
+    CHECK(dropped == 0);
+}

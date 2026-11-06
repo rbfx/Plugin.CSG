@@ -2363,6 +2363,104 @@ double CsgSolid::Volume() const
     return sum;
 }
 
+double CsgSolid::ComponentVolume(unsigned component) const
+{
+    double sum = 0.0;
+    for (unsigned i = componentStart_[component]; i < componentStart_[component + 1]; ++i)
+    {
+        const unsigned face = componentFaces_[i];
+        for (unsigned t = triangleStart_[face]; t < triangleStart_[face + 1]; ++t)
+        {
+            const Vector3& a = trianglePositions_[t * 3];
+            const Vector3& b = trianglePositions_[t * 3 + 1];
+            const Vector3& c = trianglePositions_[t * 3 + 2];
+            sum += (static_cast<double>(a.x_) * (static_cast<double>(b.y_) * c.z_ - static_cast<double>(b.z_) * c.y_)
+                       + static_cast<double>(a.y_) * (static_cast<double>(b.z_) * c.x_ - static_cast<double>(b.x_) * c.z_)
+                       + static_cast<double>(a.z_) * (static_cast<double>(b.x_) * c.y_ - static_cast<double>(b.y_) * c.x_))
+                / 6.0;
+        }
+    }
+    return sum;
+}
+
+SharedPtr<CsgSolid> CsgSolid::FromComponents(const CsgSolid& source, ea::span<const unsigned> components)
+{
+    unsigned faceCount = 0;
+    unsigned cornerCount = 0;
+    for (const unsigned component : components)
+    {
+        for (unsigned i = source.componentStart_[component]; i < source.componentStart_[component + 1]; ++i)
+        {
+            ++faceCount;
+            cornerCount += source.faces_[source.componentFaces_[i]]->vertices_.size();
+        }
+    }
+    Builder builder(faceCount, cornerCount, source.epsilon_);
+    for (const unsigned component : components)
+        builder.AppendComponent(source, component, false);
+    builder.closed_ = source.IsClosed();
+    builder.outOfRange_ = source.IsOutOfRange();
+    return builder.Finish();
+}
+
+SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
+    const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount)
+{
+    if (droppedCount)
+        *droppedCount = 0;
+    if (!solid || minVolumeFraction <= 0.0 || !solid->IsClosed() || solid->ComponentCount() <= 1)
+        return solid;
+
+    const unsigned count = solid->ComponentCount();
+    ea::vector<double> volumes(count);
+    double largest = 0.0;
+    bool hasNegative = false;
+    for (unsigned c = 0; c < count; ++c)
+    {
+        volumes[c] = solid->ComponentVolume(c);
+        largest = ea::max(largest, volumes[c]);
+        hasNegative = hasNegative || volumes[c] < 0.0;
+    }
+    // Without a shell, nothing can tell the small parts from the large ones.
+    if (largest <= 0.0)
+        return solid;
+
+    ea::vector<unsigned> shellList;
+    for (unsigned c = 0; c < count; ++c)
+    {
+        if (volumes[c] > 0.0 && volumes[c] >= minVolumeFraction * largest)
+            shellList.push_back(c);
+    }
+    unsigned positiveCount = 0;
+    for (const double volume : volumes)
+        positiveCount += volume > 0.0 ? 1 : 0;
+    if (shellList.size() == positiveCount && !hasNegative)
+        return solid;
+
+    const SharedPtr<CsgSolid> shells = FromComponents(*solid, {shellList.data(), shellList.size()});
+    ea::vector<unsigned> keptList;
+    for (unsigned c = 0; c < count; ++c)
+    {
+        if (volumes[c] > 0.0)
+        {
+            if (ea::binary_search(shellList.begin(), shellList.end(), c))
+                keptList.push_back(c);
+        }
+        else if (volumes[c] < 0.0)
+        {
+            const unsigned face = solid->componentFaces_[solid->componentStart_[c]];
+            const Vector3 point = solid->faces_[face]->vertices_[0].GetPosition();
+            if (shells->ContainsPoint(point))
+                keptList.push_back(c);
+        }
+    }
+    if (keptList.size() == count)
+        return solid;
+    if (droppedCount)
+        *droppedCount = count - keptList.size();
+    return FromComponents(*solid, {keptList.data(), keptList.size()});
+}
+
 float CsgSolid::OpenEdgeLength() const
 {
     double total = 0.0;
