@@ -162,12 +162,16 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
     bool strictNeedles = false;
     // Exact positions give an orientation with a rounding error far below this bound.
     const double invertedTurn = -extent * extent * 1e-12;
-    const auto countInverted = [&]()
+    // The sum of the turns of the inverted triangles. It is zero for a result without an inverted triangle.
+    const auto invertedSum = [&]()
     {
-        unsigned inverted = 0;
+        double sum = 0.0;
         for (unsigned t = 0; t + 2 < outIndices.size(); t += 3)
-            inverted += orient(outIndices[t], outIndices[t + 1], outIndices[t + 2]) < invertedTurn ? 1 : 0;
-        return inverted;
+        {
+            const double turn = orient(outIndices[t], outIndices[t + 1], outIndices[t + 2]);
+            sum += turn < invertedTurn ? turn : 0.0;
+        }
+        return sum;
     };
 
     // Return true if a vertex lies strictly inside the triangle. A short edge does not make the triangle a
@@ -196,6 +200,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
     bool firstClean = true;
     for (;;)
     {
+        bool clippedNeedle = false;
         ring.resize(numVertices);
         for (unsigned i = 0; i < numVertices; ++i)
             ring[i] = i;
@@ -230,6 +235,7 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
                         && (!strictNeedles || !containsStrictly(a, b, c)))
                     {
                         clip = static_cast<int>(i);
+                        clippedNeedle = true;
                         break;
                     }
                     // Distance of b from the chord a-c is twice the ear's area over the chord length.
@@ -284,8 +290,9 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
                         const unsigned c = ring[(i + 1) % count];
                         const double back = (xs[b] - xs[a]) * (xs[c] - xs[b]) + (ys[b] - ys[a]) * (ys[c] - ys[b]);
                         const double height = std::abs(orient(a, b, c)) / ea::max(length(a, b), length(b, c));
-                        if (back < 0.0 && height <= extent * CsgStraightDistance && height < flattest
-                            && !containsStrictly(a, b, c))
+                        // Only a convex tip is clipped: a reflex vertex is an inward notch, not a spike.
+                        if (back < 0.0 && orient(a, b, c) >= 0.0 && height <= extent * CsgStraightDistance
+                            && height < flattest && !containsStrictly(a, b, c))
                         {
                             flattest = height;
                             clip = static_cast<int>(i);
@@ -306,16 +313,18 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         outIndices.push_back(ring[2]);
         if (strictNeedles)
         {
-            // Keep the first result unless the second one has fewer inverted triangles.
-            const unsigned inverted = countInverted();
+            // Keep the first result unless the second one has a smaller inverted area. A tie keeps the first result.
+            // The sums are not positive, so a larger sum is a smaller inverted area.
+            const double second = invertedSum();
             outIndices.swap(firstIndices);
-            if (inverted < countInverted())
+            if (second > invertedSum())
                 outIndices.swap(firstIndices);
             else
                 clean = firstClean;
             break;
         }
-        if (countInverted() == 0)
+        // Without a needle clip the second pass equals the first pass.
+        if (!clippedNeedle || invertedSum() == 0.0)
             break;
         firstIndices = outIndices;
         firstClean = clean;
