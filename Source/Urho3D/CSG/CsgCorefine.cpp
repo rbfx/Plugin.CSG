@@ -1101,8 +1101,7 @@ private:
                 const int end = current >= 0 ? position(current) : -1;
                 // A path from a run must end on the chain. A single segment from a run must not be a chain edge
                 // or join two ids of the run: the new order can change the chain edges.
-                if (end < 0 || (inRun && previous == start
-                    && (runOf(end) == runOf(i) || end == (i + 1) % count || i == (end + 1) % count)))
+                if (end < 0 || (inRun && previous == start && SegmentMayChange(runs, runOf(i), runOf(end), i, end, count)))
                 {
                     if (inRun)
                         return traced;
@@ -1120,9 +1119,11 @@ private:
             for (int k = runs[r].first; k <= runs[r].second; ++k)
                 order[r].push_back(k);
             for (int k = 2; k <= runs[r].second - runs[r].first + 1; ++k)
+            {
                 combinations *= k;
-            if (combinations > 720)
-                return traced;
+                if (combinations > 720)
+                    return traced;
+            }
         }
         const ea::vector<ea::vector<int>> identity = order;
         const ea::vector<int> original(s_.boundary_.begin(), s_.boundary_.end());
@@ -1204,7 +1205,35 @@ private:
         else
             order = identity;
         apply();
+        const bool closed = Retrace(segments);
+        if (closed || !traced || order == identity)
+            return closed;
+        // The fallback order breaks a trace that closed. The original order gives the first trace again.
+        order = identity;
+        apply();
         return Retrace(segments);
+    }
+
+    /// Return true if a new order of the runs can change the single curve segment from chain index i to chain
+    /// index end. This is the case if both ids are in one run, or if the run of i can move one id next to the
+    /// other id. The ids next to the run and the ids of an adjacent run can become chain edges.
+    static bool SegmentMayChange(
+        const ea::vector<ea::pair<int, int>>& runs, int runI, int runEnd, int i, int end, int count)
+    {
+        if (runEnd == runI || end == (i + 1) % count || i == (end + 1) % count)
+            return true;
+        const int before = (runs[runI].first + count - 1) % count;
+        const int after = (runs[runI].second + 1) % count;
+        if (end == before || end == after)
+            return true;
+        if (runEnd >= 0)
+        {
+            const int endBefore = (runs[runEnd].first + count - 1) % count;
+            const int endAfter = (runs[runEnd].second + 1) % count;
+            if (endAfter == runs[runI].first || endBefore == runs[runI].second)
+                return true;
+        }
+        return false;
     }
 
     /// Link the chain and add the curve again, then trace again. The weld and the projection stay.
