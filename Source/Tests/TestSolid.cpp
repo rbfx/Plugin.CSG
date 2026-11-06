@@ -1772,6 +1772,79 @@ TEST_CASE("Drop small components keeps the cavity of a kept shell", "[solid]")
     CHECK(result->IsClosed());
 }
 
+namespace
+{
+
+/// A shell A with a cavity B. A small hollow shell C with a cavity D floats in B.
+SharedPtr<const CsgSolid> MakeNestedHollowSolid()
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 4.0f, 1);
+    Append(polygons, MakeFlippedBox(Vector3::ZERO, 2.0f));
+    Append(polygons, MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1));
+    Append(polygons, MakeFlippedBox(Vector3::ZERO, 0.25f));
+    return CsgSolid::FromOperand(ea::move(polygons));
+}
+
+} // namespace
+
+TEST_CASE("Drop small components drops the cavity of a dropped nested shell", "[solid]")
+{
+    const SharedPtr<const CsgSolid> solid = MakeNestedHollowSolid();
+    REQUIRE(solid->ComponentCount() == 4);
+
+    // A and B stay. C and D go. D must not stay as an orphan cavity.
+    unsigned dropped = 0;
+    const auto result = CsgSolid::DropSmallComponents(solid, 1.0, &dropped);
+    CHECK(dropped == 2);
+    REQUIRE(result->ComponentCount() == 2);
+    CHECK(result->Volume() == Catch::Approx(512.0 - 64.0).epsilon(1e-4));
+    CHECK(result->IsClosed());
+}
+
+TEST_CASE("Drop small components returns the same solid for nested shells that stay", "[solid]")
+{
+    const SharedPtr<const CsgSolid> solid = MakeNestedHollowSolid();
+    REQUIRE(solid->ComponentCount() == 4);
+
+    // C is small but the fraction keeps it. No shell drops, so the result is the same solid.
+    unsigned dropped = 99;
+    CHECK(CsgSolid::DropSmallComponents(solid, 0.0001, &dropped) == solid);
+    CHECK(dropped == 0);
+}
+
+TEST_CASE("Drop small components keeps a cavity if only a small shell goes", "[solid]")
+{
+    // A has the cavity B. The small solid shell E and the small hollow shell C float in B.
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 4.0f, 1);
+    Append(polygons, MakeFlippedBox(Vector3::ZERO, 2.0f));
+    Append(polygons, MakeBoxPolygons(Vector3(-1.0f, 0.0f, 0.0f), Vector3::ONE * 0.1f, 1));
+    Append(polygons, MakeBoxPolygons(Vector3(1.0f, 0.0f, 0.0f), Vector3::ONE * 0.5f, 1));
+    Append(polygons, MakeFlippedBox(Vector3(1.0f, 0.0f, 0.0f), 0.25f));
+    const SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    REQUIRE(solid->ComponentCount() == 5);
+
+    // E has the volume 0.008 and C has the volume 1. The fraction 0.001 of the volume 512 drops E only.
+    // B stays in A. D stays in C, so C stays hollow.
+    unsigned dropped = 0;
+    const auto result = CsgSolid::DropSmallComponents(solid, 0.001, &dropped);
+    CHECK(dropped == 1);
+    REQUIRE(result->ComponentCount() == 4);
+    CHECK(result->Volume() == Catch::Approx(512.0 - 64.0 + 1.0 - 0.125).epsilon(1e-4));
+}
+
+TEST_CASE("Drop small components returns the same solid if no shell drops", "[solid]")
+{
+    auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 2.0f, 1);
+    Append(polygons, MakeFlippedBox(Vector3::ZERO, 0.5f));
+    Append(polygons, MakeBoxPolygons(Vector3(10.0f, 0.0f, 0.0f), Vector3::ONE * 1.5f, 1));
+    const SharedPtr<const CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    REQUIRE(solid->ComponentCount() == 3);
+
+    unsigned dropped = 99;
+    CHECK(CsgSolid::DropSmallComponents(solid, 0.4, &dropped) == solid);
+    CHECK(dropped == 0);
+}
+
 TEST_CASE("Drop small components returns an open solid unchanged", "[solid]")
 {
     auto polygons = MakeBoxPolygons(Vector3::ZERO, Vector3::ONE * 0.5f, 1);

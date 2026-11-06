@@ -141,6 +141,7 @@ public:
     /// Return the component of each geometry of the output model, in geometry order.
     /// The geometries with one value form one connected shape.
     /// The values belong to the build of GetLastBuildStats.
+    /// The span is empty if the output is not the result of a build: no output model, the base model, or a baked model.
     ea::span<const unsigned> GetLastGeometryComponents() const
     {
         return {lastGeometryComponents_.data(), lastGeometryComponents_.size()};

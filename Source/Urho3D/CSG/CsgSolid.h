@@ -232,9 +232,12 @@ public:
     /// Return the solid without the shells that are small, and without the cavities inside them.
     ///
     /// A shell is a component with a positive volume. It is kept if its volume is at least the fraction of the
-    /// largest shell volume. A cavity is a component with a negative volume. It is kept if a point of it is inside
-    /// the kept shells. The function returns the same solid if the fraction is zero or less, if the solid is not
-    /// closed, if it has one component or less, if it has no shell, or if it drops nothing.
+    /// largest shell volume. A cavity is a component with a negative volume. It is kept if its innermost enclosing
+    /// shell is kept. That shell is the one with the smallest volume that has a point of the cavity inside it.
+    /// The function tests each shell alone, so nested shells do not break the test. A cavity that no shell has is
+    /// dropped. The function returns the same solid if the fraction is zero or less, if the solid is not
+    /// closed, if it has one component or less, if it has no shell, or if no shell drops. A component with a zero
+    /// volume stays in these cases, and it is dropped if a shell drops.
     /// The count of the dropped components goes to droppedCount if it is not null.
     static SharedPtr<const CsgSolid> DropSmallComponents(
         const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);

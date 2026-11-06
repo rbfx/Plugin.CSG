@@ -750,6 +750,7 @@ void CsgRoot::Rebuild()
     if (!tempB || !tempBase)
     {
         ApplyResultToOutput(nullptr, {});
+        lastGeometryComponents_.clear();
         return;
     }
 
@@ -759,12 +760,14 @@ void CsgRoot::Rebuild()
         URHO3D_LOGERRORF(
             "CsgRoot (%s:%u) has no <Model> set. CSG build is discarded.", node_->GetName().c_str(), node_->GetID());
         ApplyResultToOutput(nullptr, {});
+        lastGeometryComponents_.clear();
         return;
     }
 
     if (!SetupOperandStaticModel(tempBase, GetModelAttr(), GetMaterialsAttr()))
     {
         ApplyResultToOutput(nullptr, {});
+        lastGeometryComponents_.clear();
         return;
     }
 
@@ -820,6 +823,7 @@ void CsgRoot::Rebuild()
             cachedMetricScale_ = baked_->metricScale_;
             const ResourceRefList outputMaterials = baked_->outputMaterials_;
             ApplyResultToOutput(baked_->outputModel_, outputMaterials);
+            lastGeometryComponents_.clear();
             lastBuildFailed_ = false;
             return;
         }
@@ -827,6 +831,7 @@ void CsgRoot::Rebuild()
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
         ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
+        lastGeometryComponents_.clear();
         lastBuildFailed_ = false;
         return;
     }

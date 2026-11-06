@@ -2414,30 +2414,44 @@ SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
     const unsigned count = solid->ComponentCount();
     ea::vector<double> volumes(count);
     double largest = 0.0;
-    bool hasNegative = false;
     for (unsigned c = 0; c < count; ++c)
     {
         volumes[c] = solid->ComponentVolume(c);
         largest = ea::max(largest, volumes[c]);
-        hasNegative = hasNegative || volumes[c] < 0.0;
     }
     // Without a shell, nothing can tell the small parts from the large ones.
     if (largest <= 0.0)
         return solid;
 
     ea::vector<unsigned> shellList;
+    unsigned positiveCount = 0;
     for (unsigned c = 0; c < count; ++c)
     {
-        if (volumes[c] > 0.0 && volumes[c] >= minVolumeFraction * largest)
-            shellList.push_back(c);
+        if (volumes[c] > 0.0)
+        {
+            ++positiveCount;
+            if (volumes[c] >= minVolumeFraction * largest)
+                shellList.push_back(c);
+        }
     }
-    unsigned positiveCount = 0;
-    for (const double volume : volumes)
-        positiveCount += volume > 0.0 ? 1 : 0;
-    if (shellList.size() == positiveCount && !hasNegative)
+    // If no shell drops, all cavities stay. A component with a zero volume stays too.
+    if (shellList.size() == positiveCount)
         return solid;
 
-    const SharedPtr<CsgSolid> shells = FromComponents(*solid, {shellList.data(), shellList.size()});
+    // The shells in the order of the volume, the smallest first. A cavity belongs to the first shell that has it.
+    ea::vector<unsigned> byVolume;
+    for (unsigned c = 0; c < count; ++c)
+    {
+        if (volumes[c] > 0.0)
+            byVolume.push_back(c);
+    }
+    ea::sort(byVolume.begin(), byVolume.end(),
+        [&](unsigned a, unsigned b) { return volumes[a] < volumes[b] || (volumes[a] == volumes[b] && a < b); });
+
+    // A solid with one shell only. The ray parity of ContainsPoint then does not mix the nested shells.
+    // The function builds each solid when a cavity needs it first.
+    ea::vector<SharedPtr<CsgSolid>> single(count);
+
     ea::vector<unsigned> keptList;
     for (unsigned c = 0; c < count; ++c)
     {
@@ -2448,10 +2462,29 @@ SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
         }
         else if (volumes[c] < 0.0)
         {
+            // The test point is the centroid of the first triangle of the cavity. A cavity can touch its shell at
+            // a vertex, and the centroid is not at a vertex. The function does not move the point. ContainsPoint
+            // gives a fixed answer for a point on the surface of a shell. The limit: a cavity that has its first
+            // triangle on the surface of its shell can get a wrong answer.
             const unsigned face = solid->componentFaces_[solid->componentStart_[c]];
-            const Vector3 point = solid->faces_[face]->vertices_[0].GetPosition();
-            if (shells->ContainsPoint(point))
-                keptList.push_back(c);
+            Vector3 point = solid->faces_[face]->vertices_[0].GetPosition();
+            if (solid->triangleStart_[face] < solid->triangleStart_[face + 1])
+            {
+                const unsigned t = solid->triangleStart_[face] * 3;
+                point = (solid->trianglePositions_[t] + solid->trianglePositions_[t + 1]
+                            + solid->trianglePositions_[t + 2]) / 3.0f;
+            }
+            for (const unsigned shell : byVolume)
+            {
+                if (!single[shell])
+                    single[shell] = FromComponents(*solid, {&shell, 1});
+                if (!single[shell]->ContainsPoint(point))
+                    continue;
+                // The innermost shell that has the cavity decides.
+                if (ea::binary_search(shellList.begin(), shellList.end(), shell))
+                    keptList.push_back(c);
+                break;
+            }
         }
     }
     if (keptList.size() == count)

@@ -1076,6 +1076,24 @@ TEST_CASE("CsgRoot reports the component of each geometry", "[root]")
         CHECK(model->GetBoundingBox().max_.y_ < 0.31f);
     }
 
+    SECTION("The component values are empty after the last brush goes")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Removed");
+        CsgBrush* slab = AddSlabBrush(root, "Slab", 0.0f);
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+        REQUIRE(root->GetLastGeometryComponents().size() == 2);
+
+        // The output is then the base model. It is not the result of a build, so the span is empty.
+        slab->GetNode()->Remove();
+        RunFrames(root, workQueue, 60);
+        REQUIRE(GetOutput(root));
+        const Model* model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        CHECK(model->GetNumGeometries() >= 1);
+        CHECK(root->GetLastGeometryComponents().empty());
+    }
+
     SECTION("The component values repeat for the geometries of one piece")
     {
         // A material needs the file system to load its default resources.
