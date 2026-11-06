@@ -42,6 +42,10 @@ struct CsgBuildStats
     float buildModelMs_{};
     /// Number of faces of the result solid.
     unsigned faceCount_{};
+    /// Number of components of the result solid, after the removal of the small components.
+    unsigned componentCount_{};
+    /// Number of components that the build removed because of `CsgRoot::GetMinComponentVolumeFraction`.
+    unsigned droppedComponents_{};
     /// Number of triangles of the triangulated result.
     unsigned triangleCount_{};
     /// True if the result solid is closed. An empty solid is closed.
@@ -110,6 +114,13 @@ public:
     float GetEpsilon() const { return epsilon_; }
     /// Set epsilon used by polygon operations. Values below 0 are clamped to 0.
     void SetEpsilon(float value);
+    /// Get the minimum volume of a shell as a fraction of the volume of the largest shell.
+    float GetMinComponentVolumeFraction() const { return minComponentVolumeFraction_; }
+    /// Set the minimum volume of a shell as a fraction of the volume of the largest shell. The root clamps it to 0..1.
+    /// The build drops a shell with a volume below the fraction of the largest shell volume.
+    /// A cavity inside a dropped shell goes with it. The value 1 keeps only the largest shell.
+    /// The value 0 keeps all shells. A changed fraction does not clear the cached solid.
+    void SetMinComponentVolumeFraction(float value);
     /// Get whether a finished rebuild goes to the output model at once.
     bool GetAutoApplyResults() const { return autoApplyResults_; }
     /// Set whether a finished rebuild goes to the output model at once.
@@ -127,6 +138,13 @@ public:
     /// Get the statistics of the build whose result the root applied last.
     /// A result that waits in the queue has no effect on the value until ApplyPendingResult applies it.
     const CsgBuildStats& GetLastBuildStats() const { return lastBuildStats_; }
+    /// Return the component of each geometry of the output model, in geometry order.
+    /// The geometries with one value form one connected shape.
+    /// The values belong to the build of GetLastBuildStats.
+    ea::span<const unsigned> GetLastGeometryComponents() const
+    {
+        return {lastGeometryComponents_.data(), lastGeometryComponents_.size()};
+    }
     /// Return true if the last build that the root took was a failed build.
     /// A build fails if the boolean operation throws. The output model does not change then.
     /// A later build that the root applies clears the flag.
@@ -198,6 +216,8 @@ private:
         CsgBuildStats stats_;
         /// True if the build failed. The model is empty and the output must not change.
         bool failed_{};
+        /// The component of each geometry of the model.
+        ea::vector<unsigned> components_;
     };
 
     /// Result of a bake. It replaces the base operand until the base model or the epsilon changes.
@@ -237,6 +257,7 @@ private:
 
     float deferredDelaySec_{0.1f};
     float epsilon_{1e-4f};
+    float minComponentVolumeFraction_{0.0f};
     bool rebuildDirty_{true};
     unsigned lastChangeTimeMs_{};
     unsigned deferredScheduleToken_{};
@@ -249,6 +270,7 @@ private:
     bool autoApplyResults_{true};
     ea::vector<PendingBuildResult> pendingResults_;
     CsgBuildStats lastBuildStats_;
+    ea::vector<unsigned> lastGeometryComponents_;
     bool lastBuildFailed_{};
 
     /// Solid of the last applied build. It is the base for an append of brushes.

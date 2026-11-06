@@ -20,6 +20,7 @@
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/IO/Log.h>
+#include <Urho3D/IO/VirtualFileSystem.h>
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
@@ -991,4 +992,122 @@ TEST_CASE("CsgRoot clears the failed flag when no brushes remain", "[root]")
     CHECK(!root->GetLastBuildFailed());
     REQUIRE(GetOutput(root));
     CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+}
+
+namespace
+{
+
+/// Add a flat wide brush that cuts the root box into a lower and an upper piece.
+CsgBrush* AddSlabBrush(CsgRoot* root, const ea::string& name, float height)
+{
+    CsgBrush* brush = AddBoxBrush(root, name, Vector3(0.0f, height, 0.0f), CsgOperation::DifferenceAB);
+    brush->GetNode()->SetScale(Vector3(3.0f, 0.1f, 3.0f));
+    return brush;
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot reports the component of each geometry", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("The root keeps all shells by default")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Keep");
+        CHECK(root->GetMinComponentVolumeFraction() == 0.0f);
+        AddSlabBrush(root, "Slab", 0.0f);
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+        const Model* model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        CHECK(model->GetNumGeometries() == 2);
+        const ea::span<const unsigned> components = root->GetLastGeometryComponents();
+        REQUIRE(components.size() == 2);
+        CHECK(components[0] == 0);
+        CHECK(components[1] == 1);
+        CHECK(root->GetLastBuildStats().componentCount_ == 2);
+        CHECK(root->GetLastBuildStats().droppedComponents_ == 0);
+    }
+
+    SECTION("The root drops a small shell and keeps the drop on the cached solid")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Drop");
+        root->SetMinComponentVolumeFraction(2.0f);
+        CHECK(root->GetMinComponentVolumeFraction() == 1.0f);
+        AddSlabBrush(root, "Slab", 0.4f);
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+        const Model* model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        CHECK(model->GetNumGeometries() == 1);
+        ea::span<const unsigned> components = root->GetLastGeometryComponents();
+        REQUIRE(components.size() == 1);
+        CHECK(components[0] == 0);
+        CHECK(root->GetLastBuildStats().droppedComponents_ == 1);
+        CHECK(root->GetLastBuildStats().componentCount_ == 1);
+        CHECK(root->GetLastBuildStats().valid_);
+        const double keptVolume = root->GetLastBuildStats().volume_;
+        // The lower piece is about 0.65 of the box volume (8).
+        CHECK(keptVolume > 4.0);
+        CHECK(keptVolume < 6.0);
+
+        // The new brush cuts a corner of the kept piece only. The build reuses the cached solid.
+        CsgBrush* notch = AddBoxBrush(root, "Notch", Vector3(1.0f, -1.0f, 1.0f), CsgOperation::DifferenceAB);
+        notch->GetNode()->SetScale(Vector3(0.2f, 0.2f, 0.2f));
+        root->Rebuild();
+        RunFrames(root, workQueue, 60);
+
+        model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        CHECK(model->GetNumGeometries() == 1);
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().componentCount_ == 1);
+        CHECK(root->GetLastBuildStats().volume_ < keptVolume);
+        CHECK(root->GetLastBuildStats().volume_ > 4.0);
+        CHECK(model->GetBoundingBox().max_.y_ < 0.31f);
+    }
+
+    SECTION("The component values repeat for the geometries of one piece")
+    {
+        // A material needs the file system to load its default resources.
+        context->RegisterSubsystem<VirtualFileSystem>();
+        for (const char* name : {"Materials/A.xml", "Materials/B.xml"})
+        {
+            auto material = MakeShared<Material>(context);
+            material->SetName(name);
+            context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+        }
+
+        CsgRoot* root = MakeBoxRoot(scene, "Materials");
+        root->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/A.xml"}));
+        CsgBrush* slab = AddSlabBrush(root, "Slab", 0.0f);
+        slab->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/B.xml"}));
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+        const Model* model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        const ea::span<const unsigned> components = root->GetLastGeometryComponents();
+        REQUIRE(components.size() == model->GetNumGeometries());
+        // Each piece has the faces of the box and the cut face of the slab: two materials.
+        CHECK(components.size() == 4);
+        CHECK(root->GetLastBuildStats().componentCount_ == 2);
+        ea::vector<unsigned> counts(2, 0u);
+        for (const unsigned component : components)
+        {
+            REQUIRE(component < 2);
+            ++counts[component];
+        }
+        CHECK(counts[0] == 2);
+        CHECK(counts[1] == 2);
+    }
 }

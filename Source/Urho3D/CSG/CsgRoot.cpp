@@ -52,6 +52,8 @@ struct CsgRoot::BuildJob
     unsigned buildId_{};
     unsigned componentId_{};
     float epsilon_{};
+    /// Minimum volume of a shell as a fraction of the largest shell. See `CsgRoot::SetMinComponentVolumeFraction`.
+    float minComponentVolumeFraction_{};
     /// World scale of the root. The root frame carries this scale.
     Vector3 metricScale_{Vector3::ONE};
 
@@ -262,6 +264,7 @@ void CsgRoot::RegisterObject(Context* context)
 
     URHO3D_ATTRIBUTE("Deferred Delay Sec", float, deferredDelaySec_, 0.1f, AM_DEFAULT);
     URHO3D_ATTRIBUTE("Epsilon", float, epsilon_, CSG_DEFAULT_EPSILON, AM_DEFAULT);
+    URHO3D_ATTRIBUTE("Min Component Volume Fraction", float, minComponentVolumeFraction_, 0.0f, AM_DEFAULT);
     URHO3D_COPY_BASE_ATTRIBUTES(CsgComponent);
     URHO3D_ACTION_STATIC_LABEL("Rebuild", Rebuild, "Rebuild component CSG now");
 }
@@ -349,6 +352,12 @@ void CsgRoot::SetDeferredDelaySec(float value)
 void CsgRoot::SetEpsilon(float value)
 {
     epsilon_ = ea::max(0.0f, value);
+    RequestRebuild();
+}
+
+void CsgRoot::SetMinComponentVolumeFraction(float value)
+{
+    minComponentVolumeFraction_ = ea::clamp(value, 0.0f, 1.0f);
     RequestRebuild();
 }
 
@@ -765,6 +774,7 @@ void CsgRoot::Rebuild()
     job->buildId_ = rebuildRequestId_;
     job->componentId_ = GetID();
     job->epsilon_ = epsilon_;
+    job->minComponentVolumeFraction_ = minComponentVolumeFraction_;
     job->metricScale_ = CsgInternal::GetMetricScale(node_->GetWorldScale());
     job->baseModel_ = tempBase->GetModel();
     job->baseMaterials_ = tempBase->GetMaterialsAttr();
@@ -905,6 +915,9 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         if (!solid)
             solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
         EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
+        unsigned droppedComponents = 0;
+        if (solid)
+            solid = CsgSolid::DropSmallComponents(solid, job->minComponentVolumeFraction_, &droppedComponents);
         job->resultSolid_ = solid;
         const long long booleanUSec = timer.GetUSec(true);
 
@@ -931,6 +944,8 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         job->stats_.triangulateMs_ = static_cast<float>(triangulateUSec) * 0.001f;
         job->stats_.faceCount_ = solid ? solid->FaceCount() : 0;
         job->stats_.triangleCount_ = triangleCount;
+        job->stats_.componentCount_ = solid ? solid->ComponentCount() : 0;
+        job->stats_.droppedComponents_ = droppedComponents;
         job->stats_.closed_ = solid ? solid->IsClosed() : true;
         job->stats_.volume_ = solid ? solid->Volume() : 0.0;
         job->stats_.openEdges_ = check.openEdges_;
@@ -997,6 +1012,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     }
 
     ResourceRefList materials;
+    ea::vector<unsigned> components;
     SharedPtr<Model> renderableModel;
     HiresTimer buildModelTimer;
     if (!triangulated)
@@ -1018,7 +1034,8 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
 
         renderableModel = CsgBuildModel(root->context_, *triangulated,
             ea::span<const Model* const>(sourceModels.data(), sourceModels.size()),
-            ea::span<const ResourceRefList* const>(sourceMaterials.data(), sourceMaterials.size()), &materials);
+            ea::span<const ResourceRefList* const>(sourceMaterials.data(), sourceMaterials.size()), &materials,
+            &components);
     }
 
     job->stats_.buildModelMs_ = static_cast<float>(buildModelTimer.GetUSec(false)) * 0.001f;
@@ -1044,10 +1061,15 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     {
         root->ApplyResultToOutput(renderableModel, materials);
         root->lastBuildStats_ = job->stats_;
+        root->lastGeometryComponents_ = ea::move(components);
         root->lastBuildFailed_ = false;
     }
     else
-        root->pendingResults_.push_back({renderableModel, materials, job->buildId_, job->stats_});
+    {
+        PendingBuildResult pending{renderableModel, materials, job->buildId_, job->stats_};
+        pending.components_ = ea::move(components);
+        root->pendingResults_.push_back(ea::move(pending));
+    }
 }
 
 bool CsgRoot::ApplyPendingResult()
@@ -1063,6 +1085,7 @@ bool CsgRoot::ApplyPendingResult()
 
     ApplyResultToOutput(result.model_, result.materials_);
     lastBuildStats_ = result.stats_;
+    lastGeometryComponents_ = result.components_;
     return true;
 }
 
