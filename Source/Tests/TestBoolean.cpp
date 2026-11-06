@@ -2287,6 +2287,32 @@ TEST_CASE("Thick mode: an open exact union runs again with thick decisions on th
     CheckNoOpenEdges(result);
     CHECK(Volume(result) == Catch::Approx(16.051433).margin(GridVolumeTolerance(3.0 * BOX_AREA)));
 }
+
+// The wanted side rule for Union moves the crossings of the face diagonals of A at the coplanar faces of A and B.
+// Without keepSharedNearest_, a second crossing at the same exact point rounds one grid step away. Then A + B is
+// closed but has a needle with a base of one grid step. The union (A + B) + C opens in the rule pass, and the
+// boolean needs the nearest retry.
+// The boxes are from the sweep, rotated about the axis (1, 1, 1) by 26.7 degrees. With keepSharedNearest_, the
+// rule pass stays closed: no nearest retry and no thick retry.
+TEST_CASE("The union keeps a shared nearest crossing so the rule pass stays closed", "[boolean][thick]")
+{
+    const Quaternion world(26.7f, Vector3::ONE.Normalized());
+    const Quaternion own(37.0f, Vector3(1.0f, 1.0f, 0.0f).Normalized());
+    const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
+    const auto a = MakeBox(Vector3::ZERO, 1, worldTransform);
+    const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, worldTransform);
+    const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
+
+    const auto ab = Run(a, b, CsgOperation::Union);
+    CheckNoOpenEdges(ab);
+
+    g_csgDiagnostics.Reset();
+    const auto result = Run(ab, c, CsgOperation::Union);
+    CHECK(g_csgDiagnostics.wantedSideRetries_.load() == 0);
+    CHECK(g_csgDiagnostics.thickRetries_.load() == 0);
+    CheckNoOpenEdges(result);
+    CHECK(Volume(result) == Catch::Approx(16.051433).margin(GridVolumeTolerance(3.0 * BOX_AREA)));
+}
 #endif
 #endif
 
