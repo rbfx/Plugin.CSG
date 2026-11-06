@@ -394,30 +394,79 @@ enum class ComponentSide
     None
 };
 
+/// Tell if a grid point lies within the thickness of the plane of a triangle of a mesh near the point.
+/// Only the thick mode uses it: in the exact mode, FlatPlane is always false.
+/// The test is conservative. It uses the plane of each triangle with a face box near the point.
+bool InThickSurface(const Mesh& other, const CsgGridPoint& p, ea::vector<int>& components, ea::vector<int>& faces)
+{
+    const CsgSolid& solid = other.solid_;
+    const Vector3 position = p.ToPosition();
+    const float margin = static_cast<float>(4.0 * CsgExact::Thickness(CsgExact::Extent(p)) / CsgGridScale);
+    const ea::span<const unsigned> triangleStart = solid.GetTriangleStart();
+    solid.GetComponentTree().CollectBox(position, position, margin, components);
+    for (const int component : components)
+    {
+        solid.GetFaceTree(static_cast<unsigned>(component)).CollectBox(position, position, margin, faces);
+        for (const int face : faces)
+        {
+            for (unsigned t = triangleStart[face]; t < triangleStart[face + 1]; ++t)
+            {
+                const int* ids = &other.triangleIds_[t * 3];
+                if (CsgExact::FlatPlane(
+                        other.grid_[ids[0]], other.grid_[ids[1]], other.grid_[ids[2]], p, other.faceExtent_[face]))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// Tell if a component that the curve does not reach lies inside the other solid.
 ///
 /// The answer is exact. The component has no curve, so it
 /// does not cross the displaced surface of the other operand. All its vertices lie on the same side, also the
 /// vertices that touch the other surface. The function classifies the first vertex of the first face with a loop.
 /// The exact test breaks a tie on a shared face by the displacement of the second operand.
+/// In thick mode, the component does not cross the thick surface. A vertex in the thickness of a plane of the other
+/// operand can lie on the wrong side of the exact surface. So the function classifies the first vertex clear of
+/// the thickness. If no vertex is clear, it classifies the first vertex.
 /// If no face of the component has a loop, the component has no side: the function counts it and returns None.
 ComponentSide ClassifyComponent(const Corefinement& core, const Mesh& mesh, unsigned component, const Mesh& other, bool second)
 {
     const ea::span<const unsigned> componentStart = mesh.solid_.GetComponentStart();
     const ea::span<const unsigned> componentFaces = mesh.solid_.GetComponentFaces();
-    for (unsigned i = componentStart[component]; i < componentStart[component + 1]; ++i)
+    int first = -1;
+    int chosen = -1;
+    ea::vector<int> components;
+    ea::vector<int> faces;
+    for (unsigned i = componentStart[component]; i < componentStart[component + 1] && chosen < 0; ++i)
     {
         const unsigned face = componentFaces[i];
-        if (mesh.loops_.loopLength_[face] <= 0)
+        const int length = mesh.loops_.loopLength_[face];
+        if (length <= 0)
             continue;
-        const int id = mesh.loops_.vertexIds_[mesh.loops_.vertexStart_[face]];
-        // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
-        // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
-        return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111) ? ComponentSide::Inside :
-                                                                                     ComponentSide::Outside;
+        const unsigned start = mesh.loops_.vertexStart_[face];
+        if (first < 0)
+            first = mesh.loops_.vertexIds_[start];
+        if (g_csgExactOnly)
+            break;
+        for (int k = 0; k < length && chosen < 0; ++k)
+        {
+            const int id = mesh.loops_.vertexIds_[start + k];
+            if (!InThickSurface(other, mesh.grid_[id], components, faces))
+                chosen = id;
+        }
     }
-    CSG_DIAG_COUNT(componentsRemoved_);
-    return ComponentSide::None;
+    if (first < 0)
+    {
+        CSG_DIAG_COUNT(componentsRemoved_);
+        return ComponentSide::None;
+    }
+    const int id = chosen >= 0 ? chosen : first;
+    // The second operand moves. A vertex of the first operand uses the mask 0b0111, where the other mesh
+    // moves. A vertex of the second operand uses the mask 0b1000, where the point moves.
+    return ClassifyGridPoint(other, mesh.grid_[id], second ? 0b1000 : 0b0111) ? ComponentSide::Inside :
+                                                                                 ComponentSide::Outside;
 }
 
 /// Collect the elements of one operand. This function does not classify.

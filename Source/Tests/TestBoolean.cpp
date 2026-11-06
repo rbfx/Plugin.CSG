@@ -2333,6 +2333,8 @@ TEST_CASE("Boolean of boxes with faces that differ by a fraction of epsilon keep
     // This is a regression guard. A sweep of shifted and tilted boxes did not fail without the rule.
     // In float mode the grid step is larger than epsilon. The shifts snap to the same grid line there.
     // The shifts reach near-coincident cuts only in double mode (CSG_EXACT_USE_DOUBLE).
+    // In the thick pass, the face of B is on the face of A, so B has no curve. B is then classified whole.
+    // Its first vertex is in the thickness and exactly outside A. The side of B must come from a vertex clear of it.
     const auto a = MakeBox(Vector3::ZERO, 1);
     const float eps = CSG_DEFAULT_EPSILON;
     struct Case
