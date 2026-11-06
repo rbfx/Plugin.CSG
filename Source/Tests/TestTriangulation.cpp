@@ -684,7 +684,6 @@ void CheckUnionFarFromOrigin(const Quaternion& rotation)
             const SolidPtr b(CsgSolid::FromOperand(MakeBoxPolygons(Vector3(1, 0, 0), Vector3::ONE, 2, transform)));
             const SolidPtr result = Boolean(a, b, CsgOperation::Union, CSG_DEFAULT_EPSILON);
             REQUIRE(result->FaceCount() > 0);
-            CHECK(CountInvertedTriangles(*result, false) == 0);
 
             // The float step at the largest coordinate. The rounding to float moves a position by half of it.
             float largest = 0.0f;
@@ -698,6 +697,33 @@ void CheckUnionFarFromOrigin(const Quaternion& rotation)
             const double tolerance = ea::max(gridStep, floatStep);
             // The rounding to float adds an error to an area only when the float step is larger than the grid step.
             const double roundingError = floatStep > gridStep ? floatStep : 0.0;
+
+            // No triangle is inverted while the float positions hold the grid points exactly.
+            // Else the rounding can turn a convex corner of less than one float step into a reflex corner. Then no
+            // triangulation of the float polygon has only proper triangles. An inverted triangle must have an area
+            // of at most the rounding error times its longest edge.
+            if (roundingError == 0.0)
+                CHECK(CountInvertedTriangles(*result, false) == 0);
+            else
+            {
+                for (unsigned f = 0; f < result->FaceCount(); ++f)
+                {
+                    const Vector3 normal = result->GetFace(f)->plane_.normal_;
+                    for (unsigned tri = result->GetTriangleStart()[f]; tri < result->GetTriangleStart()[f + 1]; ++tri)
+                    {
+                        const Vector3& p = positions[tri * 3];
+                        const Vector3& q = positions[tri * 3 + 1];
+                        const Vector3& r = positions[tri * 3 + 2];
+                        const double signedArea = 0.5 * double((q - p).CrossProduct(r - p).DotProduct(normal));
+                        const double longest = ea::max(double((q - p).Length()),
+                            ea::max(double((r - q).Length()), double((p - r).Length())));
+                        // CountInvertedTriangles ignores the same small area.
+                        CAPTURE(f, tri, signedArea, longest);
+                        CHECK(signedArea >= -ea::max(5e-7, roundingError * longest));
+                    }
+                }
+            }
+
             // The smallest triangle on the grid has half of a grid cell as area.
             const double minimumArea = 0.25 * gridStep * gridStep;
 
@@ -755,22 +781,8 @@ TEST_CASE("Triangulated union of boxes far from the origin has no ribbon", "[tri
 {
     CheckUnionFarFromOrigin(Quaternion());
     CheckUnionFarFromOrigin(Quaternion(37.0f, Vector3::RIGHT));
-#if !defined(CSG_EXACT_USE_DOUBLE)
-    CheckUnionFarFromOrigin(Quaternion(12.5f, Vector3::UP));
-#endif
-}
-
-#if defined(CSG_EXACT_USE_DOUBLE)
-// Known limit of the double build, observed for a rotation about the y axis (6 checks).
-// The transform rounds the two boxes to float on their own, so the faces that touch differ by a float step.
-// This step is about half of the grid step at 100 units. The snap to the grid can put the faces in different cells.
-// Then the result keeps a sheet with triangles of both windings.
-TEST_CASE("known limit: triangulated union of rotated boxes far from the origin keeps a sheet",
-    "[triangulate][boolean][!mayfail]")
-{
     CheckUnionFarFromOrigin(Quaternion(12.5f, Vector3::UP));
 }
-#endif
 
 TEST_CASE("Triangulate random polygons with spikes and duplicate vertices", "[triangulate]")
 {

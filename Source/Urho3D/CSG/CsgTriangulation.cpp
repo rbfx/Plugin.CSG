@@ -79,10 +79,6 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
     }
     const double winding = area < 0.0 ? -1.0 : 1.0;
 
-    ring.resize(numVertices);
-    for (unsigned i = 0; i < numVertices; ++i)
-        ring[i] = i;
-
     const auto orient = [&](unsigned a, unsigned b, unsigned c)
     { return winding * ((xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])); };
 
@@ -159,6 +155,33 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         return false;
     };
 
+    // The needle rule trusts that a short edge leaves no area. Far from the origin the rounding distance can be
+    // larger than real features, and then a clip past a vertex inside the needle inverts a later triangle.
+    // A result with an inverted triangle is made again with a test of each needle for a vertex inside it.
+    // The test costs a pass over the ring, so only such a result pays for it.
+    bool strictNeedles = false;
+    // Exact positions give an orientation with a rounding error far below this bound.
+    const double invertedTurn = -extent * extent * 1e-12;
+    const auto countInverted = [&]()
+    {
+        unsigned inverted = 0;
+        for (unsigned t = 0; t + 2 < outIndices.size(); t += 3)
+            inverted += orient(outIndices[t], outIndices[t + 1], outIndices[t + 2]) < invertedTurn ? 1 : 0;
+        return inverted;
+    };
+
+    // Return true if a vertex lies strictly inside the triangle. A short edge does not make the triangle a
+    // needle with no area: the other edges can be long, and a vertex inside it then crosses the rest of the ring.
+    const auto containsStrictly = [&](unsigned a, unsigned b, unsigned c)
+    {
+        for (const unsigned j : ring)
+        {
+            if (j != a && j != b && j != c && orient(a, b, j) > 0.0 && orient(b, c, j) > 0.0 && orient(c, a, j) > 0.0)
+                return true;
+        }
+        return false;
+    };
+
     // With four vertices left, clipping the vertex at ring position i leaves the three others as the last triangle.
     // That triangle is flat if the others lie on one line. Another ear leaves a proper last triangle.
     const auto leavesFlat = [&](unsigned i)
@@ -169,79 +192,136 @@ bool CsgTriangulatePolygon(const CsgPolygon& poly, ea::vector<unsigned>& outIndi
         return std::abs(orient(a, c, e)) <= length(a, c) * extent * CsgStraightDistance;
     };
 
-    outIndices.reserve((numVertices - 2) * 3);
-    while (ring.size() > 3)
+    ea::vector<unsigned> firstIndices;
+    bool firstClean = true;
+    for (;;)
     {
-        const unsigned count = ring.size();
-        int clip = -1;
-        int fallback = -1;
-        double fallbackTurn = -std::numeric_limits<double>::infinity();
-        // The first round keeps the last triangle proper. The second round accepts a flat last triangle.
-        for (int round = 0; round < 2 && clip < 0; ++round)
+        ring.resize(numVertices);
+        for (unsigned i = 0; i < numVertices; ++i)
+            ring[i] = i;
+        outIndices.clear();
+        outIndices.reserve((numVertices - 2) * 3);
+        while (ring.size() > 3)
         {
-            for (unsigned i = 0; i < count; ++i)
-            {
-                const unsigned a = ring[(i + count - 1) % count];
-                const unsigned b = ring[i];
-                const unsigned c = ring[(i + 1) % count];
-                const double turn = orient(a, b, c);
-                const double scale = length(a, b) * length(b, c);
-                const double normalized = scale > 0.0 ? turn / scale : 0.0;
-                if (normalized > fallbackTurn)
-                {
-                    fallbackTurn = normalized;
-                    fallback = static_cast<int>(i);
-                }
-                // A tip within rounding of a neighbor closes a zero-length edge: the needle has no area to invert, and
-                // leaving it would block every ear around it.
-                const double needle = extent * CsgStraightDistance;
-                if ((!straight || !straight[b]) && turn >= 0.0 && (length(a, b) <= needle || length(b, c) <= needle))
-                {
-                    clip = static_cast<int>(i);
-                    break;
-                }
-                // Distance of b from the chord a-c is twice the ear's area over the chord length.
-                const double chord = length(a, c);
-                if (turn <= 0.0 || turn <= chord * extent * CsgStraightDistance || isStraight(b)
-                    || (count == 4 && isStraight(ring[(i + 2) % count]))
-                    || (round == 0 && count == 4 && leavesFlat(i)) || containsOther(a, b, c))
-                    continue;
-                clip = static_cast<int>(i);
-                break;
-            }
-        }
-        if (clip < 0)
-        {
-            clean = false;
-            // The shared runs left no ear. An ear that ignores the runs still lies inside the polygon, so it is
-            // better than the most convex vertex, which can lie outside.
-            // The first round also keeps the last triangle proper. The second round takes any such ear.
+            const unsigned count = ring.size();
+            int clip = -1;
+            int fallback = -1;
+            double fallbackTurn = -std::numeric_limits<double>::infinity();
+            // The first round keeps the last triangle proper. The second round accepts a flat last triangle.
             for (int round = 0; round < 2 && clip < 0; ++round)
             {
-                for (unsigned i = 0; i < count && clip < 0; ++i)
+                for (unsigned i = 0; i < count; ++i)
                 {
                     const unsigned a = ring[(i + count - 1) % count];
                     const unsigned b = ring[i];
                     const unsigned c = ring[(i + 1) % count];
                     const double turn = orient(a, b, c);
-                    if (round == 0 && count == 4 && leavesFlat(i))
-                        continue;
-                    if (turn > length(a, c) * extent * CsgStraightDistance && !containsOther(a, b, c))
+                    const double scale = length(a, b) * length(b, c);
+                    const double normalized = scale > 0.0 ? turn / scale : 0.0;
+                    if (normalized > fallbackTurn)
+                    {
+                        fallbackTurn = normalized;
+                        fallback = static_cast<int>(i);
+                    }
+                    // A tip within rounding of a neighbor closes a zero-length edge: the needle has no area to invert, and
+                    // leaving it would block every ear around it.
+                    const double needle = extent * CsgStraightDistance;
+                    if ((!straight || !straight[b]) && turn >= 0.0 && (length(a, b) <= needle || length(b, c) <= needle)
+                        && (!strictNeedles || !containsStrictly(a, b, c)))
+                    {
                         clip = static_cast<int>(i);
+                        break;
+                    }
+                    // Distance of b from the chord a-c is twice the ear's area over the chord length.
+                    const double chord = length(a, c);
+                    if (turn <= 0.0 || turn <= chord * extent * CsgStraightDistance || isStraight(b)
+                        || (count == 4 && isStraight(ring[(i + 2) % count]))
+                        || (round == 0 && count == 4 && leavesFlat(i)) || containsOther(a, b, c))
+                        continue;
+                    clip = static_cast<int>(i);
+                    break;
                 }
             }
-            // Not a number turns compare false, so the fallback can stay unset. Then the first vertex is clipped.
             if (clip < 0)
-                clip = fallback >= 0 ? fallback : 0;
+            {
+                clean = false;
+                // The shared runs left no ear. An ear that ignores the runs still lies inside the polygon, so it is
+                // better than the most convex vertex, which can lie outside.
+                // The first round also keeps the last triangle proper. The second round takes any such ear.
+                for (int round = 0; round < 2 && clip < 0; ++round)
+                {
+                    for (unsigned i = 0; i < count && clip < 0; ++i)
+                    {
+                        const unsigned a = ring[(i + count - 1) % count];
+                        const unsigned b = ring[i];
+                        const unsigned c = ring[(i + 1) % count];
+                        const double turn = orient(a, b, c);
+                        if (round == 0 && count == 4 && leavesFlat(i))
+                            continue;
+                        if (turn > length(a, c) * extent * CsgStraightDistance && !containsOther(a, b, c))
+                            clip = static_cast<int>(i);
+                    }
+                }
+                // No ear is left. The most convex vertex is the last choice. Its triangle is good if no vertex lies
+                // strictly inside it. Else the triangle can be large and lie outside the polygon, and the rest of the
+                // polygon then covers it again with the other winding. The tip of a spike, where the boundary goes out
+                // and back on one line within rounding, gives a flat triangle instead.
+                const auto fallbackCovers = [&]()
+                {
+                    if (fallback < 0)
+                        return false;
+                    const unsigned a = ring[(fallback + count - 1) % count];
+                    const unsigned c = ring[(fallback + 1) % count];
+                    return containsStrictly(a, ring[fallback], c);
+                };
+                if (clip < 0 && fallbackCovers())
+                {
+                    double flattest = std::numeric_limits<double>::infinity();
+                    for (unsigned i = 0; i < count; ++i)
+                    {
+                        const unsigned a = ring[(i + count - 1) % count];
+                        const unsigned b = ring[i];
+                        const unsigned c = ring[(i + 1) % count];
+                        const double back = (xs[b] - xs[a]) * (xs[c] - xs[b]) + (ys[b] - ys[a]) * (ys[c] - ys[b]);
+                        const double height = std::abs(orient(a, b, c)) / ea::max(length(a, b), length(b, c));
+                        if (back < 0.0 && height <= extent * CsgStraightDistance && height < flattest
+                            && !containsStrictly(a, b, c))
+                        {
+                            flattest = height;
+                            clip = static_cast<int>(i);
+                        }
+                    }
+                }
+                // Not a number turns compare false, so the fallback can stay unset. Then the first vertex is clipped.
+                if (clip < 0)
+                    clip = fallback >= 0 ? fallback : 0;
+            }
+            outIndices.push_back(ring[(clip + count - 1) % count]);
+            outIndices.push_back(ring[clip]);
+            outIndices.push_back(ring[(clip + 1) % count]);
+            ring.erase(ring.begin() + clip);
         }
-        outIndices.push_back(ring[(clip + count - 1) % count]);
-        outIndices.push_back(ring[clip]);
-        outIndices.push_back(ring[(clip + 1) % count]);
-        ring.erase(ring.begin() + clip);
+        outIndices.push_back(ring[0]);
+        outIndices.push_back(ring[1]);
+        outIndices.push_back(ring[2]);
+        if (strictNeedles)
+        {
+            // Keep the first result unless the second one has fewer inverted triangles.
+            const unsigned inverted = countInverted();
+            outIndices.swap(firstIndices);
+            if (inverted < countInverted())
+                outIndices.swap(firstIndices);
+            else
+                clean = firstClean;
+            break;
+        }
+        if (countInverted() == 0)
+            break;
+        firstIndices = outIndices;
+        firstClean = clean;
+        clean = true;
+        strictNeedles = true;
     }
-    outIndices.push_back(ring[0]);
-    outIndices.push_back(ring[1]);
-    outIndices.push_back(ring[2]);
     return true;
 }
 
