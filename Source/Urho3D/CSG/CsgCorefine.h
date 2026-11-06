@@ -423,12 +423,17 @@ struct CsgBooleanScratch
 /// The wanted sides of the wanted side rule of Corefinement::ConstrainCrossings. A flag is set if the outside of the
 /// operand is wanted. The wanted side of an operand is the side where the result keeps the faces of the other
 /// operand. Then a repeated identical boolean does not cut these faces again. The default is DifferenceAB: inside A
-/// and outside B. Intersection wants inside A and inside B. Union would want outside A and outside B, but the
-/// boolean does not use the rule for Union.
+/// and outside B. Intersection wants inside A and inside B. Union wants outside A and outside B.
 struct CsgWantedSides
 {
     bool outsideA_{};
     bool outsideB_{true};
+    /// If set, a crossing keeps its nearest rounding if another crossing has the same nearest grid point.
+    /// Union sets it. Near coplanar faces of rotated operands give crossings at one exact point that are no twins
+    /// on the grid. The rule moves one of them and not the other, so the result has a needle with a base of one
+    /// grid step. A next boolean then rounds the crossings of the two long edges of the needle to two points, and
+    /// the split loses the needle.
+    bool keepSharedNearest_{};
 };
 
 /// A triangle map prepared for the tests of one crossing, see ConstrainCrossings.
@@ -614,14 +619,15 @@ public:
     /// A crossing with the placedGroup_ mark does not move, and ConstrainClusters keeps it as a fixed point.
     /// Its grid point is the grid point of the group and not the nearest rounding of its exact position.
     ///
-    /// The wanted side rule (preferWantedSide, for DifferenceAB and Intersection). The three planes of a crossing are
-    /// the crossed triangle and the two triangles of the edge. The sides argument gives the wanted side of each
+    /// The wanted side rule (preferWantedSide, for DifferenceAB, Intersection and Union). The three planes of a
+    /// crossing are the crossed triangle and the two triangles of the edge. The sides argument gives the wanted side of each
     /// operand (see CsgWantedSides). For DifferenceAB, the wanted side of a plane of A is inside A and the wanted
     /// side of a plane of B is outside B. These are the sides of the kept pieces. Each candidate corner gets a score:
     /// fewer unwanted planes first, then more wanted planes. A plane through the corner counts as neither.
     /// A fold tries its candidates in the order of the score. A valid nearest rounding with an unwanted plane moves
     /// only to a valid corner with a better score. A twin crossing keeps its nearest rounding, so the twins stay at
-    /// one point. The rule never accepts a corner that the validity tests reject.
+    /// one point. With sides.keepSharedNearest_, a crossing with the nearest grid point of another crossing also
+    /// keeps its nearest rounding. The rule never accepts a corner that the validity tests reject.
     /// The reason: the nearest rounding puts the vertices of a curve on both sides of the face plane of B. A next
     /// identical cut then cuts this crinkled sheet again, and each cut adds triangles. With the rule, the curve
     /// vertices are on the kept side of the planes. Then the next identical cut does not cut them again.
@@ -851,7 +857,7 @@ bool CsgClassifyGridCentroidForTest(
 /// Boolean sets the switch for each pass. See Boolean.
 inline thread_local bool g_csgExactOnly = true;
 
-/// Whether the exact passes of DifferenceAB and Intersection use the wanted side rule of ConstrainCrossings.
+/// Whether the exact passes of DifferenceAB, Intersection and Union use the wanted side rule of ConstrainCrossings.
 /// The rule moves a curve vertex by up to one grid step. On the coarse grid of the float build, this changes the
 /// volume by more than the tolerance. So only the fine grid uses the rule.
 constexpr bool CsgPreferWantedSide = CsgGridScaleBits >= 16;
@@ -913,7 +919,7 @@ struct CsgBooleanDiagnostics
     /// Booleans that ran again with the thick decisions, because the exact result had more open edges than
     /// the operands.
     std::atomic<int> thickRetries_{};
-    /// Exact passes of DifferenceAB or Intersection that ran again with the nearest rounding, because the wanted
+    /// Exact passes of DifferenceAB, Intersection or Union that ran again with the nearest rounding, because the wanted
     /// side rule gave more open edges than the operands.
     std::atomic<int> wantedSideRetries_{};
     /// Switch of the validity count. A test sets it. Reset does not change it.

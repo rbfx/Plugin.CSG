@@ -9,6 +9,7 @@
 #include <Urho3D/IO/Log.h>
 
 #include <EASTL/algorithm.h>
+#include <EASTL/array.h>
 #include <EASTL/sort.h>
 #include <EASTL/unique_ptr.h>
 
@@ -3557,6 +3558,25 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
         }
     }
 
+    // The nearest grid points of all crossings, sorted. Only sides.keepSharedNearest_ uses them. The loop below
+    // moves crossings, so the points are taken before it.
+    using GridKey = ea::array<CsgGridInt, 3>;
+    ea::vector<GridKey> sharedNearest;
+    if (preferWantedSide && sides.keepSharedNearest_)
+    {
+        sharedNearest.reserve(crossings_.size());
+        for (const Crossing& crossing : crossings_)
+            sharedNearest.push_back({crossing.grid_.x_, crossing.grid_.y_, crossing.grid_.z_});
+        ea::sort(sharedNearest.begin(), sharedNearest.end());
+    }
+    // Return true if two or more crossings have the nearest grid point p.
+    const auto isSharedNearest = [&](const CsgGridPoint& p)
+    {
+        const GridKey k{p.x_, p.y_, p.z_};
+        const auto at = ea::lower_bound(sharedNearest.begin(), sharedNearest.end(), k);
+        return at != sharedNearest.end() && at + 1 != sharedNearest.end() && *(at + 1) == k;
+    };
+
     for (size_t index = 0; index < crossings_.size(); ++index)
     {
         Crossing& crossing = crossings_[index];
@@ -3653,7 +3673,8 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
             planes = wantedPlanes(crossing);
             int unwanted = 0;
             nearestScore = wantedScore(planes, nearest, unwanted);
-            improve = nearestValid && unwanted != 0 && !hasTwin(crossing, planes);
+            improve = nearestValid && unwanted != 0 && !hasTwin(crossing, planes)
+                && !(sides.keepSharedNearest_ && isSharedNearest(nearest));
         }
         if (nearestValid && !improve)
             continue;

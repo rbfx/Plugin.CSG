@@ -1539,7 +1539,6 @@ bool ClassifyGridCentroid(
 /// Run the boolean once with the current value of g_csgExactOnly. Each call builds a new corefinement, so the
 /// aliases and the placed crossings of an earlier call do not carry over.
 /// With preferWantedSide, ConstrainCrossings uses the wanted side rule with the wanted sides of the operation.
-/// Only DifferenceAB and Intersection may set it.
 SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
     CsgOperation operation, float epsilon, const CsgParallelOptions& parallel, bool preferWantedSide = false)
 {
@@ -1549,6 +1548,11 @@ SharedPtr<const CsgSolid> BooleanOnce(const SharedPtr<const CsgSolid>& a, const 
     CsgWantedSides sides;
     if (operation == CsgOperation::Intersection)
         sides.outsideB_ = false;
+    else if (operation == CsgOperation::Union)
+    {
+        sides.outsideA_ = true;
+        sides.keepSharedNearest_ = true;
+    }
     core.ConstrainCrossings(scratch, preferWantedSide, sides);
     core.SplitFaces(scratch);
 
@@ -1583,18 +1587,18 @@ struct CsgOpenCounts
     }
 };
 
-/// The exact pass. Call it with the exact decisions. DifferenceAB and Intersection use the wanted side rule of
-/// ConstrainCrossings on the fine grid. Then a repeated identical cut does not add triangles. A move of the rule can
-/// open a result that the nearest rounding keeps closed. If the result has more open edges than the operands, the
+/// The exact pass. Call it with the exact decisions. DifferenceAB, Intersection and Union use the wanted side rule of
+/// ConstrainCrossings on the fine grid. Then a repeated identical boolean does not add triangles. A move of the rule
+/// can open a result that the nearest rounding keeps closed. If the result has more open edges than the operands, the
 /// pass runs again with the nearest rounding. The result with fewer open edges stays.
-/// Union does not use the rule. In the sweep of rotated boxes, a union with the rule gave a closed result, but the
-/// next union of that result opened in all passes (the axis (0, 1, 0) at 0.6 and 90.6 degrees). The rule with the
-/// edge planes only keeps the sweep open count, but it adds thick retries in a finer sweep.
+/// Union also keeps the nearest rounding of crossings with a shared nearest grid point (see CsgWantedSides).
+/// Without this, the union of rotated boxes A + B is closed, but (A + B) + C opens the rule pass.
 SharedPtr<const CsgSolid> ExactPass(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,
     CsgOperation operation, float epsilon, const CsgParallelOptions& parallel, CsgOpenCounts& counts)
 {
     const bool prefer = CsgPreferWantedSide
-        && (operation == CsgOperation::DifferenceAB || operation == CsgOperation::Intersection);
+        && (operation == CsgOperation::DifferenceAB || operation == CsgOperation::Intersection
+            || operation == CsgOperation::Union);
     SharedPtr<const CsgSolid> result = BooleanOnce(a, b, operation, epsilon, parallel, prefer);
     if (!prefer)
         return result;
