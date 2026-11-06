@@ -2181,7 +2181,35 @@ TEST_CASE("The same rotated hole cut 12 times keeps the triangle count of cut 3"
 #endif
 
 #if defined(CSG_EXACT_USE_DOUBLE)
-// The wanted side rule applies to DifferenceAB only. A union uses the nearest rounding, so it can open the exact pass.
+// The same prism intersects the wall 12 times at 17 degrees. The wanted side of an intersection is inside both
+// operands. With the nearest rounding, the exact pass opens from the second step, and the thick result at step 16
+// is open with a negative volume. With the rule, the triangle count at step 12 equals the count at step 3, and the
+// exact pass stays closed at each step: no nearest retry and no thick retry.
+TEST_CASE("The same rotated hole intersected 12 times keeps the triangle count of step 3", "[boolean][thick]")
+{
+    const auto hole = MakeHole(1.0f, 0.5f, Quaternion(17.0f, Vector3::FORWARD));
+    const double single = Volume(Run(MakeWall(), hole, CsgOperation::Intersection));
+    SolidPtr solid = MakeWall();
+    unsigned trianglesAt3 = 0;
+    for (int step = 1; step <= 12; ++step)
+    {
+        CAPTURE(step);
+        g_csgDiagnostics.Reset();
+        solid = Run(solid, hole, CsgOperation::Intersection);
+        CHECK(g_csgDiagnostics.wantedSideRetries_.load() == 0);
+        CHECK(g_csgDiagnostics.thickRetries_.load() == 0);
+        if (step == 3)
+            trianglesAt3 = TriangleCount(solid);
+    }
+    CHECK(TriangleCount(solid) == trianglesAt3);
+    CheckNoOpenEdges(solid);
+    CHECK(NearVolume(Volume(solid), single));
+}
+#endif
+
+#if defined(CSG_EXACT_USE_DOUBLE)
+// The wanted side rule applies to DifferenceAB and Intersection only. A union uses the nearest rounding, so it can open
+// the exact pass.
 // The boxes A, B and C of the sweep rotate about the axis (1, 1, 1) by 31 degrees. A and B share the plane x = 1.
 // The union (A + B) + C opens in the exact pass. Boolean then runs again with thick decisions.
 // The thick result is closed and has the volume of the union of the three boxes.

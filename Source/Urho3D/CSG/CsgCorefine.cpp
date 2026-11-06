@@ -2958,7 +2958,7 @@ int Corefinement::CountInvalidCrossings(CsgScratch& scratch, int (&perRule)[4], 
     return invalid;
 }
 
-void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide)
+void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide, CsgWantedSides sides)
 {
     if constexpr (!ConstrainCrossingsOnGrid)
         return;
@@ -3033,8 +3033,8 @@ void Corefinement::ConstrainCrossings(CsgScratch& scratch, bool preferWantedSide
             const int sign = planes.plane_[i].Sign(point);
             if (sign == 0)
                 continue;
-            // The volume is positive outside an operand. Outside B and inside A are wanted.
-            if ((sign > 0) == mesh.isSecond_)
+            // The volume is positive outside an operand. The sides tell which side of each operand is wanted.
+            if ((sign > 0) == (mesh.isSecond_ ? sides.outsideB_ : sides.outsideA_))
                 ++wanted;
             else
                 ++unwanted;
