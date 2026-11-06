@@ -2182,7 +2182,7 @@ TEST_CASE("The same rotated hole cut 12 times keeps the triangle count of cut 3"
 
 #if defined(CSG_EXACT_USE_DOUBLE)
 // The same prism intersects the wall 12 times at 17 degrees. The wanted side of an intersection is inside both
-// operands. With the nearest rounding, the exact pass opens from the second step, and the thick result at step 16
+// operands. With the nearest rounding, the exact pass opens from the second step, and the thick result at step 12
 // is open with a negative volume. With the rule, the triangle count at step 12 equals the count at step 3, and the
 // exact pass stays closed at each step: no nearest retry and no thick retry.
 TEST_CASE("The same rotated hole intersected 12 times keeps the triangle count of step 3", "[boolean][thick]")
