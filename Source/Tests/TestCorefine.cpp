@@ -706,7 +706,7 @@ namespace
 /// The left face rises 0.4 grid unit in x for each grid unit in z. The right face rises 0.6 grid unit.
 CsgSolid MakeRidgePrism()
 {
-    const float unit = static_cast<float>(1.0 / 1024.0);
+    const float unit = static_cast<float>(1.0 / CsgGridScale);
     const auto polygon = [](std::initializer_list<Vector3> corners)
     {
         ea::vector<ModelVertex> vertices;
@@ -742,7 +742,7 @@ TEST_CASE("Corefine thick mode puts the crossings of an edge near a shared edge 
     // It crosses the left face at x = -0.4 grid unit and the right face at x = 0.6 grid unit.
     // The exact rounding gives the grid points 0 and 1. Thick mode puts both crossings on the first one.
     const CsgSolid b = MakeRidgePrism();
-    const float unit = static_cast<float>(1.0 / 1024.0);
+    const float unit = static_cast<float>(1.0 / CsgGridScale);
     const CsgSolid a(MakeBoxPolygons(Vector3(0.0f, 0.0f, 1511.0f * 0.5f * unit), Vector3(1.5f, 0.25f, 487.0f * 0.5f * unit), 1));
 
     const auto collect = [&](bool exactOnly, ea::vector<ea::pair<CsgGridPoint, CsgGridPoint>>& pairs)
