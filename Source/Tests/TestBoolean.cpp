@@ -2179,6 +2179,31 @@ TEST_CASE("The same rotated hole cut 12 times keeps the triangle count of cut 3"
     CHECK(NearVolume(Volume(solid), single));
 }
 #endif
+
+#if defined(CSG_EXACT_USE_DOUBLE)
+// The wanted side rule applies to DifferenceAB only. A union uses the nearest rounding, so it can open the exact pass.
+// The boxes A, B and C of the sweep rotate about the axis (1, 1, 1) by 31 degrees. A and B share the plane x = 1.
+// The union (A + B) + C opens in the exact pass. Boolean then runs again with thick decisions.
+// The thick result is closed and has the volume of the union of the three boxes.
+TEST_CASE("Thick mode: an open exact union runs again with thick decisions on the fine grid", "[boolean][thick]")
+{
+    const Quaternion world(31.0f, Vector3::ONE.Normalized());
+    const Quaternion own(37.0f, Vector3(1.0f, 1.0f, 0.0f).Normalized());
+    const Matrix3x4 worldTransform(Vector3::ZERO, world, 1.0f);
+    const auto a = MakeBox(Vector3::ZERO, 1, worldTransform);
+    const auto b = MakeBox(Vector3(1.0f, 0.0f, 0.0f), 2, worldTransform);
+    const auto c = MakeBox(Vector3(0.5f, 1.0f, 0.3f), 3, Matrix3x4(Vector3::ZERO, world * own, 1.0f));
+
+    const auto ab = Run(a, b, CsgOperation::Union);
+    CheckNoOpenEdges(ab);
+
+    g_csgDiagnostics.Reset();
+    const auto result = Run(ab, c, CsgOperation::Union);
+    CHECK(g_csgDiagnostics.thickRetries_.load() >= 1);
+    CheckNoOpenEdges(result);
+    CHECK(Volume(result) == Catch::Approx(16.051433).margin(GridVolumeTolerance(3.0 * BOX_AREA)));
+}
+#endif
 #endif
 
 
