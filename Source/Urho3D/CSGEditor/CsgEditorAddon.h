@@ -32,6 +32,8 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 ///
 /// If a root or a brush is active, the addon draws the debug shapes of all operands of the root.
 /// Each shape has the color of its operation. A selected brush draws with no depth test.
+/// An overlay in the view corner lists the brushes of the root and the build status.
+/// A click on a list item selects the brush. The hotkeys `[` and `]` move the active brush in the list.
 class CsgEditorAddon : public SceneViewAddon
 {
     URHO3D_OBJECT(CsgEditorAddon, SceneViewAddon);
@@ -46,6 +48,7 @@ public:
     bool RenderToolbar() override;
     bool RenderTabContextMenu() override;
     void Render(SceneViewPage& page) override;
+    void ProcessInput(SceneViewPage& page, bool& mouseConsumed) override;
     void WriteIniSettings(ImGuiTextBuffer& output) override;
     void ReadIniSettings(const char* line) override;
     /// The priority is above 0. Then the addon gets a Model drop before SceneDragAndDropPrefab.
@@ -61,6 +64,8 @@ public:
     void AddBrush(int operation, bool useCursorRay);
     /// Set the operation on all selected brush nodes.
     void SetSelectedOperation(int operation);
+    /// Move the active brush by the step in the operand list of its root. One undo step reverts the move.
+    void MoveActiveBrush(int step);
 
 private:
     enum class DropMode
@@ -73,6 +78,8 @@ private:
     bool IsAvailable() const;
     /// Render the toolbar combo of the brush presets.
     void RenderPresetCombo();
+    /// Render the operand list of the root in the corner of the view.
+    void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
     /// Move the preview brush to the cursor hit point.
@@ -89,9 +96,14 @@ private:
     void SetUnion();
     void SetDifference();
     void SetIntersection();
+    void MoveEarlier();
+    void MoveLater();
 
     /// The index of the preset model for new brushes. The editor settings keep the preset name.
     unsigned presetIndex_{};
+    /// The screen rectangle of the operand overlay in the last frame.
+    Rect overlayRect_;
+    bool overlayVisible_{};
 
     DropMode dropMode_{DropMode::None};
     WeakPtr<SceneViewPage> dropPage_;

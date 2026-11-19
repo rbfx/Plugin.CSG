@@ -4,6 +4,7 @@
 
 #include "Urho3D/CSGEditor/CsgEditorAddon.h"
 
+#include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 
 #include <Editor/Core/CommonEditorActions.h>
@@ -68,9 +69,70 @@ const auto Hotkey_AddSubtract = EditorHotkey{"Csg.AddSubtract"}.Shift().Press(KE
 const auto Hotkey_SetUnion = EditorHotkey{"Csg.SetUnion"}.Press(KEY_1);
 const auto Hotkey_SetDifference = EditorHotkey{"Csg.SetDifference"}.Press(KEY_2);
 const auto Hotkey_SetIntersection = EditorHotkey{"Csg.SetIntersection"}.Press(KEY_3);
+const auto Hotkey_MoveEarlier = EditorHotkey{"Csg.MoveEarlier"}.Press(KEY_LEFTBRACKET);
+const auto Hotkey_MoveLater = EditorHotkey{"Csg.MoveLater"}.Press(KEY_RIGHTBRACKET);
 
 const StringHash RootType("CsgRoot");
 const StringHash BrushType("CsgBrush");
+const StringHash RebuildEvent("CsgRequestRebuild");
+
+/// The width of the operand overlay in pixels and its distance from the view corner.
+const float OverlayWidth = 260.0f;
+const float OverlayMargin = 8.0f;
+
+/// Return the read-only build status of the root, or an empty string.
+ea::string GetBuildStatus(Node* rootNode)
+{
+    Component* root = rootNode ? rootNode->GetComponent(RootType) : nullptr;
+    return root ? root->GetAttribute("Build Status").GetString() : EMPTY_STRING;
+}
+
+/// Send the rebuild event to the root of the node in the scene, if the root exists.
+void RequestRebuild(Scene* scene, unsigned rootNodeId)
+{
+    Node* rootNode = scene ? scene->GetNode(rootNodeId) : nullptr;
+    if (Component* root = rootNode ? rootNode->GetComponent(RootType) : nullptr)
+        root->SendEvent(RebuildEvent);
+}
+
+/// Wrap an action and make the root rebuild after each undo and redo.
+/// Node::ReorderChild sends no event, so the root does not see the new order without the event.
+class RebuildRootActionWrapper : public BaseEditorActionWrapper
+{
+public:
+    RebuildRootActionWrapper(SharedPtr<EditorAction> action, Node* rootNode)
+        : BaseEditorActionWrapper(action)
+        , scene_(rootNode->GetScene())
+        , rootNodeId_(rootNode->GetID())
+    {
+    }
+
+    void Redo() const override
+    {
+        BaseEditorActionWrapper::Redo();
+        RequestRebuild(scene_, rootNodeId_);
+    }
+
+    void Undo() const override
+    {
+        BaseEditorActionWrapper::Undo();
+        RequestRebuild(scene_, rootNodeId_);
+    }
+
+private:
+    const WeakPtr<Scene> scene_;
+    const unsigned rootNodeId_{};
+};
+
+/// Return the index of the child in the child list of its parent.
+unsigned GetChildIndex(Node* child)
+{
+    const ea::vector<SharedPtr<Node>>& children = child->GetParent()->GetChildren();
+    unsigned index = 0;
+    while (index < children.size() && children[index] != child)
+        ++index;
+    return index;
+}
 
 const char* GetOperationIcon(const ea::string& name)
 {
@@ -138,6 +200,8 @@ CsgEditorAddon::CsgEditorAddon(SceneViewTab* owner)
     hotkeyManager->BindHotkey(this, Hotkey_SetUnion, &CsgEditorAddon::SetUnion);
     hotkeyManager->BindHotkey(this, Hotkey_SetDifference, &CsgEditorAddon::SetDifference);
     hotkeyManager->BindHotkey(this, Hotkey_SetIntersection, &CsgEditorAddon::SetIntersection);
+    hotkeyManager->BindHotkey(this, Hotkey_MoveEarlier, &CsgEditorAddon::MoveEarlier);
+    hotkeyManager->BindHotkey(this, Hotkey_MoveLater, &CsgEditorAddon::MoveLater);
 
     URHO3D_LOGDEBUG("CSG editor addon is registered");
 }
@@ -258,6 +322,48 @@ void CsgEditorAddon::SetSelectedOperation(int operation)
     owner_->PushAction<ChangeComponentAttributesAction>(page->scene_.Get(), "Operation", components, oldValues, newValues);
 }
 
+void CsgEditorAddon::MoveActiveBrush(int step)
+{
+    if (!IsAvailable())
+        return;
+
+    SceneViewPage* page = owner_->GetActivePage();
+    if (!page || page->IsSimulationActive())
+        return;
+
+    Node* brushNode = page->selection_.GetActiveNode();
+    Node* rootNode = brushNode ? brushNode->GetParent() : nullptr;
+    if (!IsBrushNode(brushNode) || !IsRootNode(rootNode))
+        return;
+
+    // The operand index counts the brush children only. The move skips the other children.
+    const ea::vector<Node*> brushes = GetAllBrushChildren(rootNode);
+    const auto iter = ea::find(brushes.begin(), brushes.end(), brushNode);
+    const int fromIndex = static_cast<int>(iter - brushes.begin());
+    const int toIndex = fromIndex + step;
+    if (iter == brushes.end() || toIndex < 0 || toIndex >= static_cast<int>(brushes.size()))
+        return;
+
+    const unsigned oldChildIndex = GetChildIndex(brushNode);
+    // MoveOperand sends the rebuild event. The wrapper sends it again on undo and redo.
+    if (!MoveOperand(rootNode, fromIndex, toIndex))
+        return;
+    const unsigned newChildIndex = GetChildIndex(brushNode);
+
+    const auto reorder = MakeShared<ReorderNodeAction>(brushNode, oldChildIndex, newChildIndex);
+    owner_->PushAction(MakeShared<RebuildRootActionWrapper>(reorder, rootNode));
+}
+
+void CsgEditorAddon::MoveEarlier()
+{
+    MoveActiveBrush(-1);
+}
+
+void CsgEditorAddon::MoveLater()
+{
+    MoveActiveBrush(1);
+}
+
 void CsgEditorAddon::AddUnionBrush()
 {
     AddBrush(FindOperation(UnionName), true);
@@ -289,10 +395,16 @@ bool CsgEditorAddon::RenderToolbar()
         return false;
 
     auto hotkeyManager = owner_->GetHotkeyManager();
+    SceneViewPage* page = owner_->GetActivePage();
+    Node* activeNode = page ? page->selection_.GetActiveNode() : nullptr;
+    // The tooltips show the build status of the active root.
+    const ea::string buildStatus = GetBuildStatus(FindActiveRoot(activeNode));
+
     const auto makeTooltip = [&](const ea::string& title, const EditorHotkey* hotkey)
     {
         const ea::string label = hotkey ? hotkeyManager->GetHotkeyLabel(*hotkey) : ea::string{};
-        return label.empty() ? title : Format("{} ({})", title, label);
+        const ea::string text = label.empty() ? title : Format("{} ({})", title, label);
+        return buildStatus.empty() ? text : Format("{}\nCSG Build Status: {}", text, buildStatus);
     };
 
     RenderPresetCombo();
@@ -304,9 +416,7 @@ bool CsgEditorAddon::RenderToolbar()
         AddBrush(FindOperation(DifferenceName), false);
 
     // The operation buttons show the operation of the active brush. They change all selected brushes.
-    SceneViewPage* page = owner_->GetActivePage();
     const bool hasBrushes = page && !GetSelectedBrushes(*page).empty();
-    Node* activeNode = page ? page->selection_.GetActiveNode() : nullptr;
     const int activeOperation = activeNode ? GetOperation(activeNode) : -1;
 
     ui::BeginDisabled(!hasBrushes);
@@ -582,6 +692,65 @@ void CsgEditorAddon::Render(SceneViewPage& page)
                 brush->DrawDebugGeometry(debug, !page.selection_.IsSelected(brushNode));
         }
     }
+
+    RenderOperandOverlay(page, rootNode);
+}
+
+void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
+{
+    // The overlay rectangle is from the last frame. A click on the overlay must not select in the scene.
+    if (overlayVisible_ && ui::IsMouseHoveringRect(ToImGui(overlayRect_.min_), ToImGui(overlayRect_.max_)))
+        mouseConsumed = true;
+    overlayVisible_ = false;
+}
+
+void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
+{
+    const Rect& area = page.contentArea_;
+    if (area.Size().x_ < OverlayWidth + 2.0f * OverlayMargin)
+        return;
+
+    // The overlay is in the top right corner. The debug HUD uses the top left corner.
+    ui::SetCursorScreenPos(ImVec2{area.max_.x_ - OverlayWidth - OverlayMargin, area.min_.y_ + OverlayMargin});
+    ui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.0f, 0.0f, 0.0f, 0.6f});
+    const ImGuiChildFlags childFlags = ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY;
+    if (ui::BeginChild("##CsgOperands", ImVec2{OverlayWidth, 0.0f}, childFlags, ImGuiWindowFlags_NoScrollbar))
+    {
+        ui::TextUnformatted(Format("{} {}", ICON_FA_CUBES, rootNode->GetName()).c_str());
+        ui::TextWrapped("%s", GetBuildStatus(rootNode).c_str());
+        ui::Separator();
+
+        Node* activeNode = page.selection_.GetActiveNode();
+        unsigned index = 0;
+        for (Node* brushNode : GetAllBrushChildren(rootNode))
+        {
+            Component* brush = brushNode->GetComponent(BrushType);
+            const bool enabled = brush && brush->IsEnabled();
+            const ea::string& name = brushNode->GetName();
+
+            ui::TextColored(ToImGui(GetOperationColor(GetOperation(brushNode))), "%s", ICON_FA_SQUARE);
+            ui::SameLine();
+            // The ID suffix keeps the label unique for nodes with the same name.
+            const ea::string label = Format("{}. {}{}##{}", index, name.empty() ? "(no name)" : name.c_str(),
+                enabled ? "" : " (off)", brushNode->GetID());
+            ui::BeginDisabled(!enabled);
+            const bool clicked = ui::Selectable(label.c_str(), brushNode == activeNode);
+            ui::EndDisabled();
+            if (clicked)
+            {
+                page.selection_.Clear();
+                page.selection_.SetSelected(brushNode, true);
+            }
+            ++index;
+        }
+        if (index == 0)
+            ui::TextDisabled("No brushes");
+    }
+    ui::EndChild();
+    ui::PopStyleColor();
+
+    overlayRect_ = Rect{ToVector2(ui::GetItemRectMin()), ToVector2(ui::GetItemRectMax())};
+    overlayVisible_ = true;
 }
 
 bool CsgEditorAddon::RenderTabContextMenu()
