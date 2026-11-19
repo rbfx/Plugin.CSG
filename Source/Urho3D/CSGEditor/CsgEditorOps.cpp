@@ -5,11 +5,15 @@
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 
 #include <Urho3D/Core/Context.h>
+#include <Urho3D/Core/Format.h>
 #include <Urho3D/Core/ObjectReflection.h>
 #include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
+#include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/IO/File.h>
 #include <Urho3D/IO/FileSystem.h>
 #include <Urho3D/IO/Log.h>
+#include <Urho3D/IO/VirtualFileSystem.h>
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Resource/XMLElement.h>
 #include <Urho3D/Resource/XMLFile.h>
@@ -491,6 +495,117 @@ ea::string DescribeRoot(Node* rootNode)
     if (status.GetType() == VAR_STRING && !status.GetString().empty())
         text += status.GetString() + "\n";
     return text;
+}
+
+StaticModel* FindResultStaticModel(Node* rootNode)
+{
+    if (!rootNode)
+        return nullptr;
+    for (Node* child : rootNode->GetChildren())
+    {
+        if (IsResultNodeOfRoot(child, rootNode))
+            return child->GetComponent<StaticModel>();
+    }
+    return nullptr;
+}
+
+BakedModelPath ChooseBakedModelPath(
+    Context* context, ea::span<const ea::string> hintResourceNames, const ea::string& rootNodeName)
+{
+    auto cache = context ? context->GetSubsystem<ResourceCache>() : nullptr;
+    auto fileSystem = context ? context->GetSubsystem<FileSystem>() : nullptr;
+    if (!cache || !fileSystem)
+        return {};
+
+    // The file name of a hint ends with its resource name. The rest is the resource directory.
+    ea::string directory;
+    for (const ea::string& hint : hintResourceNames)
+    {
+        if (hint.empty())
+            continue;
+        // The hint can also be an absolute file name, for example the file name of a scene.
+        ea::string resourceName = hint;
+        if (auto vfs = context->GetSubsystem<VirtualFileSystem>(); vfs && !cache->Exists(hint))
+        {
+            const FileIdentifier identifier = vfs->GetIdentifierFromAbsoluteName(hint);
+            if (!identifier.fileName_.empty())
+                resourceName = identifier.fileName_;
+        }
+        const ea::string file = cache->GetResourceFileName(resourceName);
+        if (file.length() > resourceName.length() && file.ends_with(resourceName))
+        {
+            directory = file.substr(0, file.length() - resourceName.length());
+            break;
+        }
+    }
+    if (directory.empty())
+        return {};
+
+    ea::string name;
+    for (const char ch : rootNodeName)
+    {
+        const bool plain = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+            || ch == '_' || ch == '-' || ch == '.';
+        name += plain ? ch : '_';
+    }
+    if (name.empty())
+        name = "CSG";
+
+    for (unsigned index = 0;; ++index)
+    {
+        const ea::string suffix = index == 0 ? ea::string{} : Format("_{}", index);
+        const ea::string resourceName = Format("Models/{}_Baked{}.mdl", name, suffix);
+        const ea::string fileName = directory + resourceName;
+        if (!fileSystem->FileExists(fileName) && !cache->Exists(resourceName))
+            return {resourceName, fileName};
+    }
+}
+
+bool SaveBakedModel(Context* context, Node* rootNode, const ea::string& fileName)
+{
+    StaticModel* result = FindResultStaticModel(rootNode);
+    const Model* model = result ? result->GetModel() : nullptr;
+    if (!model || model->GetNumGeometries() == 0)
+    {
+        URHO3D_LOGERROR("Cannot bake: the root has no result model");
+        return false;
+    }
+
+    auto fileSystem = context->GetSubsystem<FileSystem>();
+    fileSystem->CreateDirsRecursive(GetPath(fileName));
+    bool saved = false;
+    {
+        File file(context, fileName, FILE_WRITE);
+        saved = file.IsOpen() && model->Save(file);
+    }
+    if (!saved)
+    {
+        fileSystem->Delete(fileName);
+        URHO3D_LOGERROR("Cannot write the model file \"{}\"", fileName);
+    }
+    return saved;
+}
+
+Node* CreateBakedNode(Node* rootNode, const ea::string& modelResourceName)
+{
+    Node* parent = rootNode ? rootNode->GetParent() : nullptr;
+    StaticModel* result = FindResultStaticModel(rootNode);
+    if (!parent || !result)
+    {
+        URHO3D_LOGERROR("Cannot make the baked node: the root has no parent or no result");
+        return nullptr;
+    }
+    auto* cache = rootNode->GetSubsystem<ResourceCache>();
+    auto* model = cache->GetResource<Model>(modelResourceName);
+    if (!model)
+        return nullptr;
+
+    Node* baked = parent->CreateChild(rootNode->GetName() + " Baked");
+    baked->SetWorldTransform(rootNode->GetWorldPosition(), rootNode->GetWorldRotation(), rootNode->GetWorldScale());
+    auto* staticModel = baked->CreateComponent<StaticModel>();
+    staticModel->SetModel(model);
+    staticModel->SetMaterialsAttr(result->GetMaterialsAttr());
+    return baked;
 }
 
 } // namespace Urho3D

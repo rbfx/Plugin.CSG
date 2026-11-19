@@ -6874,3 +6874,64 @@ TEST_CASE("CsgRoot keeps the collision of a baked result", "[root][collision]")
     CHECK(CountComponents(root->GetResultNode(), CollisionShape::GetTypeStatic()) == 1);
 }
 #endif
+
+TEST_CASE("CsgRoot saves the result model and the model loads back equal", "[root][bake]")
+{
+    auto context = MakeCsgTestContext();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A root with no result saves nothing")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Empty");
+        VectorBuffer buffer;
+        CHECK(!root->SaveResultModel(buffer));
+        CHECK(buffer.GetSize() == 0);
+    }
+
+    SECTION("A result with two geometries saves and loads back")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Two");
+        AddSlabBrush(root, "Slab", 0.0f);
+        BuildFully(root, workQueue);
+        const Model* model = GetOutput(root)->GetModel();
+        REQUIRE(model);
+        REQUIRE(model->GetNumGeometries() == 2);
+
+        VectorBuffer buffer;
+        REQUIRE(root->SaveResultModel(buffer));
+        REQUIRE(buffer.GetSize() > 0);
+
+        buffer.Seek(0);
+        auto loaded = MakeShared<Model>(context);
+        REQUIRE(loaded->Load(buffer));
+
+        CHECK(loaded->GetNumGeometries() == model->GetNumGeometries());
+        CHECK(loaded->GetBoundingBox().min_.Equals(model->GetBoundingBox().min_));
+        CHECK(loaded->GetBoundingBox().max_.Equals(model->GetBoundingBox().max_));
+        CHECK(CountIndices(loaded) == CountIndices(model));
+        REQUIRE(loaded->GetVertexBuffers().size() == model->GetVertexBuffers().size());
+        REQUIRE(loaded->GetIndexBuffers().size() == model->GetIndexBuffers().size());
+        for (unsigned i = 0; i < model->GetVertexBuffers().size(); ++i)
+        {
+            const VertexBuffer* a = model->GetVertexBuffers()[i];
+            const VertexBuffer* b = loaded->GetVertexBuffers()[i];
+            CHECK(a->GetVertexCount() == b->GetVertexCount());
+            CHECK(a->GetElements() == b->GetElements());
+        }
+        for (unsigned i = 0; i < model->GetNumGeometries(); ++i)
+        {
+            const Geometry* a = model->GetGeometry(i, 0);
+            const Geometry* b = loaded->GetGeometry(i, 0);
+            REQUIRE(b);
+            CHECK(a->GetIndexStart() == b->GetIndexStart());
+            CHECK(a->GetIndexCount() == b->GetIndexCount());
+        }
+    }
+}

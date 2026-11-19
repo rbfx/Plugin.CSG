@@ -10,6 +10,7 @@
 #include <Editor/Core/CommonEditorActions.h>
 #include <Editor/Core/HotkeyManager.h>
 #include <Editor/Core/IniHelpers.h>
+#include <Editor/Core/CommonEditorActionBuilders.h>
 #include <Editor/Foundation/SceneViewTab/SceneSelectionRenderer.h>
 #include <Editor/Foundation/SceneViewTab/TransformManipulator.h>
 
@@ -515,6 +516,51 @@ void CsgEditorAddon::ToggleSelectedBrushes()
 
     // The attribute "Is Enabled" calls SetEnabled. Then undo and redo also make the root rebuild.
     owner_->PushAction<ChangeComponentAttributesAction>(page->scene_.Get(), "Is Enabled", components, oldValues, newValues);
+}
+
+void CsgEditorAddon::BakeToAsset()
+{
+    if (!IsAvailable())
+        return;
+
+    SceneViewPage* page = owner_->GetActivePage();
+    if (!page || page->IsSimulationActive())
+        return;
+
+    Scene* scene = page->scene_;
+    Node* rootNode = FindActiveRoot(page->selection_.GetActiveNode());
+    Component* root = rootNode ? rootNode->GetComponent(RootType) : nullptr;
+    if (!root || !rootNode->GetParent())
+        return;
+
+    // The resource directory comes from the scene file, or else from the base model of the root.
+    const ea::vector<ea::string> hints{scene->GetFileName(), root->GetAttribute("Model").GetResourceRef().name_};
+    const BakedModelPath path = ChooseBakedModelPath(context_, hints, rootNode->GetName());
+    if (path.fileName_.empty())
+    {
+        URHO3D_LOGERROR("Cannot bake: save the scene in a resource directory first");
+        return;
+    }
+    if (!SaveBakedModel(context_, rootNode, path.fileName_))
+        return;
+
+    // One action creates the node and disables the root. Then one undo step reverts both.
+    const CreateNodeActionBuilder builder{scene, AttributeScopeHint::Node};
+    Node* bakedNode = CreateBakedNode(rootNode, path.resourceName_);
+    if (!bakedNode)
+        return;
+    const Variant oldEnabled = root->GetAttribute("Is Enabled");
+    root->SetEnabled(false);
+
+    auto action = MakeShared<CompositeEditorAction>();
+    action->AddAction(builder.Build(bakedNode));
+    action->EmplaceAction<ChangeComponentAttributesAction>(scene, "Is Enabled", ea::vector<Component*>{root},
+        VariantVector{oldEnabled}, VariantVector{root->GetAttribute("Is Enabled")});
+    owner_->PushAction(action);
+
+    page->selection_.Clear();
+    page->selection_.SetSelected(bakedNode, true);
+    URHO3D_LOGINFO("Baked the result of \"{}\" to \"{}\"", rootNode->GetName(), path.fileName_);
 }
 
 void CsgEditorAddon::MoveEarlier()
@@ -1142,6 +1188,10 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
     {
         ui::TextUnformatted(Format("{} {}", ICON_FA_CUBES, rootNode->GetName()).c_str());
         ui::TextWrapped("%s", GetBuildStatus(rootNode).c_str());
+        if (ui::SmallButton("Bake to Asset"))
+            BakeToAsset();
+        if (ui::IsItemHovered())
+            ui::SetTooltip("Save the result as Models/<root name>_Baked.mdl and replace the root by a static model.");
         ui::Separator();
 
         Node* activeNode = page.selection_.GetActiveNode();
@@ -1219,6 +1269,11 @@ bool CsgEditorAddon::RenderTabContextMenu()
         if (ui::MenuItem(Format("Set {}", name).c_str(), label.c_str(), false, hasBrushes))
             SetSelectedOperation(index);
     }
+
+    ui::Separator();
+    const bool hasRoot = page && FindActiveRoot(page->selection_.GetActiveNode()) != nullptr;
+    if (ui::MenuItem("Bake to Asset", nullptr, false, hasRoot))
+        BakeToAsset();
 
     ui::Separator();
     RenderShapeSettings();

@@ -553,6 +553,15 @@ StaticModel* CsgRoot::GetResultModel() const
     return output_;
 }
 
+bool CsgRoot::SaveResultModel(Serializer& dest) const
+{
+    const StaticModel* output = output_;
+    const Model* model = output ? output->GetModel() : nullptr;
+    if (!model || model->GetNumGeometries() == 0)
+        return false;
+    return model->Save(dest);
+}
+
 ea::string CsgRoot::GetBuildStatus() const
 {
     if (rebuildInFlight_)

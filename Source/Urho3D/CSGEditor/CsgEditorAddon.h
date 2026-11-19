@@ -81,6 +81,9 @@ public:
     void MoveActiveBrush(int step);
     /// Toggle the enabled state of all selected brushes. One undo step reverts the change.
     void ToggleSelectedBrushes();
+    /// Save the result of the active root as a model file, add a sibling node with the model and disable the root.
+    /// One undo step removes the node and enables the root again. The file stays.
+    void BakeToAsset();
 
 private:
     enum class DropMode

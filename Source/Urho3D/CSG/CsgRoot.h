@@ -26,6 +26,7 @@ class CsgSolid;
 class Material;
 class Model;
 class StaticModel;
+class Serializer;
 class WorkQueue;
 
 /// Phase times and result sizes of one rebuild. See `CsgRoot::GetLastBuildStats`.
@@ -144,6 +145,11 @@ class PLUGIN_RBFXCSG_API CsgRoot : public CsgComponent
 
 public:
     explicit CsgRoot(Context* context);
+
+    /// Save the applied result model with `Model::Save`. The editor chooses the destination.
+    /// Return false if the root has no result model or the save fails. The model keeps its materials separate:
+    /// the caller reads them from `GetResultModel()->GetMaterialsAttr()`.
+    bool SaveResultModel(Serializer& dest) const;
 
     /// Register object factory.
     /// @nobind
