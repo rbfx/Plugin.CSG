@@ -184,6 +184,16 @@ The root moves the ray into the space of the result node, so a scaled or rotated
 No applied build result, a zero direction or no front face hit gives `P_HIT` false.
 In C++ the same function is `CsgRoot::Pick`.
 
+#### Stats event
+
+- `E_CSGROOTQUERYSTATS`. In: none. Out: `P_VERSION` (int, 1), `P_VALID` (bool), `P_BRUSHCOUNT` (unsigned, operands of the build),
+  `P_TRIANGLES` and `P_VERTICES` (unsigned, applied result model), `P_REBUILDMS` (float, boolean plus triangulation plus model build),
+  `P_REUSEDOPERANDS` (unsigned, operands from the cached prefix), `P_BUILDING` (bool, a job runs) and `P_ERROR` (string).
+- The numbers describe the last applied build. A root that built nothing has zeros and `P_VALID` false.
+- `P_ERROR` is empty for a valid result. Else it tells the reason: a failed build, an open solid, open edges, duplicate or degenerate triangles, or no volume.
+- The root does not know the brush that caused a problem, so the event has no brush ID. The overlay has no "Select offending brush" button.
+- A component that is not a root keeps `P_VERSION` unchanged.
+
 ## UV projection
 
 Each `CsgBrush` has three UV attributes. They come after "Materials" in the inspector.
@@ -460,6 +470,14 @@ The handles of each shape:
 - Undo removes the new node and enables the root. The file stays on the disk.
 - This command is not `Bake()`. `Bake()` works at run time and removes the brush nodes.
 
+### Stats and dimensions in the overlay
+
+- The overlay of the root has a collapsible "CSG stats" header. It shows "Brushes N, tris N, last build X ms, reused K/N" and the vertex count. The data comes from `E_CSGROOTQUERYSTATS`.
+- An invalid result shows a red "Invalid: <reason>" line. The line stays when the header is closed.
+- The "Shape" section of a selected procedural brush shows "Size X x Y x Z". It is the local bounds of the generated mesh times the world scale of the node. The tooltip says so.
+- The size comes from `E_CSGSHAPEQUERYBOUNDS` of `CsgShapeProtocol.h` (out: `P_VALID`, `P_MIN`, `P_MAX`, local space). The event does not change the protocol version. The pure function is `ComputeShapeWorldSize`.
+- While a handle drag runs, the section shows "Delta: x y z", the total delta in the local space of the brush.
+
 ### Manual check list
 
 The editor has no test harness for addons. Do these checks by hand:
@@ -550,6 +568,10 @@ The editor has no test harness for addons. Do these checks by hand:
 84. Save the scene in a resource directory. Add a box brush with B. Choose "Bake to Asset" in the CSG menu. The file `Models/CSG_Baked.mdl` appears in the resource directory. A node "CSG Baked" with the same shape appears and is selected. The root result is gone.
 85. Choose "Bake to Asset" again after you enable the root. The new file is `Models/CSG_Baked_1.mdl`. The first file stays.
 86. Push Ctrl+Z. The node "CSG Baked" goes and the root result comes back. The file stays. Push Ctrl+Y. The node and the disabled root come back.
+87. Select a root with a brush. The overlay shows "CSG stats" with "Brushes 1, tris N, last build X ms, reused 0/1". Add a second brush. The line shows "Brushes 2" and "reused 1/2". Click the header. The block closes.
+88. Set the base model of a root to a model with an open face. Add a subtract brush. The overlay shows a red "Invalid:" line with the reason, also when the "CSG stats" header is closed.
+89. Add a box. The "Shape" section shows "Size 1.000 x 1.000 x 1.000". Scale the node to 1, 2, 3. The size shows 1.000 x 2.000 x 3.000.
+90. Drag a face handle. While the mouse is down, the section shows "Delta: x y z". After the release, the line is gone.
 
 ## How to try the sample scene
 
