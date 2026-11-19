@@ -2274,3 +2274,71 @@ TEST_CASE("CsgRoot clone has exactly one result node", "[root]")
     CHECK(stale->GetResultNode() == first);
     CHECK(first->IsTemporary());
 }
+
+TEST_CASE("CsgRoot shows the build status", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/OpenBoxA.mdl", Vector3::ONE, 0);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    auto* fresh = scene->CreateChild("Fresh")->CreateComponent<CsgRoot>();
+    CHECK(fresh->GetBuildStatus() == "Not built");
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    RunFrames(root, workQueue, 10);
+    root->SetEpsilon(2e-4f);
+    CHECK(root->GetBuildStatus() == "Building...");
+    BuildFully(root, workQueue);
+    const ea::string expected = Format("{} triangles", root->GetLastBuildStats().triangleCount_);
+    const ea::string status = root->GetBuildStatus();
+    CHECK(status.starts_with("OK: "));
+    CHECK(status.ends_with(" ms, " + expected));
+    // The attribute gives the same text. The scene does not save it.
+    CHECK(root->GetAttribute("Build Status").GetString() == status);
+    const AttributeInfo* info = context->GetReflection<CsgRoot>()->GetAttribute("Build Status");
+    REQUIRE(info);
+    CHECK(!info->ShouldSave());
+    CHECK(!(info->mode_ & AM_FILE));
+    CHECK(!(info->mode_ & AM_PREFAB));
+    root->SetAttribute("Build Status", Variant(ea::string("Other")));
+    CHECK(root->GetBuildStatus() == status);
+
+    {
+        TestBuildHookGuard guard;
+        CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+        root->SetEpsilon(3e-4f);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildFailed());
+        CHECK(root->GetBuildStatus() == "Failed");
+    }
+
+    CsgRoot* open = scene->CreateChild("Open")->CreateComponent<CsgRoot>();
+    open->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/OpenBoxA.mdl"));
+    open->SetDeferredDelaySec(0.0f);
+    AddBoxBrush(open, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(open, workQueue);
+    CHECK(!open->GetLastBuildStats().valid_);
+    CHECK(open->GetBuildStatus() == "Invalid");
+}
+
+TEST_CASE("CsgRoot has the Add Brush action and CsgBrush does not", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    const AttributeInfo* rootAction = context->GetReflection<CsgRoot>()->GetAttribute("Add Brush");
+    REQUIRE(rootAction);
+    CHECK(rootAction->GetMetadata(AttributeMetadata::IsAction).GetBool());
+    CHECK(context->GetReflection<CsgBrush>()->GetAttribute("Add Brush") == nullptr);
+
+    auto scene = MakeShared<Scene>(context);
+    auto* root = scene->CreateChild("Root")->CreateComponent<CsgRoot>();
+    // The editor runs an action when it sets the attribute.
+    root->SetAttribute("Add Brush", true);
+    Node* brushNode = root->GetNode()->GetChild("Brush");
+    REQUIRE(brushNode);
+    CHECK(brushNode->GetComponent<CsgBrush>() != nullptr);
+}

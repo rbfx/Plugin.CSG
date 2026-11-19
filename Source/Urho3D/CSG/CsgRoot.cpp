@@ -278,6 +278,11 @@ void CsgRoot::RegisterObject(Context* context)
     URHO3D_ATTRIBUTE("Min Component Volume Fraction", float, minComponentVolumeFraction_, 0.0f, AM_DEFAULT);
     URHO3D_COPY_BASE_ATTRIBUTES(CsgComponent);
     URHO3D_ACTION_STATIC_LABEL("Rebuild", Rebuild, "Rebuild component CSG now");
+    URHO3D_ACTION_STATIC_LABEL("Add Brush", AddBrush, "Create new brush child node");
+    // The editor shows the status. The scene does not save it, and a set of the value has no effect.
+    URHO3D_CUSTOM_ACCESSOR_ATTRIBUTE(
+        "Build Status", [](const CsgRoot& self, Variant& value) { value = self.GetBuildStatus(); },
+        [](CsgRoot&, const Variant&) {}, ea::string, EMPTY_STRING, AM_EDIT | AM_READONLY);
 }
 
 void CsgRoot::ApplyAttributes()
@@ -463,6 +468,29 @@ Node* CsgRoot::GetResultNode() const
 StaticModel* CsgRoot::GetResultModel() const
 {
     return output_;
+}
+
+ea::string CsgRoot::GetBuildStatus() const
+{
+    if (rebuildInFlight_)
+        return "Building...";
+    if (lastBuildFailed_)
+        return "Failed";
+    if (!hasAppliedBuild_)
+        return "Not built";
+    if (!lastBuildStats_.valid_)
+        return "Invalid";
+    const float totalMs = lastBuildStats_.booleanMs_ + lastBuildStats_.triangulateMs_ + lastBuildStats_.buildModelMs_;
+    return Format("OK: {:.1f} ms, {} triangles", totalMs, lastBuildStats_.triangleCount_);
+}
+
+void CsgRoot::AddBrush()
+{
+    if (!node_)
+        return;
+
+    Node* child = node_->CreateChild("Brush");
+    child->CreateComponent<CsgBrush>();
 }
 
 void CsgRoot::ApplyResultToOutput(Model* model, const ResourceRefList& materials)
@@ -1194,6 +1222,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         root->lastBuildStats_ = job->stats_;
         root->lastGeometryComponents_ = ea::move(components);
         root->lastBuildFailed_ = false;
+        root->hasAppliedBuild_ = true;
     }
     else
     {
@@ -1217,6 +1246,7 @@ bool CsgRoot::ApplyPendingResult()
     ApplyResultToOutput(result.model_, result.materials_);
     lastBuildStats_ = result.stats_;
     lastGeometryComponents_ = result.components_;
+    hasAppliedBuild_ = true;
     return true;
 }
 

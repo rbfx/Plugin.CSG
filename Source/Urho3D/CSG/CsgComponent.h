@@ -42,8 +42,6 @@ protected:
     virtual void OnMaterialsChanged() {}
 
 private:
-    void AddBrush();
-
     ResourceRef modelAttr_{Model::GetTypeStatic()};
     ResourceRefList materialsAttr_{Material::GetTypeStatic()};
 };

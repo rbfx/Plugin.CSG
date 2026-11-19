@@ -178,6 +178,11 @@ public:
     Node* GetResultNode() const;
     /// Return the StaticModel that shows the result. Return null if the root did not make it yet.
     StaticModel* GetResultModel() const;
+    /// Return the build status text: "Building...", "OK: <ms> ms, <N> triangles", "Failed", "Invalid" or "Not built".
+    /// The time is the sum of the boolean, the triangulation and the model build of the last applied build.
+    ea::string GetBuildStatus() const;
+    /// Create a child node with the name "Brush" and a `CsgBrush`.
+    void AddBrush();
 
 protected:
     void ApplyAttributes() override;
@@ -295,6 +300,8 @@ private:
     CsgBuildStats lastBuildStats_;
     ea::vector<unsigned> lastGeometryComponents_;
     bool lastBuildFailed_{};
+    /// True after the root applied the result of a build that did not fail.
+    bool hasAppliedBuild_{};
 
     /// Final solid of the last applied build, after the shell filter. Bake uses it.
     SharedPtr<const CsgSolid> cachedSolid_;

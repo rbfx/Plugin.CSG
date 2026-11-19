@@ -3,7 +3,6 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSG/CsgComponent.h"
-#include "Urho3D/CSG/CsgBrush.h"
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Graphics/DebugRenderer.h>
 #include <Urho3D/Graphics/Geometry.h>
@@ -28,7 +27,6 @@ void CsgComponent::RegisterObject(Context* context)
     URHO3D_ATTRIBUTE("Model", ResourceRef, modelAttr_, ResourceRef(Model::GetTypeStatic()), AM_DEFAULT);
     URHO3D_MIXED_ACCESSOR_ATTRIBUTE("Materials", GetMaterialsAttr, SetMaterials, ResourceRefList,
         ResourceRefList(Material::GetTypeStatic()), AM_DEFAULT);
-    URHO3D_ACTION_STATIC_LABEL("Add Brush", AddBrush, "Create new brush child node");
 }
 
 void CsgComponent::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)
@@ -114,15 +112,6 @@ void CsgComponent::OnModelChanged()
     }
 
     materialsAttr_.names_.resize(numGeometries);
-}
-
-void CsgComponent::AddBrush()
-{
-    if (!node_)
-        return;
-
-    Node* child = node_->CreateChild("Brush");
-    child->CreateComponent<CsgBrush>();
 }
 
 } // namespace Urho3D
