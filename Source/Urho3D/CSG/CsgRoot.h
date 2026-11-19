@@ -301,6 +301,10 @@ private:
     void PruneBrushes();
     void MarkRebuildRequested();
     void ScheduleDeferredRebuild();
+    /// Post one task that compares the brush transforms with the last values that the root saw.
+    void ScheduleTransformCheck();
+    /// Request a build if the local transform of a brush changed. Clear the dirty flags of the nodes.
+    void CheckOperandTransforms();
     void DeferredRebuildTick(unsigned scheduleToken, WorkQueue* queue);
     StaticModel* GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache);
     bool SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* brush) const;
@@ -388,7 +392,8 @@ private:
     /// Child node that leaves the root now. The scene sends the removal event before the parent changes.
     Node* removedChild_{};
 
-    unsigned ignoreChildDirtyFrame_{};
+    /// A transform check task is in the queue.
+    bool transformCheckScheduled_{};
 };
 
 } // namespace Urho3D

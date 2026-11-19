@@ -5795,12 +5795,169 @@ TEST_CASE("A root move does not rebuild but a brush move does", "[root]")
     RunFrames(root, workQueue, 30);
     CHECK(root->GetRebuildRevision() == revision);
 
-    // A brush move requests a new build. A read of the world transform clears the dirty flag of the node
-    // that the root move set. Node::MarkDirty notifies only a clean node. The editor reads it every frame.
-    cut->GetNode()->GetWorldTransform();
+    // A brush move requests a new build. No other code reads the world transform of the brush between the moves.
     cut->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
     RunFrames(root, workQueue, 30);
     CHECK(root->GetRebuildRevision() != revision);
+}
+
+namespace
+{
+
+/// Count the build jobs. A job takes the hook, so the hook installs itself again.
+struct BuildCounter
+{
+    std::atomic<int> calls_{0};
+    std::function<void()> hook_;
+
+    BuildCounter()
+    {
+        hook_ = [this]
+        {
+            ++calls_;
+            CsgRoot::SetTestBuildHook(hook_);
+        };
+        CsgRoot::SetTestBuildHook(hook_);
+    }
+    BuildCounter(const BuildCounter&) = delete;
+    BuildCounter& operator=(const BuildCounter&) = delete;
+    ~BuildCounter() { CsgRoot::SetTestBuildHook(nullptr); }
+};
+
+/// Scene with a box root and one cut brush. The first result is applied and the root is idle.
+struct TransformCheckFixture
+{
+    SharedPtr<Context> context_{MakeCsgTestContext()};
+    WorkQueue* workQueue_{context_->GetSubsystem<WorkQueue>()};
+    SharedPtr<Scene> scene_;
+    CsgRoot* root_{};
+    CsgBrush* cut_{};
+
+    TransformCheckFixture()
+    {
+        AddBoxModel(context_, "Csg/BoxA.mdl", Vector3::ONE);
+        AddBoxModel(context_, "Csg/BoxB.mdl", Vector3::ONE);
+        scene_ = MakeShared<Scene>(context_);
+        scene_->CreateComponent<Octree>();
+        root_ = MakeBoxRoot(scene_, "Check");
+        cut_ = AddBoxBrush(root_, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        root_->Rebuild();
+        REQUIRE(RunUntilOutput(root_, workQueue_, 1000));
+        RunFrames(root_, workQueue_, 30);
+    }
+
+    /// Run the work queue only. The frame number of the time does not change.
+    void Pump(unsigned count = 10)
+    {
+        for (unsigned i = 0; i < count; ++i)
+            workQueue_->CompleteAll();
+    }
+};
+
+} // namespace
+
+TEST_CASE("A brush move at frame 0 gives one build", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "FrameZero");
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    for (unsigned i = 0; i < 20; ++i)
+        workQueue->CompleteAll();
+    REQUIRE(context->GetSubsystem<Time>()->GetFrameNumber() == 0);
+    REQUIRE(root->GetResultModel());
+
+    BuildCounter counter;
+    cut->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    for (unsigned i = 0; i < 20; ++i)
+        workQueue->CompleteAll();
+    CHECK(counter.calls_ == 1);
+}
+
+TEST_CASE("A root move and a brush move in one frame give one build", "[root]")
+{
+    const bool rootFirst = GENERATE(true, false);
+    TransformCheckFixture fixture;
+    BuildCounter counter;
+
+    if (rootFirst)
+        fixture.root_->GetNode()->SetPosition(Vector3(5.0f, 0.0f, 0.0f));
+    fixture.cut_->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    if (!rootFirst)
+        fixture.root_->GetNode()->SetPosition(Vector3(5.0f, 0.0f, 0.0f));
+    RunFrames(fixture.root_, fixture.workQueue_, 30);
+    CHECK(counter.calls_ == 1);
+}
+
+TEST_CASE("A root move in each frame gives no build", "[root]")
+{
+    TransformCheckFixture fixture;
+    const unsigned revision = fixture.root_->GetRebuildRevision();
+    BuildCounter counter;
+
+    for (unsigned i = 0; i < 30; ++i)
+    {
+        fixture.root_->GetNode()->SetPosition(Vector3(static_cast<float>(i + 1), 0.0f, 0.0f));
+        RunFrames(fixture.root_, fixture.workQueue_, 1);
+    }
+    RunFrames(fixture.root_, fixture.workQueue_, 10);
+    CHECK(counter.calls_ == 0);
+    CHECK(fixture.root_->GetRebuildRevision() == revision);
+}
+
+TEST_CASE("A root move and a brush set to the same position give no build", "[root]")
+{
+    TransformCheckFixture fixture;
+    BuildCounter counter;
+
+    fixture.root_->GetNode()->SetPosition(Vector3(5.0f, 0.0f, 0.0f));
+    fixture.cut_->GetNode()->SetPosition(fixture.cut_->GetNode()->GetPosition());
+    RunFrames(fixture.root_, fixture.workQueue_, 30);
+    CHECK(counter.calls_ == 0);
+}
+
+TEST_CASE("With a delay of 0 one brush move gives one build", "[root]")
+{
+    TransformCheckFixture fixture;
+    REQUIRE(fixture.root_->GetDeferredDelaySec() == 0.0f);
+    BuildCounter counter;
+
+    fixture.cut_->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    RunFrames(fixture.root_, fixture.workQueue_, 30);
+    CHECK(counter.calls_ == 1);
+}
+
+TEST_CASE("A brush move before an explicit rebuild gives no second build", "[root]")
+{
+    TransformCheckFixture fixture;
+    BuildCounter counter;
+
+    fixture.cut_->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    fixture.root_->Rebuild();
+    RunFrames(fixture.root_, fixture.workQueue_, 30);
+    CHECK(counter.calls_ == 1);
+}
+
+TEST_CASE("A brush move while the root is disabled gives one build after enable", "[root]")
+{
+    TransformCheckFixture fixture;
+    fixture.root_->SetEnabled(false);
+    RunFrames(fixture.root_, fixture.workQueue_, 5);
+    BuildCounter counter;
+
+    fixture.cut_->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    RunFrames(fixture.root_, fixture.workQueue_, 5);
+    CHECK(counter.calls_ == 0);
+
+    fixture.root_->SetEnabled(true);
+    RunFrames(fixture.root_, fixture.workQueue_, 30);
+    CHECK(counter.calls_ == 1);
 }
 
 namespace

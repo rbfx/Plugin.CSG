@@ -97,6 +97,8 @@ private:
     Vector2 uvOffset_{Vector2::ZERO};
     WeakPtr<CsgRoot> root_;
     bool dirty_{};
+    /// Local transform of the node at the last build or check of the root.
+    Matrix3x4 seenLocalTransform_{Matrix3x4::IDENTITY};
 };
 
 } // namespace Urho3D

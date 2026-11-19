@@ -341,30 +341,69 @@ void CsgRoot::OnSceneSet(Scene* previousScene, Scene* scene)
 
 void CsgRoot::OnMarkedDirty(Node* node)
 {
-    // Called by Node::MarkDirty when any listened node becomes dirty.
-    // This is the most reliable way to catch editor-driven transform changes.
+    // Node::MarkDirty calls this when a listened node becomes dirty. A move of the root marks the brushes dirty too.
+    // The check compares the local transforms of the brushes later. A move of the root changes no operand.
     if (!IsEnabledEffective())
         return;
 
-    Time* time = GetSubsystem<Time>();
-    const unsigned currentFrame = time->GetFrameNumber();
+    ScheduleTransformCheck();
+}
 
-    // Rebuild is pointless when root node moves: it doesn't change inputs in root-local space,
-    // it only moves the whole output together with the node.
-    // Note: Node::MarkDirty marks children dirty too, so we must ignore the child notifications
-    // caused by this same root dirty cascade.
-    if (node == node_)
-    {
-        ignoreChildDirtyFrame_ = currentFrame;
+void CsgRoot::ScheduleTransformCheck()
+{
+    if (transformCheckScheduled_)
         return;
+
+    WorkQueue* queue = GetSubsystem<WorkQueue>();
+    if (!queue)
+        return;
+
+    transformCheckScheduled_ = true;
+    queue->PostDelayedTaskForMainThread([weak = WeakPtr<CsgRoot>(this)](unsigned, WorkQueue*)
+    {
+        if (CsgRoot* root = weak)
+            root->CheckOperandTransforms();
+    });
+}
+
+void CsgRoot::CheckOperandTransforms()
+{
+    transformCheckScheduled_ = false;
+    if (!IsEnabledEffective() || !node_ || !GetScene())
+        return;
+
+    bool changed = false;
+    for (const WeakPtr<CsgBrush>& weakBrush : brushes_)
+    {
+        CsgBrush* brush = weakBrush;
+        if (!brush || !brush->IsEnabledEffective())
+            continue;
+        Node* brushNode = brush->GetNode();
+        if (!brushNode)
+            continue;
+
+        const Matrix3x4& transform = brushNode->GetTransformMatrix();
+        if (transform != brush->seenLocalTransform_)
+        {
+            brush->seenLocalTransform_ = transform;
+            changed = true;
+        }
     }
 
-    if (ignoreChildDirtyFrame_ == currentFrame)
-        return;
+    // A node notifies its listeners only when it becomes dirty. This read clears the flags, so a later change notifies again.
+    for (const WeakPtr<CsgBrush>& weakBrush : brushes_)
+    {
+        CsgBrush* brush = weakBrush;
+        if (Node* brushNode = brush ? brush->GetNode() : nullptr)
+            brushNode->GetWorldTransform();
+    }
+    node_->GetWorldTransform();
 
-    MarkRebuildRequested();
-
-    ScheduleDeferredRebuild();
+    if (changed)
+    {
+        MarkRebuildRequested();
+        ScheduleDeferredRebuild();
+    }
 }
 
 void CsgRoot::OnModelChanged()
@@ -583,6 +622,9 @@ void CsgRoot::UpdateSubscriptions()
         return;
     }
 
+    // A brush can move while the root is inactive. The check finds that change.
+    ScheduleTransformCheck();
+
     // A reparent of a child does not call OnNodeSet. The scene events report it.
     SubscribeToEvent(scene, E_NODEADDED, URHO3D_HANDLER(CsgRoot, HandleNodeAdded));
     SubscribeToEvent(scene, E_NODEREMOVED, URHO3D_HANDLER(CsgRoot, HandleNodeRemoved));
@@ -738,6 +780,8 @@ void CsgRoot::RegisterBrushInternal(CsgBrush* brush, bool requestRebuild)
     }
 
     brushes_.push_back(WeakPtr<CsgBrush>(brush));
+    if (Node* brushNode = brush->GetNode())
+        brush->seenLocalTransform_ = brushNode->GetTransformMatrix();
 
     if (IsEnabledEffective() && GetScene())
     {
@@ -1631,6 +1675,8 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
 
         // Extract polygons in the root frame (main thread).
         step.transform_ = rootFrame * child->GetWorldTransform();
+        // The build uses this transform. A later check must not request a build for it.
+        brush->seenLocalTransform_ = child->GetTransformMatrix();
         step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
         CsgProjectPolygonUvs(step.polygons_, step.uvMode_, step.uvScale_, step.uvOffset_);
         for (CsgPolygon& polygon : step.polygons_)

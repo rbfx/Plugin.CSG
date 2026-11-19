@@ -1355,10 +1355,11 @@ TEST_CASE("PickRootSource finds the subtract brush through the cavity", "[editor
     REQUIRE(root);
 
     // A ray into the cavity hits the floor. The floor is a face of the subtract brush.
+    // The brush has the scale 0.5 at z = 1, so the floor is at z = 0.75.
     const PickResult cavity = PickRootSource(root, Ray(Vector3(0, 0, 5), Vector3(0, 0, -1)));
     REQUIRE(cavity.hit_);
     CHECK(cavity.source_ == cut->GetID());
-    CHECK(cavity.position_.Equals(Vector3(0, 0, 0.5f), 1e-3f));
+    CHECK(cavity.position_.Equals(Vector3(0, 0, 0.75f), 1e-3f));
     CHECK(cavity.normal_.Equals(Vector3(0, 0, 1), 1e-3f));
 
     // The face handle of the floor is the -Z face of the brush.
