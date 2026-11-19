@@ -242,7 +242,7 @@ public:
     static SharedPtr<const CsgSolid> DropSmallComponents(
         const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);
     /// Same as DropSmallComponents, but return null if no component drops.
-    /// The function does not make a reference to the input solid, so a worker thread can use a shared solid.
+    /// The function does not make a reference to the input solid. This prevents reference count changes that are not necessary.
     static SharedPtr<const CsgSolid> DropSmallComponentsOrNull(
         const CsgSolid& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);
 

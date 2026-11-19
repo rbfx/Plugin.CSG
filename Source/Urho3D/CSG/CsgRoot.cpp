@@ -19,6 +19,7 @@
 #include <Urho3D/Graphics/VertexBuffer.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/Resource/ResourceCache.h>
+#include <Urho3D/Resource/ResourceEvents.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
 #include <Urho3D/Scene/SceneEvents.h>
@@ -423,6 +424,8 @@ void CsgRoot::UpdateSubscriptions()
             oldNode->RemoveListener(this);
     }
     listenedNodes_.clear();
+    if (!isActive)
+        UnwatchModels();
     UnsubscribeFromEvent(E_NODEADDED);
     UnsubscribeFromEvent(E_NODEREMOVED);
 
@@ -471,6 +474,43 @@ void CsgRoot::UpdateSubscriptions()
         if (!alreadyTracked)
             listenedNodes_.push_back(WeakPtr<Node>(brushNode));
     }
+}
+
+void CsgRoot::WatchModels(Model* baseModel, const ea::vector<BrushStep>& operands)
+{
+    // The cached fold states contain the geometry of these models. A reload changes the geometry in place.
+    UnwatchModels();
+    const auto watch = [this](Model* model)
+    {
+        if (!model)
+            return;
+        for (const WeakPtr<Model>& existing : watchedModels_)
+        {
+            if (existing == model)
+                return;
+        }
+        watchedModels_.push_back(WeakPtr<Model>(model));
+        SubscribeToEvent(model, E_RELOADFINISHED, URHO3D_HANDLER(CsgRoot, HandleModelReloaded));
+    };
+    watch(baseModel);
+    for (const BrushStep& operand : operands)
+        watch(operand.model_);
+}
+
+void CsgRoot::UnwatchModels()
+{
+    for (const WeakPtr<Model>& weakModel : watchedModels_)
+    {
+        if (Model* model = weakModel)
+            UnsubscribeFromEvent(model, E_RELOADFINISHED);
+    }
+    watchedModels_.clear();
+}
+
+void CsgRoot::HandleModelReloaded(StringHash /*eventType*/, VariantMap& /*eventData*/)
+{
+    ClearBuildCache();
+    RequestRebuild();
 }
 
 void CsgRoot::HandleNodeAdded(StringHash /*eventType*/, VariantMap& eventData)
@@ -799,7 +839,9 @@ void CsgRoot::Rebuild()
     // The base polygons are extracted only if the cached solid cannot be reused.
     const Matrix3x4 rootFrame = Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_) *
         node_->GetWorldTransform().Inverse();
-    if (!BuildOperands(job->operands_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
+    const bool hasOperands = BuildOperands(job->operands_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_);
+    WatchModels(job->baseModel_, job->operands_);
+    if (!hasOperands)
     {
         ClearBuildCache();
         rebuildDirty_ = false;
@@ -838,6 +880,7 @@ void CsgRoot::Rebuild()
         while (firstChanged < count)
         {
             const CsgBrush* brush = job->capturedBrushes_[firstChanged].brush_;
+            // The fingerprint compares the model pointer. A model change without an event, for example SetGeometry, is not detected.
             if (cachedBrushes_[firstChanged] != job->capturedBrushes_[firstChanged] || !brush || brush->IsDirty())
                 break;
             ++firstChanged;
@@ -913,7 +956,7 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         EvaluateOperands(job->operands_, job->baseSolid_, job->stepSolids_, job->epsilon_);
         job->stats_.foldSteps_ = job->operands_.size() - job->reusedOperands_;
         // The shell filter applies to the final solid only. The fold states keep all shells.
-        // A reused fold state is also in the cache of the root, so the worker uses a raw pointer to it.
+        // A raw pointer to the last fold state prevents reference count changes that are not necessary.
         const CsgSolid* solid = job->stepSolids_.back().Get();
         unsigned droppedComponents = 0;
         job->resultSolid_ =

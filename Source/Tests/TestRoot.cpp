@@ -20,8 +20,10 @@
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/IO/Log.h>
+#include <Urho3D/IO/VectorBuffer.h>
 #include <Urho3D/IO/VirtualFileSystem.h>
 #include <Urho3D/Resource/ResourceCache.h>
+#include <Urho3D/Resource/ResourceEvents.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
 
@@ -1452,4 +1454,73 @@ TEST_CASE("CsgRoot reuses the fold states when the last operand goes", "[root]")
     brushes[1]->GetNode()->SetPosition(Vector3(-1.0f, -1.0f, 1.0f));
     RunFrames(root, workQueue, 60);
     CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+}
+
+TEST_CASE("CsgRoot discards the fold states when a model reloads", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    // Model::Load looks for a metadata file. The file system has no mount points, so the search finds nothing.
+    context->RegisterSubsystem<VirtualFileSystem>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    SharedPtr<Model> reloaded = AddBoxModel(context, "Csg/BoxC.mdl", Vector3::ONE);
+    SharedPtr<Model> small = AddBoxModel(context, "Csg/Small.mdl", Vector3(0.5f, 0.5f, 0.5f));
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Reloaded");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[0]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxC.mdl"));
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    // A reload loads the new data into the same model object, then sends the event.
+    VectorBuffer data;
+    REQUIRE(small->Save(data));
+    data.Seek(0);
+    REQUIRE(reloaded->Load(data));
+
+    // The expected output uses the smaller box for the first brush.
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[0]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Small.mdl"));
+
+    SECTION("The event alone requests a rebuild of all steps")
+    {
+        const unsigned revision = root->GetRebuildRevision();
+        reloaded->SendEvent(E_RELOADFINISHED);
+        CHECK(root->GetRebuildRevision() != revision);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A move of the last operand after the reload evaluates all steps")
+    {
+        // The long delay keeps the rebuild of the event in the queue until the move.
+        root->SetDeferredDelaySec(100.0f);
+        reloaded->SendEvent(E_RELOADFINISHED);
+        brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+        root->Rebuild();
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+        expected[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("The root does not listen to a model that it no longer uses")
+    {
+        brushes[0]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+        RunFrames(root, workQueue, 60);
+        const unsigned revision = root->GetRebuildRevision();
+        reloaded->SendEvent(E_RELOADFINISHED);
+        CHECK(root->GetRebuildRevision() == revision);
+    }
 }

@@ -248,6 +248,10 @@ private:
     /// Collect the operands from the direct children of the node. Return false if there are no operands.
     bool BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& rootFrame, StaticModel* tempModel,
         ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials);
+    /// Listen for a reload of the base model and of the operand models. Stop to listen for other models.
+    void WatchModels(Model* baseModel, const ea::vector<BrushStep>& operands);
+    void UnwatchModels();
+    void HandleModelReloaded(StringHash eventType, VariantMap& eventData);
     void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
     void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
 
@@ -303,6 +307,8 @@ private:
     WeakPtr<StaticModel> tempBase_;
     ea::vector<WeakPtr<Node>> listenedNodes_;
     ea::vector<WeakPtr<CsgBrush>> brushes_;
+    /// Models that the root listens to for a reload.
+    ea::vector<WeakPtr<Model>> watchedModels_;
 
     unsigned ignoreChildDirtyFrame_{};
 };
