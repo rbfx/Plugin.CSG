@@ -349,6 +349,9 @@ The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBru
 - Shift+click a point handle to add it to the selection or to remove it. An axis handle is always alone in the selection.
 - A click on no handle clears the handle selection. The click then selects in the scene as usual.
 - Escape clears the handle selection.
+- Click a face of the result to select its brush and face handle. A subtract brush has no surface of its own: its cut faces select it. Ctrl toggles and Shift adds the brush, as in the stock selector. Only a plain click also selects the face handle.
+- The face handle is the axis handle that is in line with the face (|dot(axis, normal)| > 0.9). The nearest one along its axis wins, then the lower id. A sphere gets its radius handle only if the normal is in line with an axis. A face on the base model, or a face of a removed brush, selects the root as usual.
+- Alt+click selects the root, as the stock selector does. A click or a drag on a handle or on the gizmo does not pick a face.
 - The selected handles get a translate gizmo at their center. The gizmo uses the world axes, or the axes of the node if the transform gizmo is in local space.
 - Drag the gizmo to move the handles. A selected axis handle shows a long line along its axis. The handle follows the part of the drag along this line.
 - While handles are selected, the transform gizmo of the node does not show and does not react.
@@ -436,6 +439,7 @@ The editor has no test harness for addons. Do these checks by hand:
 61. Click on empty floor. The handle selection clears and the scene selection changes as usual. Select two brushes. No handles show.
 62. Repeat step 54 with the "Sphere", "Cylinder" and "Ring" presets. Each brush shows the handles of the table above.
 63. Clear "Show handles" in the overlay. The handles go. Restart the editor. The check box stays clear.
+64. Select the root. Click a cut face of a subtract brush in the view. The brush becomes the selection. For a box, the face handle is cyan and the overlay shows "Selected handles: 1". Alt+click selects the root.
 
 ## How to try the sample scene
 
