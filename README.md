@@ -313,6 +313,35 @@ During the drag, the tooltip shows "Material: <name>". A material shows as a liv
 
 The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the texture projection. See "UV projection".
 
+### Shape handles
+
+The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) in the view. A brush with a model has no handles.
+
+- Select exactly one node with a procedural brush. The handles show on the brush. With two or more selected nodes, no handles show.
+- A point handle is a square. It moves freely. An axis handle is a circle with a short line. It moves only along its axis.
+- The colors: a white point, an orange axis, a yellow handle under the cursor, a cyan selected handle. A tooltip shows the name of the handle.
+- Click a handle to select it. The click does not change the node selection.
+- Shift+click a point handle to add it to the selection or to remove it. An axis handle is always alone in the selection.
+- A click on no handle clears the handle selection. The click then selects in the scene as usual.
+- Escape clears the handle selection.
+- The selected handles get a translate gizmo at their center. The gizmo uses the world axes, or the axes of the node if the transform gizmo is in local space.
+- Drag the gizmo to move the handles. A selected axis handle shows a long line along its axis. The handle follows the part of the drag along this line.
+- While handles are selected, the transform gizmo of the node does not show and does not react.
+- Hold Ctrl during the drag to snap the handle to the grid of the brush space. The first selected handle snaps. An axis handle snaps only along its axis. "Snap step" sets the grid step (default 0.125). 0 turns off the snap.
+- Push Escape during the drag to cancel it. The shape goes back to the state before the drag.
+- A move to a shape that is not valid stops at the last valid shape.
+- The result of the root updates during the drag. One undo step reverts a full drag.
+- The overlay of the root has a "Shape" section: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. It has the "Show handles" check box and the "Snap step" field. The CSG menu of the tab context menu has the same two settings. The editor settings keep them.
+
+The handles of each shape:
+
+| Shape | Handles |
+| --- | --- |
+| Box | 8 corners (points) and 6 faces (axes). A face moves its 4 corners. |
+| Sphere | 6 radii (axes) at +X, -X, +Y, -Y, +Z and -Z. |
+| Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes) and the bulge (axis). A radius at an apex and a bulge on a thin body are not offered. |
+| Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
+
 ### Manual check list
 
 The editor has no test harness for addons. Do these checks by hand:
@@ -370,6 +399,16 @@ The editor has no test harness for addons. Do these checks by hand:
 51. Drag a `.png` that has no `<name>.png.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.png.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
 52. Select only a CSG root. Drag a material over the result of the root. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
 53. Select a brush, then drag a material onto another model that is not the CSG result. The stock editor assigns the material to that model, as before. Also select a plain node with a `StaticModel` and drag a material onto it. The stock editor assigns the material, as before.
+54. Select "Box" in the preset combo. Push B. The new box shows 8 white squares and 6 orange circles. The overlay shows "Shape: CsgBoxBrush" and "Valid".
+55. Click a corner. It turns cyan and a gizmo shows at the corner. The gizmo of the node goes. Drag the X arrow. The corner and the result follow. Push Ctrl+Z. The box comes back. Push Ctrl+Y. The move comes back.
+56. Shift+click two more corners. The overlay shows "Selected handles: 3". Drag the gizmo. The three corners move together.
+57. Click a face circle. Only the face is selected and a long line shows along its axis. Drag a gizmo arrow at an angle to the line. The face moves only along the line.
+58. Hold Ctrl and drag a corner. The corner stops on multiples of "Snap step" in the brush space. Set "Snap step" to 0. Ctrl does not snap.
+59. Start a drag and push Escape before the release. The box goes back to its shape before the drag. No undo step is added.
+60. Drag a face through the opposite face. The box stops at the last valid shape. The log shows no error.
+61. Click on empty floor. The handle selection clears and the scene selection changes as usual. Select two brushes. No handles show.
+62. Repeat step 54 with the "Sphere", "Cylinder" and "Ring" presets. Each brush shows the handles of the table above.
+63. Clear "Show handles" in the overlay. The handles go. Restart the editor. The check box stays clear.
 
 ## How to try the sample scene
 
