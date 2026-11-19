@@ -19,6 +19,7 @@
 #include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/IO/IOEvents.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/IO/VectorBuffer.h>
 #include <Urho3D/IO/VirtualFileSystem.h>
@@ -1710,6 +1711,34 @@ TEST_CASE("CsgRoot sees a reload of a cached model during a build that becomes s
 namespace
 {
 
+/// This object counts the error messages that the engine logs.
+class ErrorCounter : public Object
+{
+    URHO3D_OBJECT(ErrorCounter, Object);
+
+public:
+    explicit ErrorCounter(Context* context)
+        : Object(context)
+    {
+        SubscribeToEvent(E_LOGMESSAGE,
+            [this](StringHash, VariantMap& eventData)
+            {
+                if (eventData[LogMessage::P_LEVEL].GetInt() >= LOG_ERROR)
+                    ++count_;
+            });
+    }
+
+    unsigned GetCount() const { return count_; }
+
+private:
+    unsigned count_{};
+};
+
+} // namespace
+
+namespace
+{
+
 /// Create a root node with no base model and no delay for the rebuild.
 CsgRoot* MakeEmptyBaseRoot(Scene* scene, const ea::string& nodeName)
 {
@@ -1735,6 +1764,7 @@ TEST_CASE("CsgRoot with an empty base model and one Union brush gives the brush 
     AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
     AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1754,6 +1784,7 @@ TEST_CASE("CsgRoot with an empty base model and one Union brush gives the brush 
     CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
     CHECK(GetOutput(root)->GetModel()->GetBoundingBox().min_.Equals(
         GetOutput(expected)->GetModel()->GetBoundingBox().min_, 1e-4f));
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot with an empty base model folds Union then Subtract like a base made by the Union", "[root]")
@@ -1764,6 +1795,7 @@ TEST_CASE("CsgRoot with an empty base model folds Union then Subtract like a bas
     AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
     AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1778,6 +1810,7 @@ TEST_CASE("CsgRoot with an empty base model folds Union then Subtract like a bas
     BuildFully(expected, workQueue);
     CheckSameOutput(root, expected);
     CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot with an empty base model and only a Subtract brush gives an empty output", "[root]")
@@ -1787,6 +1820,7 @@ TEST_CASE("CsgRoot with an empty base model and only a Subtract brush gives an e
 
     AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1810,6 +1844,7 @@ TEST_CASE("CsgRoot with an empty base model and only a Subtract brush gives an e
         CHECK(IsOutputEmpty(root));
         CHECK(!root->GetLastBuildFailed());
     }
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot with an empty base model and no brush gives an empty output", "[root]")
@@ -1817,6 +1852,7 @@ TEST_CASE("CsgRoot with an empty base model and no brush gives an empty output",
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1825,6 +1861,7 @@ TEST_CASE("CsgRoot with an empty base model and no brush gives an empty output",
     RunFrames(root, workQueue, 60);
     CHECK(IsOutputEmpty(root));
     CHECK(!root->GetLastBuildFailed());
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot with an empty base model reuses the fold states", "[root]")
@@ -1834,6 +1871,7 @@ TEST_CASE("CsgRoot with an empty base model reuses the fold states", "[root]")
 
     AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1848,6 +1886,7 @@ TEST_CASE("CsgRoot with an empty base model reuses the fold states", "[root]")
     last->GetNode()->SetPosition(Vector3(3.0f, 0.5f, 0.0f));
     RunFrames(root, workQueue, 60);
     CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot with an empty base model bakes and keeps building", "[root]")
@@ -1857,6 +1896,7 @@ TEST_CASE("CsgRoot with an empty base model bakes and keeps building", "[root]")
 
     AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
 
+    ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -1872,6 +1912,7 @@ TEST_CASE("CsgRoot with an empty base model bakes and keeps building", "[root]")
     RunFrames(root, workQueue, 60);
     CHECK(!root->GetLastBuildFailed());
     CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("CsgRoot leaves out a removed brush at once with no delay", "[root]")
@@ -1902,4 +1943,77 @@ TEST_CASE("CsgRoot leaves out a removed brush at once with no delay", "[root]")
     AddBoxBrush(expected, "First", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
     BuildFully(expected, workQueue);
     CheckSameOutput(root, expected);
+}
+
+TEST_CASE("CsgRoot with an empty base model empties a warm output when the last brush goes", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    CsgBrush* brush = AddBoxBrush(root, "Add", Vector3::ZERO, CsgOperation::Union);
+    BuildFully(root, workQueue);
+    REQUIRE(!IsOutputEmpty(root));
+
+    brush->GetNode()->Remove();
+    RunFrames(root, workQueue, 60);
+    CHECK(IsOutputEmpty(root));
+    CHECK(GetOutput(root)->GetMaterialsAttr().names_.empty());
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRoot runs all steps when the base model toggles between empty and set", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    const ResourceRef boxA(Model::GetTypeStatic(), "Csg/BoxA.mdl");
+    const auto addBrushes = [](CsgRoot* target)
+    {
+        AddBoxBrush(target, "Add", Vector3(0.5f, 0.0f, 0.0f), CsgOperation::Union);
+        AddBoxBrush(target, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    };
+
+    CsgRoot* root = MakeBoxRoot(scene, "Toggled");
+    addBrushes(root);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    const auto checkState = [&](const char* name, bool withBase)
+    {
+        CsgRoot* fresh = withBase ? MakeBoxRoot(scene, name) : MakeEmptyBaseRoot(scene, name);
+        addBrushes(fresh);
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    };
+
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), ""));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+    checkState("FreshEmpty1", false);
+
+    root->SetModel(boxA);
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+    checkState("FreshBase", true);
+
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), ""));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+    checkState("FreshEmpty2", false);
+    CHECK(errors.GetCount() == 0);
 }
