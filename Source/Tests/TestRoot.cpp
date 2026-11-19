@@ -1706,3 +1706,170 @@ TEST_CASE("CsgRoot sees a reload of a cached model during a build that becomes s
     BuildFully(fresh, workQueue);
     CheckSameOutput(root, fresh);
 }
+
+namespace
+{
+
+/// Create a root node with no base model and no delay for the rebuild.
+CsgRoot* MakeEmptyBaseRoot(Scene* scene, const ea::string& nodeName)
+{
+    auto* root = scene->CreateChild(nodeName)->CreateComponent<CsgRoot>();
+    root->SetDeferredDelaySec(0.0f);
+    return root;
+}
+
+/// The output is empty if it has no model or no geometry.
+bool IsOutputEmpty(CsgRoot* root)
+{
+    const StaticModel* output = GetOutput(root);
+    return !output || !output->GetModel() || output->GetModel()->GetNumGeometries() == 0;
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot with an empty base model and one Union brush gives the brush shape", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    AddBoxBrush(root, "Add", Vector3::ZERO, CsgOperation::Union);
+    BuildFully(root, workQueue);
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    // A root with the same box as base and no brush has the same shape.
+    CsgRoot* expected = MakeBoxRoot(scene, "BoxOnly");
+    BuildFully(expected, workQueue);
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().min_.Equals(Vector3(-1.0f, -1.0f, -1.0f), 1e-4f));
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.Equals(Vector3(1.0f, 1.0f, 1.0f), 1e-4f));
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(8.0).margin(1e-3));
+    CHECK(root->GetLastBuildStats().faceCount_ == 12);
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().min_.Equals(
+        GetOutput(expected)->GetModel()->GetBoundingBox().min_, 1e-4f));
+}
+
+TEST_CASE("CsgRoot with an empty base model folds Union then Subtract like a base made by the Union", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    AddBoxBrush(root, "Add", Vector3::ZERO, CsgOperation::Union);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    CHECK(!root->GetLastBuildFailed());
+
+    CsgRoot* expected = MakeBoxRoot(scene, "BaseA");
+    AddBoxBrush(expected, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(expected, workQueue);
+    CheckSameOutput(root, expected);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+}
+
+TEST_CASE("CsgRoot with an empty base model and only a Subtract brush gives an empty output", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("Subtract")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+        AddBoxBrush(root, "Cut", Vector3::ZERO, CsgOperation::DifferenceAB);
+        root->Rebuild();
+        RunFrames(root, workQueue, 60);
+        CHECK(IsOutputEmpty(root));
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().faceCount_ == 0);
+    }
+
+    SECTION("Intersection")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+        AddBoxBrush(root, "Keep", Vector3::ZERO, CsgOperation::Intersection);
+        root->Rebuild();
+        RunFrames(root, workQueue, 60);
+        CHECK(IsOutputEmpty(root));
+        CHECK(!root->GetLastBuildFailed());
+    }
+}
+
+TEST_CASE("CsgRoot with an empty base model and no brush gives an empty output", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(IsOutputEmpty(root));
+    CHECK(!root->GetLastBuildFailed());
+}
+
+TEST_CASE("CsgRoot with an empty base model reuses the fold states", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    AddBoxBrush(root, "Add", Vector3::ZERO, CsgOperation::Union);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    CsgBrush* last = AddBoxBrush(root, "Add2", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+    last->GetNode()->SetPosition(Vector3(3.0f, 0.5f, 0.0f));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+}
+
+TEST_CASE("CsgRoot with an empty base model bakes and keeps building", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "EmptyBase");
+    AddBoxBrush(root, "Add", Vector3::ZERO, CsgOperation::Union);
+    BuildFully(root, workQueue);
+    REQUIRE(root->Bake());
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+}

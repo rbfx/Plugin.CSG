@@ -656,10 +656,6 @@ void CsgRoot::ScheduleDeferredRebuild()
     if (!IsEnabledEffective() || !node_)
         return;
 
-    // If base model is not set, avoid scheduling rebuilds that can never succeed.
-    if (GetModelAttr().name_.empty())
-        return;
-
     WorkQueue* queue = GetSubsystem<WorkQueue>();
     if (!queue)
         return;
@@ -698,7 +694,7 @@ void CsgRoot::DeferredRebuildTick(unsigned scheduleToken, WorkQueue* queue)
         return;
     }
 
-    if (!rebuildDirty_ || GetModelAttr().name_.empty())
+    if (!rebuildDirty_)
     {
         deferredRebuildScheduled_ = false;
         return;
@@ -808,17 +804,9 @@ void CsgRoot::Rebuild()
         return;
     }
 
-    // Base operand must be provided explicitly on CsgRoot.
-    if (GetModelAttr().name_.empty())
-    {
-        URHO3D_LOGERRORF(
-            "CsgRoot (%s:%u) has no <Model> set. CSG build is discarded.", node_->GetName().c_str(), node_->GetID());
-        ApplyResultToOutput(nullptr, {});
-        lastGeometryComponents_.clear();
-        return;
-    }
-
-    if (!SetupOperandStaticModel(tempBase, GetModelAttr(), GetMaterialsAttr()))
+    // An empty <Model> means an empty start solid. The fold applies the operands on it.
+    const bool hasBaseModel = !GetModelAttr().name_.empty();
+    if (hasBaseModel && !SetupOperandStaticModel(tempBase, GetModelAttr(), GetMaterialsAttr()))
     {
         ApplyResultToOutput(nullptr, {});
         lastGeometryComponents_.clear();
@@ -833,15 +821,18 @@ void CsgRoot::Rebuild()
     job->epsilon_ = epsilon_;
     job->minComponentVolumeFraction_ = minComponentVolumeFraction_;
     job->metricScale_ = CsgInternal::GetMetricScale(node_->GetWorldScale());
-    job->baseModel_ = tempBase->GetModel();
-    job->baseMaterials_ = tempBase->GetMaterialsAttr();
+    if (hasBaseModel)
+    {
+        job->baseModel_ = tempBase->GetModel();
+        job->baseMaterials_ = tempBase->GetMaterialsAttr();
+    }
 
     // A bake belongs to the base operand and to the epsilon that it was made with.
     if (baked_ && (baked_->baseModel_ != job->baseModel_ || baked_->epsilon_ != epsilon_))
         baked_.reset();
 
     // Prepare source lookup tables for output vertex layout and materials.
-    // MeshId 0 is reserved for the base operand. Baked faces refer to the tables of the build
+    // MeshId 0 is reserved for the base operand. An empty base keeps a null entry there. Baked faces refer to the tables of the build
     // that made them, so the new brushes extend these tables.
     job->sourceModels_.clear();
     job->sourceMaterials_.clear();
@@ -880,9 +871,11 @@ void CsgRoot::Rebuild()
             lastBuildFailed_ = false;
             return;
         }
-        // No operations: return base model directly.
-        const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
-        ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
+        // No operations: return base model directly. An empty base gives an empty output.
+        if (hasBaseModel)
+            ApplyResultToOutput(tempBase->GetModel(), tempBase->GetMaterialsAttr());
+        else
+            ApplyResultToOutput(nullptr, {});
         lastGeometryComponents_.clear();
         lastBuildFailed_ = false;
         return;
@@ -929,7 +922,7 @@ void CsgRoot::Rebuild()
             // Above 256 units in double mode, a vertex can move by one grid step in this round trip.
             job->basePolygons_ = CsgInternal::RescalePolygons(*baked_->solid_, factor);
         }
-        else
+        else if (hasBaseModel)
         {
             // The root frame has the world scale of the root but not its rotation or position.
             job->basePolygons_ = CsgBuildPolygonsFromModel(
