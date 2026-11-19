@@ -351,7 +351,9 @@ ea::optional<unsigned> ChooseFaceHandleForWorldHit(
     if (!brushNode)
         return ea::nullopt;
     const Vector3 localPoint = brushNode->WorldToLocal(worldPoint);
-    Vector3 localNormal = brushNode->WorldToLocal(Vector4(worldNormal, 0.0f));
+    // A normal uses the transpose of the world 3x3 matrix M = R * S: M^T n = S R^T n.
+    // The inverse (WorldToLocal) is right only for a direction, not for a normal.
+    Vector3 localNormal = brushNode->GetWorldTransform().ToMatrix3().Transpose() * worldNormal;
     if (localNormal.LengthSquared() <= 0.0f)
         return ea::nullopt;
     localNormal.Normalize();

@@ -1466,3 +1466,73 @@ TEST_CASE("RecenterShapePivot moves the node and the undo state restores both", 
     CHECK_FALSE(RecenterShapePivot(nullptr));
     CHECK_FALSE(RecenterShapePivot(rootNode->GetComponent<CsgRoot>()));
 }
+
+namespace
+{
+
+/// Return the world normal of a local normal: the transpose of the inverse of the world 3x3 matrix.
+Vector3 LocalToWorldNormal(const Node* node, const Vector3& localNormal)
+{
+    return (node->GetWorldTransform().ToMatrix3().Inverse().Transpose() * localNormal).Normalized();
+}
+
+} // namespace
+
+TEST_CASE("ChooseFaceHandleForWorldHit uses the normal matrix for skewed normals", "[editorops][pick]")
+{
+    Fixture f;
+    SECTION("A sphere on a node with the scale (1, 4, 1)")
+    {
+        Node* node = f.scene->CreateChild("Sphere");
+        auto* sphere = node->CreateComponent<CsgSphereBrush>();
+        node->SetScale(Vector3(1.0f, 4.0f, 1.0f));
+        node->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+        const auto handles = QueryShapeHandles(sphere).handles_;
+        REQUIRE_FALSE(handles.empty());
+        const float radius = sphere->GetRadius().x_;
+
+        // The angle is measured from the +X axis in the local XY plane. 35 degrees is not in line with an axis.
+        for (const float degrees : {0.0f, 10.0f, 21.0f, 35.0f, 55.0f, 80.0f})
+        {
+            CAPTURE(degrees);
+            const Vector3 localNormal(Cos(degrees), Sin(degrees), 0.0f);
+            const Vector3 localPoint = localNormal * radius;
+            const Vector3 worldPoint = node->LocalToWorld(localPoint);
+            const Vector3 worldNormal = LocalToWorldNormal(node, localNormal);
+            CHECK(ChooseFaceHandleForWorldHit(node, handles, worldPoint, worldNormal)
+                == ChooseFaceHandle(handles, localPoint, localNormal));
+        }
+        // The case that shows the difference: no handle is in line at 35 degrees.
+        const Vector3 n35(Cos(35.0f), Sin(35.0f), 0.0f);
+        CHECK_FALSE(ChooseFaceHandleForWorldHit(node, handles, node->LocalToWorld(n35 * radius), LocalToWorldNormal(node, n35)));
+    }
+
+    SECTION("A slanted box face under a rotated node with a parent of the scale (2, 1, 1)")
+    {
+        Node* parent = f.scene->CreateChild("Parent");
+        parent->SetScale(Vector3(2.0f, 1.0f, 1.0f));
+        parent->SetRotation(Quaternion(20.0f, Vector3::UP));
+        Node* node = parent->CreateChild("Box");
+        auto* box = node->CreateComponent<CsgBoxBrush>();
+        node->SetRotation(Quaternion(50.0f, Vector3::FORWARD));
+        // The +X face leans: the top corners of the face go out by 0.45.
+        box->SetCorner(3, box->GetCorner(3) + Vector3(0.45f, 0.0f, 0.0f));
+        box->SetCorner(7, box->GetCorner(7) + Vector3(0.45f, 0.0f, 0.0f));
+        const auto handles = QueryShapeHandles(box).handles_;
+        REQUIRE_FALSE(handles.empty());
+
+        // The true local normal of the face: the plane through the corners 1, 3 and 5.
+        const Vector3 p1 = box->GetSize() * box->GetCorner(1);
+        const Vector3 p3 = box->GetSize() * box->GetCorner(3);
+        const Vector3 p5 = box->GetSize() * box->GetCorner(5);
+        const Vector3 localNormal = (p3 - p1).CrossProduct(p5 - p1).Normalized();
+        REQUIRE(localNormal.x_ > 0.0f);
+        const Vector3 localPoint = (p1 + p3 + p5) / 3.0f;
+        const auto expected = ChooseFaceHandle(handles, localPoint, localNormal);
+        REQUIRE(expected);
+        CHECK(*expected == 21u);
+        CHECK(ChooseFaceHandleForWorldHit(
+                  node, handles, node->LocalToWorld(localPoint), LocalToWorldNormal(node, localNormal))
+            == expected);
+    }
+}

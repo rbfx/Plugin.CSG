@@ -127,7 +127,8 @@ ea::optional<unsigned> ChooseFaceHandle(
     const ea::vector<ShapeHandle>& handles, const Vector3& localPoint, const Vector3& localNormal);
 
 /// Convert a world hit on the brush node to its local space and call ChooseFaceHandle.
-/// The normal uses the direction transform and is normalized again. A zero normal gives none.
+/// The point uses the inverse world transform. The normal uses the transpose of the world 3x3 matrix, so it
+/// stays a normal for a non-uniform scale. It is normalized again. A zero normal gives none.
 ea::optional<unsigned> ChooseFaceHandleForWorldHit(
     const Node* brushNode, const ea::vector<ShapeHandle>& handles, const Vector3& worldPoint, const Vector3& worldNormal);
 
