@@ -146,6 +146,8 @@ private:
     void UpdateHandleDrag(Node* node, bool snap);
     /// End the drag. A commit pushes one undo action. A cancel restores the snapshot.
     void EndHandleDrag(bool commit);
+    /// Select the brush that made the clicked face of the result. Run on a left release without a drag.
+    void ProcessResultPick(SceneViewPage& page, bool& mouseConsumed, bool viewHovered);
     /// Render the "Shape" section of the operand overlay.
     void RenderShapeSection();
     /// Render the settings of the shape handles.
@@ -190,6 +192,18 @@ private:
     ea::optional<unsigned> hoveredHandle_;
     /// A left click was consumed by the handles. The mouse stays consumed until the button is released.
     bool handleClickPending_{};
+    /// The gizmo of the selected handles is in use or under the cursor in this frame.
+    bool gizmoHot_{};
+    /// A left press can start a result pick. The release decides.
+    bool resultPickArmed_{};
+    /// The face to select after the selection changes to one shape brush. The hit is in world space.
+    struct PendingFace
+    {
+        WeakPtr<Component> brush_;
+        Vector3 worldPoint_;
+        Vector3 worldNormal_;
+    };
+    ea::optional<PendingFace> pendingFace_;
     HandleDragState dragState_{HandleDragState::None};
     ShapeAttributeSnapshot dragSnapshot_;
     ea::vector<ShapeHandle> dragStartHandles_;

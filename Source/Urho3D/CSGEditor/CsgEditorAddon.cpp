@@ -1055,7 +1055,69 @@ void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
         mouseConsumed = true;
     overlayVisible_ = false;
 
+    // The content area is the last item. The scene selector uses the same check.
+    const bool viewHovered = ui::IsItemHovered();
+    gizmoHot_ = false;
     ProcessShapeHandles(page, mouseConsumed);
+    ProcessResultPick(page, mouseConsumed, viewHovered);
+}
+
+void CsgEditorAddon::ProcessResultPick(SceneViewPage& page, bool& mouseConsumed, bool viewHovered)
+{
+    // A press that the handles, the overlay or the camera own does not start a pick.
+    if (ui::IsMouseClicked(MOUSEB_LEFT))
+        resultPickArmed_ = viewHovered && !mouseConsumed && !gizmoHot_ && !ui::IsMouseDown(MOUSEB_RIGHT);
+
+    if (!ui::IsMouseReleased(MOUSEB_LEFT))
+        return;
+    const bool armed = resultPickArmed_;
+    resultPickArmed_ = false;
+
+    const bool alt = ui::IsKeyDown(KEY_LALT) || ui::IsKeyDown(KEY_RALT);
+    if (!armed || !IsAvailable() || page.IsSimulationActive() || mouseConsumed || !viewHovered || alt
+        || ui::IsMouseDragPastThreshold(MOUSEB_LEFT))
+        return;
+
+    // The nearest hit must be the result node of a root. The drop code uses the same query.
+    const auto hits = QueryGeometriesFromScene(page.scene_, page.cameraRay_);
+    if (hits.empty() || !hits[0].node_ || !hits[0].node_->IsTemporary())
+        return;
+    Node* rootNode = hits[0].node_->GetParent();
+    if (!IsResultNodeOfRoot(hits[0].node_, rootNode) || !IsRootNode(rootNode))
+        return;
+    Component* rootComponent = rootNode->GetComponent(StringHash("CsgRoot"));
+
+    // Source 0, a removed node and a node outside this root go to the stock selector, which selects the root.
+    const PickResult pick = PickRootSource(rootComponent, page.cameraRay_);
+    if (!pick.hit_ || pick.source_ == 0)
+        return;
+    Node* brushNode = page.scene_->GetNode(pick.source_);
+    if (!brushNode || brushNode->GetParent() != rootNode)
+        return;
+
+    // The rules of the stock selector: Ctrl toggles, Shift adds, a plain click replaces.
+    const bool toggle = ui::IsKeyDown(KEY_LCTRL) || ui::IsKeyDown(KEY_RCTRL);
+    const bool append = ui::IsKeyDown(KEY_LSHIFT) || ui::IsKeyDown(KEY_RSHIFT);
+    SceneSelection& selection = page.selection_;
+    selection.ConvertToNodes();
+    if (toggle)
+        selection.SetSelected(brushNode, !selection.IsSelected(brushNode));
+    else if (append)
+        selection.SetSelected(brushNode, true);
+    else
+    {
+        selection.Clear();
+        selection.SetSelected(brushNode, true);
+    }
+    mouseConsumed = true;
+
+    // A plain click on a shape brush also selects the face handle. The next frame applies it.
+    pendingFace_.reset();
+    if (!toggle && !append)
+    {
+        if (Component* shapeBrush = FindShapeBrush(brushNode))
+            pendingFace_ = PendingFace{WeakPtr<Component>(shapeBrush), pick.position_, pick.normal_};
+    }
 }
 
 void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
@@ -1252,6 +1314,11 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
 {
     // On entry the camera, the overlay or a drop can own the mouse. Then the handles only draw.
     const bool consumedOnEntry = mouseConsumed;
+    const auto dropPendingFace = [this](Component* activeBrush)
+    {
+        if (pendingFace_ && pendingFace_->brush_ != activeBrush)
+            pendingFace_.reset();
+    };
     // The content area is the last item. The scene selector uses the same check.
     const bool viewHovered = ui::IsItemHovered();
 
@@ -1277,11 +1344,21 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
 
     if (!brush)
     {
+        pendingFace_.reset();
         finish();
         return;
     }
 
     handleSet_ = QueryShapeHandles(brush);
+    dropPendingFace(brush);
+    if (pendingFace_ && showHandles_)
+    {
+        // The hit of the click chooses the face. No match keeps the selection as it is.
+        if (const auto id = ChooseFaceHandleForWorldHit(
+                brush->GetNode(), handleSet_.handles_, pendingFace_->worldPoint_, pendingFace_->worldNormal_))
+            selectedHandles_ = {*id};
+    }
+    pendingFace_.reset();
     if (!showHandles_)
     {
         if (dragState_ == HandleDragState::Active)
@@ -1370,6 +1447,7 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
         const auto frameDelta = gizmo.ManipulatePosition(transform, axes, local, Vector3::ZERO);
         const bool inUse = ImGuizmo::IsUsing();
         gizmoActive = inUse || ImGuizmo::IsOver();
+        gizmoHot_ = gizmoActive;
 
         if (inUse && dragState_ == HandleDragState::None)
             BeginHandleDrag();
@@ -1510,6 +1588,9 @@ void CsgEditorAddon::RenderShapeSettings()
         handleGridStep_ = ea::max(0.0f, handleGridStep_);
     if (ui::IsItemHovered())
         ui::SetTooltip("The grid step of the Ctrl snap of a handle drag. 0 turns off the snap.");
+    ui::TextDisabled("Click a face to select its brush");
+    if (ui::IsItemHovered())
+        ui::SetTooltip("Click a face to select its brush (Alt+click: select the root)");
 }
 
 } // namespace Urho3D
