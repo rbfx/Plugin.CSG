@@ -20,6 +20,8 @@
 #include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/IO/File.h>
+#include <Urho3D/IO/FileSystem.h>
 #include <Urho3D/IO/IOEvents.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/IO/VectorBuffer.h>
@@ -32,6 +34,7 @@
 #include <catch2/catch_amalgamated.hpp>
 
 #include <atomic>
+#include <fstream>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -2422,4 +2425,107 @@ TEST_CASE("CsgRoot reuses a result node that has only a StaticModel", "[root]")
     CHECK(CountResultNodes(rootNode) == 1);
     REQUIRE(savedModel->GetModel());
     CHECK(savedModel->GetModel()->GetNumGeometries() > 0);
+}
+
+namespace
+{
+
+/// Collect all CsgRoot components and all CsgBrush components in the scene.
+void CollectCsgComponents(Node* node, ea::vector<CsgRoot*>& roots, ea::vector<CsgBrush*>& brushes)
+{
+    if (auto* root = node->GetComponent<CsgRoot>())
+        roots.push_back(root);
+    if (auto* brush = node->GetComponent<CsgBrush>())
+        brushes.push_back(brush);
+    for (Node* child : node->GetChildren())
+        CollectCsgComponents(child, roots, brushes);
+}
+
+} // namespace
+
+TEST_CASE("CsgShowcase scene builds all roots without errors", "[root][scene]")
+{
+    const ea::string scenePath = ea::string(CSG_SAMPLE_DATA_DIR) + "/Scenes/CsgShowcase.scene";
+    if (!std::ifstream(scenePath.c_str()).good())
+    {
+        WARN("Test skipped. The scene file is missing: " << scenePath.c_str());
+        return;
+    }
+
+    auto context = MakeCsgTestContext();
+    // A material needs the file system to load its default resources.
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    auto* time = context->GetSubsystem<Time>();
+    auto* cache = context->GetSubsystem<ResourceCache>();
+
+    AddBoxModel(context, "Models/Box.mdl", Vector3::ONE);
+    AddBoxModel(context, "Models/Sphere.mdl", Vector3(0.8f, 0.8f, 0.8f));
+    for (const char* name : {"Materials/Stone.xml", "Materials/CheckboardProperties.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        cache->AddManualResource(material);
+    }
+
+    // The load of the non-CSG scene content (skybox, zone, render pipeline) logs errors in this
+    // context. The test context has no such components and resources. Count errors after the load.
+    ErrorCounter loadErrors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    {
+        File file(context, scenePath.c_str(), FILE_READ);
+        REQUIRE(file.IsOpen());
+        REQUIRE(scene->LoadXML(file));
+    }
+
+    WARN("CsgShowcase load error count (non-CSG content): " << loadErrors.GetCount());
+    ErrorCounter errors(context);
+
+    ea::vector<CsgRoot*> roots;
+    ea::vector<CsgBrush*> brushes;
+    CollectCsgComponents(scene, roots, brushes);
+    INFO("Root count: " << roots.size());
+    WARN("CsgShowcase root count: " << roots.size());
+    REQUIRE(!roots.empty());
+
+    // Run frames until every root has finished its build.
+    bool allDone = false;
+    for (unsigned i = 0; i < 2000 && !allDone; ++i)
+    {
+        workQueue->CompleteAll();
+        time->BeginFrame(1.0f / 60.0f);
+        scene->Update(1.0f / 60.0f);
+        time->EndFrame();
+
+        allDone = true;
+        for (CsgRoot* root : roots)
+        {
+            const ea::string status = root->GetBuildStatus();
+            if (status == "Building..." || status == "Not built")
+                allDone = false;
+        }
+    }
+    CHECK(allDone);
+
+    for (CsgRoot* root : roots)
+    {
+        unsigned operands = 0;
+        for (Node* child : root->GetNode()->GetChildren())
+            operands += child->GetComponent<CsgBrush>() ? 1 : 0;
+        INFO("Root node: " << root->GetNode()->GetName().c_str());
+        if (!root->GetModelAttr().name_.empty() || operands > 0)
+            CHECK(root->GetResultNode() != nullptr);
+        CHECK(!root->GetLastBuildFailed());
+    }
+
+    // A brush must be a direct child of a node with a CsgRoot.
+    for (CsgBrush* brush : brushes)
+    {
+        Node* parent = brush->GetNode()->GetParent();
+        INFO("Brush node: " << brush->GetNode()->GetName().c_str());
+        REQUIRE(parent);
+        CHECK(parent->GetComponent<CsgRoot>() != nullptr);
+    }
+    CHECK(errors.GetCount() == 0);
 }
