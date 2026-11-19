@@ -24,6 +24,7 @@ Add this repository as a subdirectory in your rbfx/Urho3D build (or otherwise en
 ## Output
 
 - Produces a plugin target: `Plugin.CSG`
+- Produces a static library `Plugin.CSG.Editor` (the editor addon) if the target `EditorLibrary` is present. See "Editor addon".
 
 ## Solid engine
 
@@ -97,6 +98,58 @@ The root writes the result to a `StaticModel` on the same node.
 - Solid cache: the root stores a fingerprint for each brush (brush, model, transform, mesh id and operation). If a rebuild only appends brushes and the base model, the epsilon and the earlier brushes did not change, it starts from the cached solid. It applies only the new brushes.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
 - `Bake()` folds the applied brushes into the base operand and removes the brush nodes. The baked geometry exists only at run time and the root does not serialize it. `Bake()` returns false if a rebuild is in flight, a brush is dirty or a result is pending.
+
+## Editor addon
+
+`Plugin.CSG.Editor` adds CSG tools to the scene view of the editor. It does not link `Plugin.CSG`. It finds the CSG types by name at run time.
+
+### Setup
+
+1. Link `Plugin.CSG.Editor` to the custom editor executable.
+2. In `Setup()`, call `editorPluginManager_->AddPlugin("RbfxCsg.EditorAddon", &RbfxCsg_EditorAddon);` before `EditorApplication::Setup()`.
+3. Include `Urho3D/CSGEditor/CsgEditorAddon.h`.
+4. Add `Plugin.CSG` to the loaded plugins of the project (`Project.json`, `PluginManager.LoadedPlugins`).
+
+If the type `CsgRoot` is not registered, the addon does nothing and hides its toolbar.
+
+### Hotkeys
+
+The hotkeys work in the scene view. You can bind them again on the "Key Bindings" page of the editor settings.
+
+| Command | Key | Action |
+| --- | --- | --- |
+| `Csg.AddUnion` | B | Add a union brush at the cursor. |
+| `Csg.AddSubtract` | Shift+B | Add a subtract brush (`DifferenceAB`) at the cursor. |
+| `Csg.SetUnion` | 1 | Set `Union` on all selected brushes. |
+| `Csg.SetDifference` | 2 | Set `DifferenceAB` on all selected brushes. |
+| `Csg.SetIntersection` | 3 | Set `Intersection` on all selected brushes. |
+
+The toolbar has the same commands. The toolbar "add" buttons put the brush at the center of the view. The operation buttons show the operation of the active brush. The "CSG" menu of the tab context menu also has the commands.
+
+### Workflow
+
+- The active root is the CSG root of the selected node or of its parent.
+- "Add brush" adds a child brush (`Models/Box.mdl`) to the active root at the hit point of the ray.
+- If the ray hits nothing, the brush goes to the root position. Without a root, it goes 10 units in front of the camera.
+- If there is no active root, "add brush" makes a root node "CSG" next to the selected node or in the scene. The brush is its first operand.
+- "Add brush" selects the new brush. One undo step removes the brush, and the new root too.
+- An operation change is one undo step. The root rebuilds at once.
+- The operation keys do nothing if no brush is selected.
+
+### Manual check list
+
+The editor has no test harness for addons. Do these checks by hand:
+
+1. Start the editor with the project. The log shows "CSG editor addon is registered" and "Added dynamic plugin 'Plugin.CSG'".
+2. Open a scene. Make sure that the toolbar shows two "add" buttons and three operation buttons.
+3. Clear the selection. Put the cursor on the floor and push B. A node "CSG" with one child "Brush" appears at the cursor. The brush is selected.
+4. Push Shift+B. A second brush appears under the same root. The box cuts the first box.
+5. Push 3. The result changes to the intersection. The third operation button is active.
+6. Select two brushes. Push 1. Both brushes change to union.
+7. Push Ctrl+Z three times. The scene goes back to the state of step 4, step 3 and then an empty scene.
+8. Click in a text field of the inspector. Type "123b". The text field gets the characters. No brush is added and no operation changes.
+9. Select a node without CSG. Push 1. Nothing changes.
+10. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
 
 ## How to try the sample scene
 

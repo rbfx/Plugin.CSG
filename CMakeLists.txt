@@ -40,6 +40,9 @@ set (CSG_STRICT_FP_OPTIONS
 # CSG plugin.
 add_subdirectory(Source/Urho3D/CSG)
 
+# CSG addon of the editor. It is a static library. It is present only if the editor library is present.
+add_subdirectory(Source/Urho3D/CSGEditor)
+
 
 # CSG tests.
 option (RBFXCSG_TESTING "Build CSG tests" ${PROJECT_IS_TOP_LEVEL})

@@ -1,0 +1,321 @@
+// Copyright (c) 2025-2026 the rbfx project.
+// This work is licensed under the terms of the MIT license.
+// For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
+
+#include "Urho3D/CSGEditor/CsgEditorAddon.h"
+
+#include "Urho3D/CSGEditor/CsgEditorOps.h"
+
+#include <Editor/Core/CommonEditorActions.h>
+#include <Editor/Core/HotkeyManager.h>
+
+#include <Urho3D/Core/Context.h>
+#include <Urho3D/Core/Format.h>
+#include <Urho3D/Graphics/Camera.h>
+#include <Urho3D/Graphics/Drawable.h>
+#include <Urho3D/IO/Log.h>
+#include <Urho3D/Scene/Component.h>
+#include <Urho3D/Scene/Node.h>
+#include <Urho3D/Scene/Scene.h>
+#include <Urho3D/SystemUI/SystemUI.h>
+#include <Urho3D/SystemUI/Widgets.h>
+#include <Urho3D/Utility/SceneRendererToTexture.h>
+
+#include <IconFontCppHeaders/IconsFontAwesome6.h>
+
+namespace Urho3D
+{
+
+namespace
+{
+
+/// The model of a new brush. A preset system replaces this constant later.
+const char* const DefaultBrushModel = "Models/Box.mdl";
+/// The distance of a new brush from the camera if the ray hits nothing.
+const float FallbackDistance = 10.0f;
+
+/// The enum names of the operations. The hotkeys use them to find the operation index.
+const char* const UnionName = "Union";
+const char* const DifferenceName = "DifferenceAB";
+const char* const IntersectionName = "Intersection";
+
+const auto Hotkey_AddUnion = EditorHotkey{"Csg.AddUnion"}.Press(KEY_B);
+const auto Hotkey_AddSubtract = EditorHotkey{"Csg.AddSubtract"}.Shift().Press(KEY_B);
+const auto Hotkey_SetUnion = EditorHotkey{"Csg.SetUnion"}.Press(KEY_1);
+const auto Hotkey_SetDifference = EditorHotkey{"Csg.SetDifference"}.Press(KEY_2);
+const auto Hotkey_SetIntersection = EditorHotkey{"Csg.SetIntersection"}.Press(KEY_3);
+
+const StringHash RootType("CsgRoot");
+const StringHash BrushType("CsgBrush");
+
+const char* GetOperationIcon(const ea::string& name)
+{
+    if (name == UnionName)
+        return ICON_FA_PLUS;
+    if (name == DifferenceName)
+        return ICON_FA_MINUS;
+    if (name == IntersectionName)
+        return ICON_FA_CIRCLE_HALF_STROKE;
+    return ICON_FA_QUESTION;
+}
+
+const EditorHotkey* GetOperationHotkey(const ea::string& name)
+{
+    if (name == UnionName)
+        return &Hotkey_SetUnion;
+    if (name == DifferenceName)
+        return &Hotkey_SetDifference;
+    if (name == IntersectionName)
+        return &Hotkey_SetIntersection;
+    return nullptr;
+}
+
+/// Return the nearest hit point of the ray in the scene.
+ea::optional<Vector3> QueryHitPoint(Scene* scene, const Ray& ray)
+{
+    ea::optional<Vector3> result;
+    float bestDistance = M_INFINITY;
+    for (const RayQueryResult& hit : QueryGeometriesFromScene(scene, ray))
+    {
+        if (hit.distance_ < bestDistance)
+        {
+            bestDistance = hit.distance_;
+            result = hit.position_;
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab)
+{
+    sceneViewTab->RegisterAddon<CsgEditorAddon>();
+}
+
+CsgEditorAddon::CsgEditorAddon(SceneViewTab* owner)
+    : SceneViewAddon(owner)
+{
+    auto hotkeyManager = owner_->GetHotkeyManager();
+    hotkeyManager->BindHotkey(this, Hotkey_AddUnion, &CsgEditorAddon::AddUnionBrush);
+    hotkeyManager->BindHotkey(this, Hotkey_AddSubtract, &CsgEditorAddon::AddSubtractBrush);
+    hotkeyManager->BindHotkey(this, Hotkey_SetUnion, &CsgEditorAddon::SetUnion);
+    hotkeyManager->BindHotkey(this, Hotkey_SetDifference, &CsgEditorAddon::SetDifference);
+    hotkeyManager->BindHotkey(this, Hotkey_SetIntersection, &CsgEditorAddon::SetIntersection);
+
+    URHO3D_LOGDEBUG("CSG editor addon is registered");
+}
+
+bool CsgEditorAddon::IsAvailable() const
+{
+    // Plugin.CSG registers the types when the project loads it. The check runs each time.
+    return context_->GetReflection(RootType) != nullptr && context_->GetReflection(BrushType) != nullptr;
+}
+
+int CsgEditorAddon::FindOperation(const ea::string& name) const
+{
+    const int count = OperationCount(context_);
+    for (int index = 0; index < count; ++index)
+    {
+        if (OperationName(context_, index) == name)
+            return index;
+    }
+    return -1;
+}
+
+ea::vector<Node*> CsgEditorAddon::GetSelectedBrushes(SceneViewPage& page) const
+{
+    ea::vector<Node*> result;
+    for (Node* node : page.selection_.GetNodes())
+    {
+        if (node && IsBrushNode(node))
+            result.push_back(node);
+    }
+    return result;
+}
+
+void CsgEditorAddon::AddBrush(int operation, bool useCursorRay)
+{
+    if (!IsAvailable() || operation < 0)
+        return;
+
+    SceneViewPage* page = owner_->GetActivePage();
+    if (!page || page->IsSimulationActive())
+        return;
+
+    Scene* scene = page->scene_;
+    Node* activeNode = page->selection_.GetActiveNode();
+    Node* rootNode = FindActiveRoot(activeNode);
+
+    // The hotkey uses the cursor ray. The toolbar button uses the ray through the center of the view.
+    Camera* camera = page->renderer_->GetCamera();
+    const Ray ray = useCursorRay ? page->cameraRay_ : camera->GetScreenRay(0.5f, 0.5f);
+
+    Vector3 position;
+    if (const auto hitPoint = QueryHitPoint(scene, ray))
+        position = *hitPoint;
+    else if (rootNode)
+        position = rootNode->GetWorldPosition();
+    else
+        position = ray.origin_ + ray.direction_ * FallbackDistance;
+
+    // One action creates the top node with all its children. Then one undo step removes all.
+    const CreateNodeActionBuilder builder{scene, AttributeScopeHint::Node};
+
+    Node* createdNode = nullptr;
+    if (!rootNode)
+    {
+        Node* parent = activeNode && activeNode->GetParent() ? activeNode->GetParent() : scene;
+        rootNode = CreateRootNode(parent, position);
+        if (!rootNode)
+            return;
+        createdNode = rootNode;
+    }
+
+    Node* brushNode = AddBrushNode(rootNode, DefaultBrushModel, operation, position);
+    if (!brushNode)
+    {
+        if (createdNode)
+            createdNode->Remove();
+        return;
+    }
+    if (!createdNode)
+        createdNode = brushNode;
+
+    page->selection_.Clear();
+    page->selection_.SetSelected(brushNode, true);
+
+    owner_->PushAction(builder.Build(createdNode));
+}
+
+void CsgEditorAddon::SetSelectedOperation(int operation)
+{
+    if (!IsAvailable() || operation < 0)
+        return;
+
+    SceneViewPage* page = owner_->GetActivePage();
+    if (!page || page->IsSimulationActive())
+        return;
+
+    ea::vector<Component*> components;
+    VariantVector oldValues;
+    VariantVector newValues;
+    for (Node* brushNode : GetSelectedBrushes(*page))
+    {
+        Component* component = brushNode->GetComponent(BrushType);
+        if (!component || GetOperation(brushNode) == operation)
+            continue;
+
+        const Variant oldValue = component->GetAttribute("Operation");
+        // SetOperation calls ApplyAttributes. The brush marks itself dirty and the root rebuilds.
+        if (!SetOperation(brushNode, operation))
+            continue;
+
+        components.push_back(component);
+        oldValues.push_back(oldValue);
+        newValues.push_back(component->GetAttribute("Operation"));
+    }
+
+    if (components.empty())
+        return;
+
+    owner_->PushAction<ChangeComponentAttributesAction>(page->scene_.Get(), "Operation", components, oldValues, newValues);
+}
+
+void CsgEditorAddon::AddUnionBrush()
+{
+    AddBrush(FindOperation(UnionName), true);
+}
+
+void CsgEditorAddon::AddSubtractBrush()
+{
+    AddBrush(FindOperation(DifferenceName), true);
+}
+
+void CsgEditorAddon::SetUnion()
+{
+    SetSelectedOperation(FindOperation(UnionName));
+}
+
+void CsgEditorAddon::SetDifference()
+{
+    SetSelectedOperation(FindOperation(DifferenceName));
+}
+
+void CsgEditorAddon::SetIntersection()
+{
+    SetSelectedOperation(FindOperation(IntersectionName));
+}
+
+bool CsgEditorAddon::RenderToolbar()
+{
+    if (!IsAvailable())
+        return false;
+
+    auto hotkeyManager = owner_->GetHotkeyManager();
+    const auto makeTooltip = [&](const ea::string& title, const EditorHotkey* hotkey)
+    {
+        const ea::string label = hotkey ? hotkeyManager->GetHotkeyLabel(*hotkey) : ea::string{};
+        return label.empty() ? title : Format("{} ({})", title, label);
+    };
+
+    if (Widgets::ToolbarButton(ICON_FA_SQUARE_PLUS, makeTooltip("Add CSG Union Brush", &Hotkey_AddUnion).c_str()))
+        AddBrush(FindOperation(UnionName), false);
+    if (Widgets::ToolbarButton(
+            ICON_FA_SQUARE_MINUS, makeTooltip("Add CSG Subtract Brush", &Hotkey_AddSubtract).c_str()))
+        AddBrush(FindOperation(DifferenceName), false);
+
+    // The operation buttons show the operation of the active brush. They change all selected brushes.
+    SceneViewPage* page = owner_->GetActivePage();
+    const bool hasBrushes = page && !GetSelectedBrushes(*page).empty();
+    Node* activeNode = page ? page->selection_.GetActiveNode() : nullptr;
+    const int activeOperation = activeNode ? GetOperation(activeNode) : -1;
+
+    ui::BeginDisabled(!hasBrushes);
+    const int count = OperationCount(context_);
+    for (int index = 0; index < count; ++index)
+    {
+        const ea::string name = OperationName(context_, index);
+        const ea::string tooltip = makeTooltip(Format("CSG Operation: {}", name), GetOperationHotkey(name));
+        if (Widgets::ToolbarButton(GetOperationIcon(name), tooltip.c_str(), index == activeOperation))
+            SetSelectedOperation(index);
+    }
+    ui::EndDisabled();
+
+    Widgets::ToolbarSeparator();
+    return true;
+}
+
+bool CsgEditorAddon::RenderTabContextMenu()
+{
+    if (!IsAvailable())
+        return false;
+
+    if (!ui::BeginMenu("CSG"))
+        return true;
+
+    auto hotkeyManager = owner_->GetHotkeyManager();
+    if (ui::MenuItem("Add Union Brush", hotkeyManager->GetHotkeyLabel(Hotkey_AddUnion).c_str()))
+        AddBrush(FindOperation(UnionName), false);
+    if (ui::MenuItem("Add Subtract Brush", hotkeyManager->GetHotkeyLabel(Hotkey_AddSubtract).c_str()))
+        AddBrush(FindOperation(DifferenceName), false);
+
+    ui::Separator();
+
+    SceneViewPage* page = owner_->GetActivePage();
+    const bool hasBrushes = page && !GetSelectedBrushes(*page).empty();
+    const int count = OperationCount(context_);
+    for (int index = 0; index < count; ++index)
+    {
+        const ea::string name = OperationName(context_, index);
+        const EditorHotkey* hotkey = GetOperationHotkey(name);
+        const ea::string label = hotkey ? hotkeyManager->GetHotkeyLabel(*hotkey) : ea::string{};
+        if (ui::MenuItem(Format("Set {}", name).c_str(), label.c_str(), false, hasBrushes))
+            SetSelectedOperation(index);
+    }
+
+    ui::EndMenu();
+    return true;
+}
+
+} // namespace Urho3D
