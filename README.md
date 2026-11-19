@@ -100,6 +100,11 @@ The root writes the result to a `StaticModel` on the same node.
 - Solid cache: the root stores a fingerprint for each brush (brush, model, transform, mesh id and operation). If a rebuild only appends brushes and the base model, the epsilon and the earlier brushes did not change, it starts from the cached solid. It applies only the new brushes.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
 - `Bake()` folds the applied brushes into the base operand and removes the brush nodes. The baked geometry exists only at run time and the root does not serialize it. `Bake()` returns false if a rebuild is in flight, a brush is dirty or a result is pending.
+- `Generate Collision` (default false) puts a `CollisionShape` with a triangle mesh on the `CsgResult` node. The mesh is the applied result model, not a second build. Each applied result updates the same shape. An empty result removes the shape.
+- `Collision Static Body` (default true) adds a static `RigidBody` (mass 0) next to the shape. Clear it if you do not want a body. A shape without a body has no effect in the physics world.
+- The collision components are temporary, like the result node. The scene does not save them. The root makes them again after a load. A baked result keeps its collision.
+- The engine adds a `PhysicsWorld` to the scene when a `CollisionShape` enters it. The scene saves that world.
+- If the engine has no physics, or the context did not register it, the attributes have no effect. The root logs one warning.
 
 ### Shape handles (protocol)
 
@@ -526,6 +531,12 @@ The editor has no test harness for addons. Do these checks by hand:
 75. Drag the thickness handle down into the hole. The wall gets thicker. At the full radius the arch is a filled half ellipse and the inner face goes.
 76. Drag the arc end handle. Both ends of the arch move and the handle stays under the cursor. The arc stops at 1 and at 180 degrees.
 77. Put a box wall in a root. Subtract an arch with "Thickness" equal to the radius and a box under it. The door cut stays closed. Set a material in slot 1. Only the inner face gets it.
+78. Make a CSG root with a box floor. Set "Generate Collision" on the root. Keep "Collision Static Body" set.
+79. Add a node above the floor with a sphere `StaticModel`, a sphere `CollisionShape` and a `RigidBody` with mass 1.
+80. Start play mode. The sphere falls and stops on the floor. Stop play mode.
+81. Subtract a box from the floor under the sphere. Start play mode. The sphere falls into the hole.
+82. Clear "Generate Collision". Start play mode. The sphere falls through the floor.
+83. Save the scene and open the file. It has no `CsgResult` node, no collision shape of the result and no body of the result.
 
 ## How to try the sample scene
 
