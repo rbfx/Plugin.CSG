@@ -64,6 +64,14 @@ public:
     void SetParams(const CsgRingParams& params);
     const CsgRingParams& GetParams() const { return params_; }
 
+    /// Handles: 0 the major radius (axis +X at (radius, 0, 0)), 1 the radial tube radius (axis +X at
+    /// (radius + tube x, 0, 0)), 2 the axial tube radius (axis +Y at (radius, tube y, 0)),
+    /// 3 the arc end (axis is the tangent (-sin a, 0, cos a) at the point on the major circle at the arc angle a).
+    void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// Each radius grows by dot(delta, axis). The arc grows by dot(delta, axis) / radius, in degrees.
+    /// The sanitizer clamps the result. A shape that is not valid, or no change, returns false.
+    bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+
 protected:
     void SanitizeParameters() override;
     bool GenerateMesh(CsgShapeMesh& mesh) const override;

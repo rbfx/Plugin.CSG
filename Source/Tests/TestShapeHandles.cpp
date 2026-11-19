@@ -451,3 +451,249 @@ TEST_CASE("A handle move marks the brush dirty and the root rebuilds", "[shapes]
     CHECK(root->GetLastBuildStats().volume_ > volumeBefore + 0.5);
     CHECK(f.errors.GetCount() == 0);
 }
+
+TEST_CASE("The sphere brush has 6 radius handles on the axes", "[shapes][handles]")
+{
+    HandleFixture<CsgSphereBrush> f;
+    f.brush->SetRadius(Vector3(1.0f, 2.0f, 3.0f));
+    const auto handles = f.Handles();
+    CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5});
+
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateSphere(f.brush->GetParams(), mesh));
+    const Vector3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    const Vector3 radius = f.brush->GetRadius();
+    const float components[6] = {radius.x_, radius.x_, radius.y_, radius.y_, radius.z_, radius.z_};
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        CHECK(handles[i].kind_ == CsgShapeHandleKind::Axis);
+        CHECK(handles[i].axis_ == axes[i]);
+        CHECK(IsNear(handles[i].position_, axes[i] * components[i]));
+        CHECK(MeshHasVertexNear(mesh, handles[i].position_, 1e-5f));
+    }
+}
+
+TEST_CASE("A sphere radius handle move grows the radius and the sanitizer clamps it", "[shapes][handles]")
+{
+    HandleFixture<CsgSphereBrush> f;
+    f.brush->ClearDirty();
+    const CsgSphereParams before = f.brush->GetParams();
+
+    REQUIRE(f.brush->MoveHandles({0}, Vector3(0.25f, 5.0f, 5.0f)));
+    CHECK(f.brush->GetRadius() == Vector3(0.75f, 0.5f, 0.5f));
+    CHECK(f.brush->IsDirty());
+
+    // The - handle grows the radius when it goes outward.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(0.0f, -0.25f, 0.0f)));
+    CHECK(f.brush->GetRadius() == Vector3(0.5f, 0.75f, 0.5f));
+
+    // The clamp.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({4}, Vector3(0.0f, 0.0f, -100.0f)));
+    CHECK(f.brush->GetRadius().z_ == CsgSphereParams::MinRadius);
+    f.brush->ClearDirty();
+    CHECK_FALSE(f.brush->MoveHandles({4}, Vector3(0.0f, 0.0f, -100.0f)));
+    CHECK_FALSE(f.brush->IsDirty());
+    REQUIRE(f.brush->MoveHandles({4}, Vector3(0.0f, 0.0f, 1.0e9f)));
+    CHECK(f.brush->GetRadius().z_ == CsgSphereParams::MaxRadius);
+
+    // Restore and move again.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({0}, Vector3(0.25f, 0.0f, 0.0f)));
+    const Vector3 once = f.brush->GetRadius();
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({0}, Vector3(0.25f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetRadius() == once);
+
+    CHECK_FALSE(f.brush->MoveHandles({6}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(std::nanf(""), 0.0f, 0.0f)));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("The cylinder brush has center, radius and bulge handles", "[shapes][handles]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    auto handles = f.Handles();
+    CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+    CHECK(FindHandle(handles, 0)->kind_ == CsgShapeHandleKind::Point);
+    CHECK(FindHandle(handles, 1)->position_ == Vector3(0.0f, 0.5f, 0.0f));
+    CHECK(FindHandle(handles, 2)->position_ == Vector3(0.5f, -0.5f, 0.0f));
+    CHECK(FindHandle(handles, 3)->position_ == Vector3(-0.5f, -0.5f, 0.0f));
+    CHECK(FindHandle(handles, 4)->position_ == Vector3(0.0f, -0.5f, 0.5f));
+    CHECK(FindHandle(handles, 9)->position_ == Vector3(0.0f, 0.5f, -0.5f));
+    CHECK(FindHandle(handles, 10)->position_ == Vector3(0.5f, 0.0f, 0.0f));
+    CHECK(FindHandle(handles, 10)->axis_ == Vector3(1, 0, 0));
+    CHECK(FindHandle(handles, 5)->axis_ == Vector3(0, 0, -1));
+
+    // The handles are on the mesh. The middle ring needs 2 height segments.
+    f.brush->SetHeightSegments(2);
+    f.brush->SetBulge(0.5f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(f.brush->GetParams(), mesh));
+    handles = f.Handles();
+    for (const unsigned id : {2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u})
+        CHECK(MeshHasVertexNear(mesh, FindHandle(handles, id)->position_, 1e-5f));
+    CHECK(IsNear(FindHandle(handles, 10)->position_, Vector3(0.75f, 0.0f, 0.0f)));
+}
+
+TEST_CASE("Cylinder handle moves", "[shapes][handles]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    const CsgCylinderParams before = f.brush->GetParams();
+
+    SECTION("A center moves by the full delta")
+    {
+        REQUIRE(f.brush->MoveHandles({0}, Vector3(0.1f, -0.2f, 0.3f)));
+        CHECK(IsNear(f.brush->GetBottomCenter(), before.bottomCenter_ + Vector3(0.1f, -0.2f, 0.3f)));
+        CHECK(f.brush->GetTopCenter() == before.topCenter_);
+        CHECK(f.brush->GetBottomRadius() == before.bottomRadius_);
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({1}, Vector3(0.1f, 0.2f, 0.3f)));
+        CHECK(IsNear(f.brush->GetTopCenter(), before.topCenter_ + Vector3(0.1f, 0.2f, 0.3f)));
+        CHECK(f.brush->GetBottomCenter() == before.bottomCenter_);
+    }
+
+    SECTION("The +X and -X handles of one end edit the same component")
+    {
+        REQUIRE(f.brush->MoveHandles({2}, Vector3(0.25f, 0.0f, 9.0f)));
+        CHECK(f.brush->GetBottomRadius() == Vector2(0.75f, 0.5f));
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({3}, Vector3(-0.25f, 0.0f, 9.0f)));
+        CHECK(f.brush->GetBottomRadius() == Vector2(0.75f, 0.5f));
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({9}, Vector3(9.0f, 0.0f, -0.25f)));
+        CHECK(f.brush->GetTopRadius() == Vector2(0.5f, 0.75f));
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({8}, Vector3(9.0f, 0.0f, 0.25f)));
+        CHECK(f.brush->GetTopRadius() == Vector2(0.5f, 0.75f));
+        CHECK(f.brush->GetBottomRadius() == before.bottomRadius_);
+    }
+
+    SECTION("The bulge handle gives the expected bulge")
+    {
+        REQUIRE(f.brush->MoveHandles({10}, Vector3(0.25f, 3.0f, 3.0f)));
+        CHECK(f.brush->GetBulge() == Catch::Approx(0.5f));
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({10}, Vector3(100.0f, 0.0f, 0.0f)));
+        CHECK(f.brush->GetBulge() == CsgCylinderParams::MaxBulge);
+    }
+
+    SECTION("A move that makes the shape not valid returns false")
+    {
+        f.brush->ClearDirty();
+        // The centers get the same height.
+        CHECK_FALSE(f.brush->MoveHandles({1}, Vector3(0.0f, -1.0f, 0.0f)));
+        CHECK(f.brush->GetTopCenter() == before.topCenter_);
+        CHECK_FALSE(f.brush->IsDirty());
+        CHECK_FALSE(f.brush->MoveHandles({1}, Vector3(std::nanf(""), 0.0f, 0.0f)));
+        CHECK_FALSE(f.brush->MoveHandles({11}, Vector3(0.1f, 0.0f, 0.0f)));
+    }
+
+    SECTION("A radius at zero becomes the minimum of the pair rule")
+    {
+        REQUIRE(f.brush->MoveHandles({6}, Vector3(-0.5f, 0.0f, 0.0f)));
+        CHECK(f.brush->GetTopRadius() == Vector2(CsgCylinderParams::MinRadius, 0.5f));
+    }
+
+    SECTION("The radius of a cone end has no handle and the ids stay stable")
+    {
+        CsgCylinderParams cone = before;
+        cone.bottomRadius_ = Vector2::ZERO;
+        f.brush->SetParams(cone);
+        REQUIRE(f.brush->IsShapeValid());
+        const auto handles = f.Handles();
+        CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 6, 7, 8, 9, 10});
+        CHECK(FindHandle(handles, 10)->position_ == Vector3(0.25f, 0.0f, 0.0f));
+        CHECK_FALSE(f.brush->MoveHandles({2}, Vector3(0.1f, 0.0f, 0.0f)));
+        CHECK(f.brush->GetBottomRadius() == Vector2::ZERO);
+        REQUIRE(f.brush->MoveHandles({6}, Vector3(0.1f, 0.0f, 0.0f)));
+        CHECK(f.brush->GetTopRadius() == Vector2(0.6f, 0.5f));
+
+        // The apex of the other end: the top.
+        cone.bottomRadius_ = Vector2(0.5f, 0.5f);
+        cone.topRadius_ = Vector2::ZERO;
+        f.brush->SetParams(cone);
+        CHECK(GetIds(f.Handles()) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 10});
+    }
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("The ring brush has 4 handles and the arc end matches the generated arc", "[shapes][handles]")
+{
+    HandleFixture<CsgRingBrush> f;
+    f.brush->SetArc(90.0f);
+    f.brush->SetRadius(0.8f);
+    const auto handles = f.Handles();
+    CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3});
+    CHECK(handles[0].position_ == Vector3(0.8f, 0.0f, 0.0f));
+    CHECK(handles[1].position_ == Vector3(0.8f + 0.15f, 0.0f, 0.0f));
+    CHECK(handles[2].position_ == Vector3(0.8f, 0.15f, 0.0f));
+    CHECK(handles[2].axis_ == Vector3(0, 1, 0));
+
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateRing(f.brush->GetParams(), mesh));
+    // The arc end is the section center of the end cap.
+    CHECK(MeshHasVertexNear(mesh, handles[3].position_, 1e-5f));
+    CHECK(IsNear(handles[3].position_, Vector3(0.0f, 0.0f, 0.8f), 1e-5f));
+    CHECK(handles[3].axis_.Length() == Catch::Approx(1.0f));
+    CHECK(IsNear(handles[3].axis_, Vector3(-1.0f, 0.0f, 0.0f), 1e-5f));
+    CHECK(handles[3].axis_.DotProduct(handles[3].position_) == Catch::Approx(0.0f).margin(1e-6));
+    CHECK(MeshHasVertexNear(mesh, handles[1].position_, 1e-5f));
+    CHECK(MeshHasVertexNear(mesh, handles[2].position_, 1e-5f));
+
+    // The end cap normal follows the tangent direction of the handle.
+    for (const ModelVertex& vertex : mesh.vertices_)
+    {
+        if (IsNear(vertex.GetPosition(), handles[3].position_, 1e-5f))
+        {
+            CHECK(IsNear(vertex.GetNormal(), handles[3].axis_, 1e-5f));
+            break;
+        }
+    }
+}
+
+TEST_CASE("Ring handle moves", "[shapes][handles]")
+{
+    HandleFixture<CsgRingBrush> f;
+    f.brush->SetArc(90.0f);
+    const CsgRingParams before = f.brush->GetParams();
+
+    REQUIRE(f.brush->MoveHandles({0}, Vector3(0.1f, 4.0f, 4.0f)));
+    CHECK(f.brush->GetRadius() == Catch::Approx(0.6f));
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({1}, Vector3(0.05f, 4.0f, 4.0f)));
+    CHECK(f.brush->GetTubeRadius().x_ == Catch::Approx(0.2f));
+    CHECK(f.brush->GetTubeRadius().y_ == Catch::Approx(0.15f));
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({2}, Vector3(4.0f, 0.05f, 4.0f)));
+    CHECK(f.brush->GetTubeRadius().y_ == Catch::Approx(0.2f));
+    CHECK(f.brush->GetTubeRadius().x_ == Catch::Approx(0.15f));
+
+    // The arc end handle at 90 degrees has the axis (-1, 0, 0). A move of radius * 10 degrees in radians adds 10.
+    f.brush->SetParams(before);
+    const float step = before.radius_ * 10.0f * 3.14159265f / 180.0f;
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(-step, 0.0f, 0.0f)));
+    CHECK(f.brush->GetArc() == Catch::Approx(100.0f).margin(1e-3));
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(100.0f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetArc() == CsgRingParams::MinArc);
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(-100.0f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetArc() == CsgRingParams::MaxArc);
+
+    // The radial tube radius is clamped to the fraction of the radius.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({1}, Vector3(100.0f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetTubeRadius().x_ == Catch::Approx(0.99f * f.brush->GetRadius()));
+
+    // The full ring has no change if the arc grows.
+    f.brush->SetParams(CsgRingParams());
+    CHECK_FALSE(f.brush->MoveHandles({3}, Vector3(0.0f, 0.0f, 1.0f)));
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(0.0f, 0.0f, -0.5f * 3.14159265f / 2.0f)));
+    CHECK(f.brush->GetArc() == Catch::Approx(270.0f).margin(1e-3));
+
+    CHECK_FALSE(f.brush->MoveHandles({4}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(INFINITY, 0.0f, 0.0f)));
+    CHECK(f.errors.GetCount() == 0);
+}

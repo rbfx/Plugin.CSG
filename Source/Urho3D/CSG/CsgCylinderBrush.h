@@ -68,6 +68,19 @@ public:
     void SetParams(const CsgCylinderParams& params);
     const CsgCylinderParams& GetParams() const { return params_; }
 
+    /// Handles, with stable ids:
+    /// - 0 the bottom center and 1 the top center (points).
+    /// - 2 to 5 the bottom radius at +X, -X, +Z, -Z and 6 to 9 the top radius at the same places (axes).
+    ///   The +X and -X handles of one end edit the same component.
+    ///   An end that is an apex (radius pair (0, 0)) has no radius handle. The other ids do not shift.
+    /// - 10 the bulge (axis +X, at the middle of the center line). It is absent if the mean X radius
+    ///   is not above 0.001.
+    void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// A center moves by the full delta. A radius component grows by dot(delta, axis).
+    /// The bulge grows by dot(delta, axis) divided by the mean X radius.
+    /// The sanitizer clamps the result. A shape that is not valid, or no change, returns false.
+    bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+
 protected:
     void SanitizeParameters() override;
     bool GenerateMesh(CsgShapeMesh& mesh) const override;

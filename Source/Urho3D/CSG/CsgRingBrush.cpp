@@ -5,6 +5,8 @@
 #include "Urho3D/CSG/CsgRingBrush.h"
 #include <Urho3D/Core/Context.h>
 
+#include <cmath>
+
 namespace Urho3D
 {
 
@@ -93,6 +95,78 @@ void CsgRingBrush::SetParams(const CsgRingParams& params)
 
     params_ = sanitized;
     OnParametersChanged();
+}
+
+namespace
+{
+
+/// The angle of the arc end in radians. It is computed as in `CsgGenerateRing`.
+double GetArcEndAngle(float arc) { return arc * (M_PI / 180.0); }
+
+} // namespace
+
+void CsgRingBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
+{
+    handles.clear();
+    const float radius = params_.radius_;
+    const Vector2& tube = params_.tubeRadius_;
+
+    const auto add = [&](unsigned id, const char* name, const Vector3& position, const Vector3& axis)
+    {
+        CsgShapeHandle handle;
+        handle.id_ = id;
+        handle.name_ = name;
+        handle.kind_ = CsgShapeHandleKind::Axis;
+        handle.position_ = position;
+        handle.axis_ = axis;
+        handles.push_back(handle);
+    };
+    add(0, "Radius", Vector3(radius, 0.0f, 0.0f), Vector3(1, 0, 0));
+    add(1, "Tube Radial", Vector3(radius + tube.x_, 0.0f, 0.0f), Vector3(1, 0, 0));
+    add(2, "Tube Axial", Vector3(radius, tube.y_, 0.0f), Vector3(0, 1, 0));
+
+    const double angle = GetArcEndAngle(params_.arc_);
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    add(3, "Arc End", Vector3(static_cast<float>(radius * c), 0.0f, static_cast<float>(radius * s)),
+        Vector3(static_cast<float>(-s), 0.0f, static_cast<float>(c)));
+}
+
+bool CsgRingBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
+{
+    ea::vector<unsigned> unique;
+    if (!PrepareHandleMove(ids, localDelta, unique))
+        return false;
+
+    ea::vector<CsgShapeHandle> handles;
+    GetHandles(handles);
+    CsgRingParams params = params_;
+    for (const unsigned id : unique)
+    {
+        if (id >= handles.size())
+            return false;
+        const float change = localDelta.DotProduct(handles[id].axis_);
+        switch (id)
+        {
+        case 0: params.radius_ += change; break;
+        case 1: params.tubeRadius_.x_ += change; break;
+        case 2: params.tubeRadius_.y_ += change; break;
+        default: params.arc_ += change / params_.radius_ * (180.0f / M_PI); break;
+        }
+    }
+
+    if (!std::isfinite(params.radius_) || !std::isfinite(params.tubeRadius_.x_) || !std::isfinite(params.tubeRadius_.y_)
+        || !std::isfinite(params.arc_))
+        return false;
+    CsgSanitizeRingParams(params);
+    if (params.radius_ == params_.radius_ && params.tubeRadius_ == params_.tubeRadius_ && params.arc_ == params_.arc_)
+        return false;
+    CsgShapeMesh mesh;
+    if (!CsgGenerateRing(params, mesh))
+        return false;
+
+    SetParams(params);
+    return true;
 }
 
 void CsgRingBrush::SanitizeParameters() { CsgSanitizeRingParams(params_); }

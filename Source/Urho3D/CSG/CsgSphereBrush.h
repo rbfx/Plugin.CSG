@@ -49,6 +49,13 @@ public:
     void SetParams(const CsgSphereParams& params);
     const CsgSphereParams& GetParams() const { return params_; }
 
+    /// Handles: ids 0 to 5 are the radius handles (axes) at +X, -X, +Y, -Y, +Z, -Z.
+    /// The position is the axis times the radius component. The axis points out.
+    void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// A radius component grows by dot(delta, axis). The + and - handles of one axis edit the same component.
+    /// The sanitizer clamps the result. A move that changes nothing returns false.
+    bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+
 protected:
     void SanitizeParameters() override;
     bool GenerateMesh(CsgShapeMesh& mesh) const override;
