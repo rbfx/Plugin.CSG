@@ -21,6 +21,7 @@ set (SOURCE_FILES
     TestBoolean.cpp
     TestTriangulation.cpp
     TestRoot.cpp
+    TestEditorOps.cpp
     TestParallel.cpp
     TestBenchmark.cpp
     TestGolden.cpp
@@ -45,7 +46,12 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgTriangulation.cpp
 )
 
-add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES})
+# The editor scene functions use reflection only. The tests compile them directly.
+set (CSG_EDITOR_SOURCE_FILES
+    ${RbfxCsg_SOURCE_DIR}/Source/Urho3D/CSGEditor/CsgEditorOps.cpp
+)
+
+add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES} ${CSG_EDITOR_SOURCE_FILES})
 target_link_libraries (${TARGET_NAME} PRIVATE Urho3D catch2)
 target_compile_features (${TARGET_NAME} PRIVATE cxx_std_17)
 target_compile_definitions (${TARGET_NAME} PRIVATE Plugin_RbfxCsg_EXPORT=1)
