@@ -44,7 +44,12 @@ struct HandleScreenPoint
     Vector2 position_;
     /// False if the handle is behind the camera. The pick skips it.
     bool visible_{true};
+    /// The distance from the camera. A tie of the screen distance goes to the nearer handle.
+    float depth_{};
 };
+
+/// The screen distance in pixels below which two handles are a tie for the pick.
+inline constexpr float HandlePickTieEpsilon = 1.0f;
 
 /// Return true if the type of the component derives from "CsgProceduralBrush".
 bool IsShapeBrush(Component* component);
@@ -63,8 +68,16 @@ ShapeAttributeSnapshot SnapshotShapeAttributes(Component* component);
 /// Return false and change nothing if all values are already equal.
 bool RestoreShapeAttributes(Component* component, const ShapeAttributeSnapshot& snapshot);
 
+/// Apply one frame of a handle drag. Restore the start snapshot, then move by the total delta.
+/// A zero delta is the start shape. It is accepted with no move call.
+/// A refused move applies the last accepted delta again, so the shape keeps the last valid state.
+/// Update `acceptedDelta` and return true if the delta is accepted.
+bool ApplyShapeHandleDrag(Component* brush, const ShapeAttributeSnapshot& start, const ea::vector<unsigned>& ids,
+    const Vector3& delta, ea::optional<Vector3>& acceptedDelta);
+
 /// Return the index in `points` of the nearest visible point in the radius, or none.
-/// The nearest point wins. Equal distances go to the lower id.
+/// The nearest point wins. Screen distances within HandlePickTieEpsilon are a tie.
+/// A tie goes to the smaller depth, then to the lower id.
 ea::optional<unsigned> PickNearestHandle(
     const ea::vector<HandleScreenPoint>& points, const Vector2& mouse, float radius);
 /// Return the mean position of the handles with the ids. Unknown ids are skipped. No handle gives none.

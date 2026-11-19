@@ -329,7 +329,9 @@ The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBru
 - While handles are selected, the transform gizmo of the node does not show and does not react.
 - Hold Ctrl during the drag to snap the handle to the grid of the brush space. The first selected handle snaps. An axis handle snaps only along its axis. "Snap step" sets the grid step (default 0.125). 0 turns off the snap.
 - Push Escape during the drag to cancel it. The shape goes back to the state before the drag.
-- A move to a shape that is not valid stops at the last valid shape.
+- A move to a shape that is not valid keeps the last valid shape of the drag. A move back to the start position gives the start shape again, also with the Ctrl snap.
+- Ctrl+Z or Ctrl+Y during the drag cancels the drag first. Then the undo or redo applies as usual.
+- Two handles on the same screen point (for example the -Z and +Z faces seen along Z): the click picks the handle nearer to the camera.
 - The result of the root updates during the drag. One undo step reverts a full drag.
 - The overlay of the root has a "Shape" section: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. It has the "Show handles" check box and the "Snap step" field. The CSG menu of the tab context menu has the same two settings. The editor settings keep them.
 
@@ -405,7 +407,7 @@ The editor has no test harness for addons. Do these checks by hand:
 57. Click a face circle. Only the face is selected and a long line shows along its axis. Drag a gizmo arrow at an angle to the line. The face moves only along the line.
 58. Hold Ctrl and drag a corner. The corner stops on multiples of "Snap step" in the brush space. Set "Snap step" to 0. Ctrl does not snap.
 59. Start a drag and push Escape before the release. The box goes back to its shape before the drag. No undo step is added.
-60. Drag a face through the opposite face. The box stops at the last valid shape. The log shows no error.
+60. Drag a face through the opposite face. The box keeps the last valid shape. Drag back to the start. The box gets its start shape. The log shows no error.
 61. Click on empty floor. The handle selection clears and the scene selection changes as usual. Select two brushes. No handles show.
 62. Repeat step 54 with the "Sphere", "Cylinder" and "Ring" presets. Each brush shows the handles of the table above.
 63. Clear "Show handles" in the overlay. The handles go. Restart the editor. The check box stays clear.

@@ -140,23 +140,62 @@ bool RestoreShapeAttributes(Component* component, const ShapeAttributeSnapshot& 
     return true;
 }
 
+bool ApplyShapeHandleDrag(Component* brush, const ShapeAttributeSnapshot& start, const ea::vector<unsigned>& ids,
+    const Vector3& delta, ea::optional<Vector3>& acceptedDelta)
+{
+    if (!brush)
+        return false;
+
+    RestoreShapeAttributes(brush, start);
+    // The brush refuses a move without a change. A zero delta is the start shape, so it is valid.
+    if (delta == Vector3::ZERO)
+    {
+        acceptedDelta = Vector3::ZERO;
+        return true;
+    }
+    if (MoveShapeHandles(brush, ids, delta))
+    {
+        acceptedDelta = delta;
+        return true;
+    }
+    if (acceptedDelta && *acceptedDelta != Vector3::ZERO)
+        MoveShapeHandles(brush, ids, *acceptedDelta);
+    return false;
+}
+
 ea::optional<unsigned> PickNearestHandle(
     const ea::vector<HandleScreenPoint>& points, const Vector2& mouse, float radius)
 {
     ea::optional<unsigned> best;
-    float bestDistanceSquared = radius * radius;
+    float bestDistance = 0.0f;
     for (unsigned index = 0; index < points.size(); ++index)
     {
         const HandleScreenPoint& point = points[index];
         if (!point.visible_)
             continue;
-        const float distanceSquared = (point.position_ - mouse).LengthSquared();
-        if (distanceSquared > bestDistanceSquared)
+        const float distance = (point.position_ - mouse).Length();
+        if (distance > radius)
             continue;
-        if (best && distanceSquared == bestDistanceSquared && points[*best].id_ < point.id_)
-            continue;
-        best = index;
-        bestDistanceSquared = distanceSquared;
+
+        bool better = !best;
+        if (best)
+        {
+            const HandleScreenPoint& current = points[*best];
+            if (distance < bestDistance - HandlePickTieEpsilon)
+                better = true;
+            else if (distance <= bestDistance + HandlePickTieEpsilon)
+            {
+                if (point.depth_ != current.depth_)
+                    better = point.depth_ < current.depth_;
+                else
+                    better = point.id_ < current.id_;
+            }
+        }
+        if (better)
+        {
+            best = index;
+            bestDistance = distance;
+        }
     }
     return best;
 }

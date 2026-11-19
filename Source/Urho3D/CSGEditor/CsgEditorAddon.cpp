@@ -35,6 +35,8 @@
 #include <IconFontCppHeaders/IconsFontAwesome6.h>
 #include <ImGuizmo/ImGuizmo.h>
 
+#include <cmath>
+
 namespace Urho3D
 {
 
@@ -74,12 +76,11 @@ const float OverlayMaxHeightFraction = 0.4f;
 const unsigned MaxDebugShapesPerFrame = 64;
 /// The editor settings key of the "Draw Debug Geometry" option of the selection renderer.
 const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeometry";
-/// The editor settings key of the local space option of the transform manipulator.
-const char* const GizmoLocalIniKey = "TransformGizmo.IsLocal";
 
 /// The editor settings keys of the shape handles.
 const char* const ShowHandlesIniKey = "CsgEditor.ShowHandles";
 const char* const HandleGridStepIniKey = "CsgEditor.HandleGridStep";
+const float DefaultHandleGridStep = 0.125f;
 /// The size of a handle and the pick radius in pixels.
 const float HandleSize = 8.0f;
 const float HandlePickRadius = 10.0f;
@@ -664,7 +665,11 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
     if (const auto value = ReadIntFromIni(line, ShowHandlesIniKey))
         showHandles_ = *value != 0;
     if (const auto value = ReadStringFromIni(line, HandleGridStepIniKey))
-        handleGridStep_ = ea::max(0.0f, ToFloat(*value));
+    {
+        // A value that is not finite gives the default. A negative value turns off the snap.
+        const float step = ToFloat(*value);
+        handleGridStep_ = std::isfinite(step) ? ea::max(0.0f, step) : DefaultHandleGridStep;
+    }
 }
 
 CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const
@@ -1038,9 +1043,9 @@ bool CsgEditorAddon::IsSelectionDebugGeometryEnabled() const
 
 bool CsgEditorAddon::IsTransformGizmoLocal() const
 {
-    // The option is private in the transform manipulator. The handle gizmo uses the same space.
-    const auto value = ReadAddonIniInt(owner_->GetAddon<TransformManipulator>(), GizmoLocalIniKey);
-    return value && *value != 0;
+    // The handle gizmo uses the space of the transform manipulator. Without it, the gizmo uses world space.
+    const auto manipulator = owner_->GetAddon<TransformManipulator>();
+    return manipulator && manipulator->IsLocal();
 }
 
 void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
@@ -1157,14 +1162,13 @@ bool CsgEditorAddon::RenderTabContextMenu()
 
 void CsgEditorAddon::SetActiveShapeBrush(Component* brush)
 {
+    const bool wasDragging = dragState_ != HandleDragState::None;
     if (dragState_ == HandleDragState::Active)
         EndHandleDrag(false);
-    if (dragState_ != HandleDragState::None)
-    {
-        dragState_ = HandleDragState::None;
-        // The gizmo can still be in use. The mouse stays consumed until the release, so the node gizmo does not take it.
-        handleClickPending_ = ui::IsMouseDown(MOUSEB_LEFT);
-    }
+    dragState_ = HandleDragState::None;
+    // The gizmo can still be in use. The mouse stays consumed until the release, so the node gizmo does not take it.
+    if (wasDragging && ui::IsMouseDown(MOUSEB_LEFT))
+        handleClickPending_ = true;
     handleBrush_ = brush;
     handleSet_ = {};
     selectedHandles_.clear();
@@ -1215,12 +1219,8 @@ void CsgEditorAddon::UpdateHandleDrag(Node* node, bool snap)
     dragTriedDelta_ = localDelta;
 
     // The move is stateless: restore the snapshot, then move by the total delta.
-    // A refused move keeps the last accepted state.
-    RestoreShapeAttributes(brush, dragSnapshot_);
-    if (MoveShapeHandles(brush, selectedHandles_, localDelta))
-        dragAcceptedDelta_ = localDelta;
-    else if (dragAcceptedDelta_)
-        MoveShapeHandles(brush, selectedHandles_, *dragAcceptedDelta_);
+    // A refused move keeps the last accepted state. A zero delta gives the start shape.
+    ApplyShapeHandleDrag(brush, dragSnapshot_, selectedHandles_, localDelta, dragAcceptedDelta_);
 }
 
 void CsgEditorAddon::EndHandleDrag(bool commit)
@@ -1317,6 +1317,16 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
             selectedHandles_.clear();
     }
 
+    // Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z during a drag cancel the drag. Ctrl can be down for the snap.
+    // The project applies the hotkeys after the tabs render, so the cancel comes before the undo or redo.
+    // Then the undo stack and the brush stay in sync.
+    if (dragState_ == HandleDragState::Active && ui::IsKeyDown(KEY_CTRL)
+        && (ui::IsKeyPressed(KEY_Z) || ui::IsKeyPressed(KEY_Y)))
+    {
+        EndHandleDrag(false);
+        dragState_ = HandleDragState::Cancelled;
+    }
+
     Node* node = brush->GetNode();
     Camera* camera = page.renderer_->GetCamera();
     const Rect& area = page.contentArea_;
@@ -1326,8 +1336,10 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     ea::vector<HandleScreenPoint> points;
     for (const ShapeHandle& handle : handleSet_.handles_)
     {
-        const auto screenPos = ProjectToView(camera, area, worldTransform * handle.position_);
-        points.push_back(HandleScreenPoint{handle.id_, screenPos.value_or(Vector2::ZERO), screenPos.has_value()});
+        const Vector3 worldPos = worldTransform * handle.position_;
+        const auto screenPos = ProjectToView(camera, area, worldPos);
+        const float depth = (camera->GetView() * worldPos).z_;
+        points.push_back(HandleScreenPoint{handle.id_, screenPos.value_or(Vector2::ZERO), screenPos.has_value(), depth});
     }
 
     // No pick during the camera navigation (the right mouse button) and during a drag.

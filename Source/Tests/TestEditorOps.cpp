@@ -1146,3 +1146,77 @@ TEST_CASE("Handle math: centroid, grid snap and axis projection", "[editorops][h
     // Step 0 is off.
     CHECK(SnapHandleDelta(Vector3::ONE, Vector3(0.3f, 0.2f, 0.1f), Vector3::ZERO, 0.0f) == Vector3(0.3f, 0.2f, 0.1f));
 }
+
+TEST_CASE("ApplyShapeHandleDrag returns to the start shape on a zero delta", "[editorops][handles]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    auto* box = AddShapeBrush<CsgBoxBrush>(f);
+    const ShapeAttributeSnapshot start = SnapshotShapeAttributes(box);
+    const ea::vector<unsigned> ids{7};
+    ea::optional<Vector3> accepted;
+
+    // A valid move is accepted.
+    CHECK(ApplyShapeHandleDrag(box, start, ids, Vector3(0.25f, 0.0f, 0.0f), accepted));
+    CHECK(accepted == Vector3(0.25f, 0.0f, 0.0f));
+    const ShapeAttributeSnapshot moved = SnapshotShapeAttributes(box);
+    CHECK(moved != start);
+
+    // A refused move keeps the last accepted shape.
+    CHECK_FALSE(ApplyShapeHandleDrag(box, start, ids, Vector3(-3.0f, -3.0f, -3.0f), accepted));
+    CHECK(accepted == Vector3(0.25f, 0.0f, 0.0f));
+    CHECK(SnapshotShapeAttributes(box) == moved);
+
+    // A zero delta, for example a snap back to the start cell, gives the start shape.
+    CHECK(ApplyShapeHandleDrag(box, start, ids, Vector3::ZERO, accepted));
+    CHECK(accepted == Vector3::ZERO);
+    CHECK(SnapshotShapeAttributes(box) == start);
+
+    // A refused move after the zero delta stays at the start shape.
+    CHECK_FALSE(ApplyShapeHandleDrag(box, start, ids, Vector3(-3.0f, -3.0f, -3.0f), accepted));
+    CHECK(SnapshotShapeAttributes(box) == start);
+
+    // A refused first move stays at the start shape and has no accepted delta.
+    ea::optional<Vector3> none;
+    CHECK_FALSE(ApplyShapeHandleDrag(box, start, ids, Vector3(-3.0f, -3.0f, -3.0f), none));
+    CHECK_FALSE(none);
+    CHECK(SnapshotShapeAttributes(box) == start);
+    CHECK_FALSE(ApplyShapeHandleDrag(nullptr, start, ids, Vector3::ONE, none));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("PickNearestHandle gives an overlap to the nearer handle", "[editorops][handles]")
+{
+    // The box faces -Z (id 24) and +Z (id 25) seen along the Z axis are on one screen point.
+    const ea::vector<HandleScreenPoint> overlap{
+        {24, Vector2(100.0f, 100.0f), true, 5.0f},
+        {25, Vector2(100.0f, 100.0f), true, 4.0f},
+    };
+    CHECK(PickNearestHandle(overlap, Vector2(101.0f, 100.0f), 10.0f) == 1u);
+    const ea::vector<HandleScreenPoint> swapped{
+        {24, Vector2(100.0f, 100.0f), true, 4.0f},
+        {25, Vector2(100.0f, 100.0f), true, 5.0f},
+    };
+    CHECK(PickNearestHandle(swapped, Vector2(101.0f, 100.0f), 10.0f) == 0u);
+
+    // A screen distance difference within 1 px is a tie: the nearer depth wins.
+    const ea::vector<HandleScreenPoint> nearTie{
+        {1, Vector2(100.0f, 100.0f), true, 9.0f},
+        {2, Vector2(100.5f, 100.0f), true, 3.0f},
+    };
+    CHECK(PickNearestHandle(nearTie, Vector2(99.0f, 100.0f), 10.0f) == 1u);
+
+    // A difference of more than 1 px is not a tie: the nearest on the screen wins.
+    const ea::vector<HandleScreenPoint> noTie{
+        {1, Vector2(100.0f, 100.0f), true, 9.0f},
+        {2, Vector2(103.0f, 100.0f), true, 3.0f},
+    };
+    CHECK(PickNearestHandle(noTie, Vector2(99.0f, 100.0f), 10.0f) == 0u);
+
+    // The same depth goes to the lower id, in both orders.
+    const ea::vector<HandleScreenPoint> sameDepth{
+        {9, Vector2(100.0f, 100.0f), true, 2.0f},
+        {3, Vector2(100.0f, 100.0f), true, 2.0f},
+    };
+    CHECK(PickNearestHandle(sameDepth, Vector2(100.0f, 100.0f), 10.0f) == 1u);
+}
