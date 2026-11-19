@@ -414,11 +414,25 @@ SharedPtr<Model> CsgBuildModelFromMesh(
     ea::vector<CsgShapeGroup> groups = mesh.groups_;
     if (groups.empty())
         groups.push_back(CsgShapeGroup{0, indexCount});
-    for (const CsgShapeGroup& group : groups)
+    // The slot is the geometry index. A slot without a group gets an empty geometry.
+    constexpr unsigned maxSlots = 64;
+    unsigned numSlots = 0;
+    ea::vector<unsigned> slots(groups.size());
+    for (unsigned i = 0; i < groups.size(); ++i)
     {
+        const CsgShapeGroup& group = groups[i];
         if (group.indexCount_ == 0 || group.indexCount_ % 3 != 0 || group.indexStart_ > indexCount
             || group.indexCount_ > indexCount - group.indexStart_)
             return nullptr;
+        slots[i] = group.slot_ == CsgShapeGroup::SlotFromIndex ? i : group.slot_;
+        if (slots[i] >= maxSlots)
+            return nullptr;
+        for (unsigned j = 0; j < i; ++j)
+        {
+            if (slots[j] == slots[i])
+                return nullptr;
+        }
+        numSlots = ea::max(numSlots, slots[i] + 1);
     }
 
     ea::vector<VertexElement> vbElements = elements.empty() ? CsgGetShapeVertexElements() : elements;
@@ -438,15 +452,20 @@ SharedPtr<Model> CsgBuildModelFromMesh(
     auto model = MakeShared<Model>(context);
     model->SetVertexBuffers({vb}, {}, {});
     model->SetIndexBuffers({ib});
-    model->SetNumGeometries(groups.size());
+    model->SetNumGeometries(numSlots);
+    ea::vector<CsgShapeGroup> bySlot(numSlots, CsgShapeGroup{0, 0});
     for (unsigned i = 0; i < groups.size(); ++i)
+        bySlot[slots[i]] = groups[i];
+    for (unsigned slot = 0; slot < numSlots; ++slot)
     {
-        SharedPtr<Geometry> geometry = i == 0 ? firstGeometry : MakeShared<Geometry>(context);
+        SharedPtr<Geometry> geometry = slot == 0 ? firstGeometry : MakeShared<Geometry>(context);
         geometry->SetNumVertexBuffers(1);
         geometry->SetVertexBuffer(0, vb);
         geometry->SetIndexBuffer(ib);
-        geometry->SetDrawRange(TRIANGLE_LIST, groups[i].indexStart_, groups[i].indexCount_, 0, vertexCount);
-        model->SetGeometry(i, 0, geometry);
+        // A free slot has the draw range 0, 0.
+        const CsgShapeGroup& group = bySlot[slot];
+        geometry->SetDrawRange(TRIANGLE_LIST, group.indexStart_, group.indexCount_, 0, group.indexCount_ ? vertexCount : 0);
+        model->SetGeometry(slot, 0, geometry);
     }
     model->SetBoundingBox(boundingBox);
     return model;

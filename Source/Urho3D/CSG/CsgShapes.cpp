@@ -376,4 +376,338 @@ bool CsgGenerateSphere(const CsgSphereParams& params, CsgShapeMesh& mesh)
     return true;
 }
 
+namespace
+{
+
+/// A minimal double precision vector for the cylinder generator.
+struct Vector2d
+{
+    Vector2d(double x, double y) : x_(x), y_(y) {}
+    double x_;
+    double y_;
+};
+
+struct Vector3d
+{
+    Vector3d(double x, double y, double z) : x_(x), y_(y), z_(z) {}
+    double x_;
+    double y_;
+    double z_;
+
+    double DotProduct(const Vector3d& rhs) const { return x_ * rhs.x_ + y_ * rhs.y_ + z_ * rhs.z_; }
+    Vector3d CrossProduct(const Vector3d& rhs) const
+    {
+        return Vector3d(y_ * rhs.z_ - z_ * rhs.y_, z_ * rhs.x_ - x_ * rhs.z_, x_ * rhs.y_ - y_ * rhs.x_);
+    }
+    Vector3d operator*(double scale) const { return Vector3d(x_ * scale, y_ * scale, z_ * scale); }
+};
+
+/// Return the sanitized radius pair of a cylinder end.
+Vector2 SanitizeEndRadius(const Vector2& value, const Vector2& defaultValue)
+{
+    Vector2 radius(SanitizeValue(value.x_, 0.0f, CsgCylinderParams::MaxRadius, defaultValue.x_),
+        SanitizeValue(value.y_, 0.0f, CsgCylinderParams::MaxRadius, defaultValue.y_));
+    // An apex needs both components below the minimum. A single small component is raised.
+    if (radius.x_ < CsgCylinderParams::MinRadius && radius.y_ < CsgCylinderParams::MinRadius)
+        return Vector2::ZERO;
+    radius.x_ = ea::max(radius.x_, CsgCylinderParams::MinRadius);
+    radius.y_ = ea::max(radius.y_, CsgCylinderParams::MinRadius);
+    return radius;
+}
+
+} // namespace
+
+void CsgSanitizeCylinderParams(CsgCylinderParams& params)
+{
+    const CsgCylinderParams defaults;
+    params.bottomCenter_ = SanitizeVector(params.bottomCenter_, -CsgCylinderParams::MaxCoordinate,
+        CsgCylinderParams::MaxCoordinate, defaults.bottomCenter_);
+    params.topCenter_ = SanitizeVector(
+        params.topCenter_, -CsgCylinderParams::MaxCoordinate, CsgCylinderParams::MaxCoordinate, defaults.topCenter_);
+    params.bottomRadius_ = SanitizeEndRadius(params.bottomRadius_, defaults.bottomRadius_);
+    params.topRadius_ = SanitizeEndRadius(params.topRadius_, defaults.topRadius_);
+    params.segments_ = Clamp(params.segments_, CsgCylinderParams::MinSegments, CsgCylinderParams::MaxSegments);
+    params.heightSegments_ =
+        Clamp(params.heightSegments_, CsgCylinderParams::MinHeightSegments, CsgCylinderParams::MaxHeightSegments);
+    params.bulge_ = SanitizeValue(params.bulge_, CsgCylinderParams::MinBulge, CsgCylinderParams::MaxBulge, 0.0f);
+}
+
+namespace
+{
+
+/// One corner of a cylinder triangle with all attributes except the final normal.
+struct CylinderCorner
+{
+    Vector3 position_;
+    Vector2 uv_;
+    /// The direction of the U axis in space.
+    Vector3 tangentDir_;
+    /// The direction of the V axis in space.
+    Vector3 vDir_;
+    /// The smooth normal. A cap corner always uses it.
+    Vector3 normal_;
+    bool isCap_{};
+};
+
+} // namespace
+
+bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
+{
+    mesh.vertices_.clear();
+    mesh.indices_.clear();
+    mesh.groups_.clear();
+
+    CsgCylinderParams sanitized = params;
+    CsgSanitizeCylinderParams(sanitized);
+    const Vector3 bottom = sanitized.bottomCenter_;
+    const Vector3 top = sanitized.topCenter_;
+    const bool bottomApex = sanitized.bottomRadius_ == Vector2::ZERO;
+    const bool topApex = sanitized.topRadius_ == Vector2::ZERO;
+    if ((top - bottom).Length() < CsgCylinderParams::MinCenterDistance || (bottomApex && topApex))
+        return false;
+
+    const unsigned segments = static_cast<unsigned>(sanitized.segments_);
+    const unsigned heightSegments = static_cast<unsigned>(sanitized.heightSegments_);
+    const double twoPi = 2.0 * M_PI;
+    const double bulge = sanitized.bulge_;
+    // Rings are in planes of constant Y. A top below the bottom flips the winding.
+    const double side = top.y_ >= bottom.y_ ? 1.0 : -1.0;
+    const bool flip = side < 0.0;
+
+    const auto lerpRadius = [&](double t, double a, double b) { return (a + (b - a) * t) * (1.0 + bulge * 4.0 * t * (1.0 - t)); };
+    // The radii of the ring at t. The profile is a polynomial, so it is valid outside [0, 1].
+    const auto radiusAt = [&](double t)
+    {
+        return Vector2d(lerpRadius(t, sanitized.bottomRadius_.x_, sanitized.topRadius_.x_),
+            lerpRadius(t, sanitized.bottomRadius_.y_, sanitized.topRadius_.y_));
+    };
+    const auto radiusSlopeAt = [&](double t)
+    {
+        constexpr double h = 1e-3;
+        const Vector2d r1 = radiusAt(t + h);
+        const Vector2d r0 = radiusAt(t - h);
+        return Vector2d((r1.x_ - r0.x_) / (2.0 * h), (r1.y_ - r0.y_) / (2.0 * h));
+    };
+    const Vector3d axis(static_cast<double>(top.x_) - bottom.x_, static_cast<double>(top.y_) - bottom.y_,
+        static_cast<double>(top.z_) - bottom.z_);
+
+    ea::vector<double> lonCos(segments + 1);
+    ea::vector<double> lonSin(segments + 1);
+    for (unsigned lon = 0; lon <= segments; ++lon)
+    {
+        lonCos[lon] = std::cos(twoPi * lon / segments);
+        lonSin[lon] = std::sin(twoPi * lon / segments);
+    }
+
+    // Each vertex copies its position from this table, so the shared positions are bit-identical.
+    // The rows come first. A row at an apex end has one position. The cap centers come last.
+    const unsigned numRows = heightSegments + 1;
+    ea::vector<unsigned> rowStart(numRows + 1);
+    for (unsigned row = 0; row < numRows; ++row)
+    {
+        const bool apexRow = (row == 0 && bottomApex) || (row == heightSegments && topApex);
+        rowStart[row + 1] = rowStart[row] + (apexRow ? 1u : segments);
+    }
+    const unsigned bottomCapCenter = rowStart[numRows];
+    const unsigned topCapCenter = bottomCapCenter + 1;
+    ea::vector<Vector3> positions(topCapCenter + 1);
+    positions[bottomCapCenter] = bottom;
+    positions[topCapCenter] = top;
+    for (unsigned row = 0; row < numRows; ++row)
+    {
+        const double t = static_cast<double>(row) / heightSegments;
+        if (rowStart[row + 1] - rowStart[row] == 1)
+        {
+            positions[rowStart[row]] = row == 0 ? bottom : top;
+            continue;
+        }
+        const Vector2d radius = radiusAt(t);
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            positions[rowStart[row] + lon] = Vector3(
+                static_cast<float>(bottom.x_ * (1.0 - t) + top.x_ * t + radius.x_ * lonCos[lon]),
+                static_cast<float>(bottom.y_ * (1.0 - t) + top.y_ * t),
+                static_cast<float>(bottom.z_ * (1.0 - t) + top.z_ * t + radius.y_ * lonSin[lon]));
+        }
+    }
+    // The seam (lon == segments) copies the position of lon 0.
+    const auto ringPosition = [&](unsigned row, unsigned lon) -> const Vector3&
+    { return positions[rowStart[row] + (rowStart[row + 1] - rowStart[row] == 1 ? 0 : lon % segments)]; };
+
+    // The attributes of the body at (t, lon). The lon is a fractional index for an apex corner.
+    struct BodyFrame
+    {
+        Vector3 normal_;
+        Vector3 tangentDir_;
+        Vector3 vDir_;
+    };
+    const auto bodyFrame = [&](double t, double lon) -> BodyFrame
+    {
+        const double phi = twoPi * lon / segments;
+        const double c = std::cos(phi);
+        const double s = std::sin(phi);
+        const Vector2d radius = radiusAt(t);
+        const Vector2d slope = radiusSlopeAt(t);
+        const Vector3d dPdt(axis.x_ + slope.x_ * c, axis.y_, axis.z_ + slope.y_ * s);
+        const Vector3d dPda(-radius.x_ * s, 0.0, radius.y_ * c);
+        const Vector3d n = dPdt.CrossProduct(dPda) * side;
+        BodyFrame frame;
+        frame.normal_ = Vector3(static_cast<float>(n.x_), static_cast<float>(n.y_), static_cast<float>(n.z_));
+        frame.tangentDir_ = Vector3(static_cast<float>(-radius.x_ * s), 0.0f, static_cast<float>(radius.y_ * c));
+        frame.vDir_ = Vector3(static_cast<float>(dPdt.x_), static_cast<float>(dPdt.y_), static_cast<float>(dPdt.z_));
+        return frame;
+    };
+
+    // A corner of the body. An apex corner uses the middle of its fan and the row next to the apex.
+    const auto bodyCorner = [&](unsigned row, unsigned lonIndex) -> CylinderCorner
+    {
+        CylinderCorner corner;
+        corner.position_ = ringPosition(row, lonIndex);
+        corner.uv_ = Vector2(static_cast<float>(static_cast<double>(lonIndex) / segments),
+            static_cast<float>(static_cast<double>(row) / heightSegments));
+        const double t = static_cast<double>(row) / heightSegments;
+        const BodyFrame frame = bodyFrame(t, lonIndex);
+        corner.normal_ = frame.normal_.NormalizedOrDefault(Vector3::UP);
+        corner.tangentDir_ = frame.tangentDir_.NormalizedOrDefault(Vector3::FORWARD);
+        corner.vDir_ = frame.vDir_;
+        return corner;
+    };
+    const auto apexCorner = [&](bool atBottom, unsigned fan) -> CylinderCorner
+    {
+        CylinderCorner corner;
+        const unsigned row = atBottom ? 0 : heightSegments;
+        const unsigned nextRow = atBottom ? 1 : heightSegments - 1;
+        corner.position_ = ringPosition(row, 0);
+        const double mid = fan + 0.5;
+        corner.uv_ = Vector2(static_cast<float>(mid / segments), static_cast<float>(static_cast<double>(row) / heightSegments));
+        const double t = static_cast<double>(nextRow) / heightSegments;
+        // The apex normal is the average of the normals of the neighbors in the next row.
+        const Vector3 n0 = bodyFrame(t, fan).normal_.NormalizedOrDefault(Vector3::UP);
+        const Vector3 n1 = bodyFrame(t, fan + 1).normal_.NormalizedOrDefault(Vector3::UP);
+        const BodyFrame frame = bodyFrame(t, mid);
+        corner.normal_ = (n0 + n1).NormalizedOrDefault(frame.normal_.NormalizedOrDefault(Vector3::UP));
+        corner.tangentDir_ = frame.tangentDir_.NormalizedOrDefault(Vector3::FORWARD);
+        corner.vDir_ = frame.vDir_;
+        return corner;
+    };
+    const auto capCorner = [&](const Vector3& position, const Vector3& normal) -> CylinderCorner
+    {
+        CylinderCorner corner;
+        corner.position_ = position;
+        corner.uv_ = Vector2(position.x_ + 0.5f, position.z_ + 0.5f);
+        corner.tangentDir_ = Vector3::RIGHT;
+        corner.vDir_ = Vector3::BACK;
+        corner.normal_ = normal;
+        corner.isCap_ = true;
+        return corner;
+    };
+
+    const Vector4 white = Color::WHITE.ToVector4();
+    double volume = 0.0;
+    bool degenerate = false;
+    const Vector3 origin = (bottom + top) * 0.5f;
+
+    const auto emitTriangle = [&](const CylinderCorner& c0, const CylinderCorner& c1, const CylinderCorner& c2)
+    {
+        const CylinderCorner* corners[3] = {&c0, flip ? &c2 : &c1, flip ? &c1 : &c2};
+        const Vector3& p0 = corners[0]->position_;
+        const Vector3& p1 = corners[1]->position_;
+        const Vector3& p2 = corners[2]->position_;
+        if (p0 == p1 || p1 == p2 || p2 == p0)
+            degenerate = true;
+        const Vector3 flatNormal = (p1 - p0).CrossProduct(p2 - p0).NormalizedOrDefault(Vector3::UP);
+        const auto relative = [&](const Vector3& p)
+        { return Vector3d(static_cast<double>(p.x_) - origin.x_, static_cast<double>(p.y_) - origin.y_, static_cast<double>(p.z_) - origin.z_); };
+        const Vector3d r0 = relative(p0);
+        const Vector3d r1 = relative(p1);
+        const Vector3d r2 = relative(p2);
+        volume += r0.DotProduct(r1.CrossProduct(r2)) / 6.0;
+
+        for (const CylinderCorner* corner : corners)
+        {
+            const Vector3 normal = corner->isCap_ || sanitized.smoothNormals_ ? corner->normal_ : flatNormal;
+            // The shader bitangent is cross(tangent, normal) * w. It must point along the V axis.
+            const Vector3 tangent = (corner->tangentDir_ - normal * normal.DotProduct(corner->tangentDir_))
+                                        .NormalizedOrDefault(corner->tangentDir_);
+            const float handedness = tangent.CrossProduct(normal).DotProduct(corner->vDir_) >= 0.0f ? 1.0f : -1.0f;
+
+            ModelVertex vertex{};
+            vertex.SetPosition(corner->position_);
+            vertex.SetNormal(normal);
+            vertex.tangent_ = Vector4(tangent, handedness);
+            vertex.uv_[0] = Vector4(corner->uv_.x_, corner->uv_.y_, 0.0f, 0.0f);
+            vertex.uv_[1] = vertex.uv_[0];
+            vertex.color_[0] = white;
+
+            mesh.indices_.push_back(mesh.vertices_.size());
+            mesh.vertices_.push_back(vertex);
+        }
+    };
+
+    const unsigned numTriangles = 2 * segments * heightSegments + 2 * segments;
+    mesh.vertices_.reserve(3 * numTriangles);
+    mesh.indices_.reserve(3 * numTriangles);
+
+    // Group 0: the side. The rows go from the bottom to the top.
+    for (unsigned row = 0; row < heightSegments; ++row)
+    {
+        const bool fromApex = row == 0 && bottomApex;
+        const bool toApex = row + 1 == heightSegments && topApex;
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            if (fromApex)
+            {
+                emitTriangle(apexCorner(true, lon), bodyCorner(row + 1, lon), bodyCorner(row + 1, lon + 1));
+                continue;
+            }
+            if (toApex)
+            {
+                emitTriangle(bodyCorner(row, lon), apexCorner(false, lon), bodyCorner(row, lon + 1));
+                continue;
+            }
+            const CylinderCorner a = bodyCorner(row, lon);
+            const CylinderCorner b = bodyCorner(row, lon + 1);
+            const CylinderCorner c = bodyCorner(row + 1, lon + 1);
+            const CylinderCorner d = bodyCorner(row + 1, lon);
+            emitTriangle(a, c, b);
+            emitTriangle(a, d, c);
+        }
+    }
+    mesh.groups_.push_back(CsgShapeGroup{0u, static_cast<unsigned>(mesh.indices_.size()), 0u});
+
+    // Group 1: the top cap. Its normal points away from the body.
+    if (!topApex)
+    {
+        const unsigned start = mesh.indices_.size();
+        const CylinderCorner center = capCorner(top, Vector3(0.0f, static_cast<float>(side), 0.0f));
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            emitTriangle(center, capCorner(ringPosition(heightSegments, lon + 1), center.normal_),
+                capCorner(ringPosition(heightSegments, lon), center.normal_));
+        }
+        mesh.groups_.push_back(CsgShapeGroup{start, static_cast<unsigned>(mesh.indices_.size()) - start, 1u});
+    }
+    // Group 2: the bottom cap.
+    if (!bottomApex)
+    {
+        const unsigned start = mesh.indices_.size();
+        const CylinderCorner center = capCorner(bottom, Vector3(0.0f, static_cast<float>(-side), 0.0f));
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            emitTriangle(center, capCorner(ringPosition(0, lon), center.normal_),
+                capCorner(ringPosition(0, lon + 1), center.normal_));
+        }
+        mesh.groups_.push_back(CsgShapeGroup{start, static_cast<unsigned>(mesh.indices_.size()) - start, 2u});
+    }
+
+    if (degenerate || !(volume > 0.0))
+    {
+        mesh.vertices_.clear();
+        mesh.indices_.clear();
+        mesh.groups_.clear();
+        return false;
+    }
+    return true;
+}
+
 } // namespace Urho3D

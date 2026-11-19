@@ -27,6 +27,13 @@ struct CsgShapeGroup
     unsigned indexStart_{};
     /// The number of indices. It is a multiple of 3 and is not zero.
     unsigned indexCount_{};
+    /// The material slot, and so the geometry index in the model, of the group.
+    /// `SlotFromIndex` gives the index of the group in `CsgShapeMesh::groups_`.
+    /// A shape with an optional face (a cone has no cap at its apex) sets the slot,
+    /// so the slot of each face stays fixed. The slots must be unique.
+    unsigned slot_{SlotFromIndex};
+
+    static constexpr unsigned SlotFromIndex = ~0u;
 };
 
 /// The mesh of a procedural shape: one vertex list, one index list (a triangle list) and the face groups.
@@ -38,8 +45,8 @@ struct CsgShapeGroup
 /// - The mesh is closed and its signed volume is positive.
 /// - Winding: for the triangle (p0, p1, p2), the cross product (p1 - p0) x (p2 - p0) points out of the solid.
 ///   `CsgPolygon` uses the same rule for its plane.
-/// - The group index is the face id. The group order is a file contract: scenes save the materials by index.
-///   A generator emits no empty group.
+/// - The slot of the group is the face id. The slot order is a file contract: scenes save the materials by slot.
+///   A generator emits no empty group. A face that is absent leaves its slot free.
 /// An empty `groups_` means one group with all indices.
 struct CsgShapeMesh
 {
@@ -54,10 +61,13 @@ struct CsgShapeMesh
 PLUGIN_RBFXCSG_API const ea::vector<VertexElement>& CsgGetShapeVertexElements();
 
 /// Build a model from the mesh. The model has no name and is not in the resource cache.
-/// The model has one geometry for each face group. All geometries use one vertex buffer and one index buffer.
+/// The model has one geometry for each slot, up to the highest slot of the face groups.
+/// A slot without a face group gets a geometry with an empty draw range.
+/// All geometries use one vertex buffer and one index buffer.
 /// The buffers keep a CPU copy, so `CsgBuildPolygonsFromModel` can read the model.
 /// An empty `elements` gives the layout of `CsgGetShapeVertexElements`.
-/// Return null if the mesh is empty, an index is not valid or a group is empty or out of range.
+/// Return null if the mesh is empty, an index is not valid, a group is empty or out of range,
+/// or two groups use one slot.
 PLUGIN_RBFXCSG_API SharedPtr<Model> CsgBuildModelFromMesh(
     Context* context, const CsgShapeMesh& mesh, const ea::vector<VertexElement>& elements = {});
 
@@ -137,5 +147,68 @@ PLUGIN_RBFXCSG_API void CsgSanitizeSphereParams(CsgSphereParams& params);
 /// The function uses a sanitized copy of the parameters. See `CsgSanitizeSphereParams`.
 /// Return false if the mesh has no positive volume. This does not happen for sanitized parameters.
 PLUGIN_RBFXCSG_API bool CsgGenerateSphere(const CsgSphereParams& params, CsgShapeMesh& mesh);
+
+/// The parameters of a procedural cylinder, cone or frustum with an axis that can be sheared or tilted.
+///
+/// The axis is the segment from `bottomCenter_` to `topCenter_`, in local space.
+/// Each end is an ellipse in the plane perpendicular to the local Y axis through its center.
+/// The radius pair of an end is the two radii along the local X and Z axes, not along the tilted axis.
+/// The radii of a ring in the body are lerp(bottom, top, t) * (1 + bulge * 4 * t * (1 - t)), per component.
+/// The center line of the body stays a straight line between the centers.
+struct CsgCylinderParams
+{
+    static constexpr float MaxCoordinate = 16384.0f;
+    static constexpr float MinCenterDistance = 0.001f;
+    static constexpr float MinRadius = 0.001f;
+    static constexpr float MaxRadius = 16384.0f;
+    static constexpr int MinSegments = 3;
+    static constexpr int MaxSegments = 128;
+    static constexpr int MinHeightSegments = 1;
+    static constexpr int MaxHeightSegments = 64;
+    static constexpr float MinBulge = -0.95f;
+    static constexpr float MaxBulge = 4.0f;
+
+    Vector3 bottomCenter_{0.0f, -0.5f, 0.0f};
+    Vector3 topCenter_{0.0f, 0.5f, 0.0f};
+    /// The radii of the bottom end along X and Z. (0, 0) makes the end an apex.
+    Vector2 bottomRadius_{0.5f, 0.5f};
+    /// The radii of the top end along X and Z. (0, 0) makes the end an apex.
+    Vector2 topRadius_{0.5f, 0.5f};
+    /// The number of divisions around the axis.
+    int segments_{24};
+    /// The number of rings in the body minus one.
+    int heightSegments_{1};
+    /// The bulge of the body. 0 is straight.
+    float bulge_{0.0f};
+    /// True: normals follow the body. False: each triangle has a flat normal.
+    bool smoothNormals_{true};
+};
+
+/// Clamp the centers to [-16384, 16384], the segments to [3, 128], the height segments to [1, 64]
+/// and the bulge to [-0.95, 4]. A value that is not finite gets its default value.
+/// Clamp each radius to [0, 16384]. A pair with both components below 0.001 becomes (0, 0): an apex.
+/// In any other pair each component is at least 0.001.
+PLUGIN_RBFXCSG_API void CsgSanitizeCylinderParams(CsgCylinderParams& params);
+
+/// Generate a cylinder, a cone or a frustum.
+///
+/// The mesh has one position table: the rows of the body from the bottom to the top (height segments + 1 rows),
+/// then the center of each cap. A row has `segments` positions. A row at an apex end has one position.
+/// The seam and the cap/body split duplicate the vertices only for UV and normals.
+/// Their positions are bit-identical copies from the table.
+/// A cap is a fan of `segments` triangles from the end center. An apex end has no cap.
+/// The body at an apex end is a fan from the apex. No triangle has two equal positions.
+///
+/// Face groups, in this order and with these slots: 0 the side, 1 the top cap, 2 the bottom cap.
+/// The top cap is the cap at `topCenter_`. A group of an apex end is absent, and its slot stays free.
+/// Smooth normals of the body come from the radial direction and the slope of the radius profile.
+/// The apex normal is the average of the normals of its neighbors. A cap normal is flat and points away from the body.
+/// UV 0 of the side is (angle / 2pi, t). UV 0 of a cap is the planar (x + 0.5, z + 0.5). UV 1 is equal to UV 0.
+/// If the top is below the bottom in Y, the winding is flipped, so the signed volume stays positive.
+///
+/// Return false if the shape is not valid. Then `mesh` is empty. A shape is not valid if:
+/// the centers are closer than 0.001, both ends are apexes, the volume is not positive,
+/// or the float positions merge in a triangle (a very small shape far from the origin).
+PLUGIN_RBFXCSG_API bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh);
 
 } // namespace Urho3D

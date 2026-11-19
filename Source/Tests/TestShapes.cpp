@@ -712,3 +712,591 @@ TEST_CASE("CsgGenerateSphere gives the vertex layout of Box.mdl in the model", "
         CHECK(elements[i].offset_ == shapeElements[i].offset_);
     }
 }
+
+namespace
+{
+
+/// Return the independent volume of the cylinder polyhedron, from the frustum formula for each slab.
+/// The rows are polygons with equal ratio of the two radii, so each slab is a frustum with planar sides.
+/// The test does not use the mesh generator.
+double ExpectedCylinderVolume(const CsgCylinderParams& p)
+{
+    const double pi = 3.14159265358979323846;
+    const double n = p.segments_;
+    const auto area = [&](double t)
+    {
+        const double k = (1.0 + p.bulge_ * 4.0 * t * (1.0 - t));
+        const double rx = (p.bottomRadius_.x_ + (p.topRadius_.x_ - p.bottomRadius_.x_) * t) * k;
+        const double rz = (p.bottomRadius_.y_ + (p.topRadius_.y_ - p.bottomRadius_.y_) * t) * k;
+        return 0.5 * n * rx * rz * std::sin(2.0 * pi / n);
+    };
+    const double height = std::fabs(static_cast<double>(p.topCenter_.y_) - p.bottomCenter_.y_) / p.heightSegments_;
+    double volume = 0.0;
+    for (int row = 0; row < p.heightSegments_; ++row)
+    {
+        const double a0 = area(static_cast<double>(row) / p.heightSegments_);
+        const double a1 = area(static_cast<double>(row + 1) / p.heightSegments_);
+        volume += height / 3.0 * (a0 + a1 + std::sqrt(a0 * a1));
+    }
+    return volume;
+}
+
+/// The cylinder variants of the tests.
+ea::vector<CsgCylinderParams> MakeCylinderVariants(unsigned segments, unsigned heightSegments)
+{
+    ea::vector<CsgCylinderParams> variants;
+    CsgCylinderParams base;
+    base.segments_ = segments;
+    base.heightSegments_ = heightSegments;
+    variants.push_back(base);
+
+    CsgCylinderParams topCone = base;
+    topCone.topRadius_ = Vector2::ZERO;
+    variants.push_back(topCone);
+
+    CsgCylinderParams bottomCone = base;
+    bottomCone.bottomRadius_ = Vector2::ZERO;
+    bottomCone.bottomCenter_ = Vector3(1.0f, -2.0f, 0.5f);
+    variants.push_back(bottomCone);
+
+    CsgCylinderParams frustum = base;
+    frustum.bottomRadius_ = Vector2(1.0f, 0.5f);
+    frustum.topRadius_ = Vector2(0.4f, 0.2f);
+    variants.push_back(frustum);
+
+    CsgCylinderParams bulged = base;
+    bulged.bulge_ = 2.0f;
+    variants.push_back(bulged);
+
+    CsgCylinderParams tilted = base;
+    tilted.bulge_ = -0.5f;
+    tilted.topCenter_ = Vector3(1.5f, 1.0f, -0.75f);
+    tilted.bottomRadius_ = Vector2(0.8f, 0.8f);
+    variants.push_back(tilted);
+
+    CsgCylinderParams bulgedCone = base;
+    bulgedCone.bulge_ = 1.0f;
+    bulgedCone.topRadius_ = Vector2::ZERO;
+    variants.push_back(bulgedCone);
+    return variants;
+}
+
+unsigned CountDistinctPositions(const CsgShapeMesh& mesh)
+{
+    ea::vector<Vector3> positions;
+    for (const ModelVertex& vertex : mesh.vertices_)
+    {
+        const Vector3 p = vertex.GetPosition();
+        bool known = false;
+        for (const Vector3& q : positions)
+            known = known || std::memcmp(&p, &q, sizeof(Vector3)) == 0;
+        if (!known)
+            positions.push_back(p);
+    }
+    return positions.size();
+}
+
+} // namespace
+
+TEST_CASE("CsgGenerateCylinder gives a closed mesh without degenerate triangles", "[shapes][procedural]")
+{
+    const unsigned cases[][2] = {{3, 1}, {128, 64}, {24, 1}, {24, 4}, {7, 3}};
+    for (const auto& c : cases)
+    {
+        for (const CsgCylinderParams& params : MakeCylinderVariants(c[0], c[1]))
+        {
+            INFO("Segments " << c[0] << " height segments " << c[1] << " bulge " << params.bulge_
+                             << " top " << params.topRadius_.x_ << " bottom " << params.bottomRadius_.x_);
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateCylinder(params, mesh));
+            const bool bottomApex = params.bottomRadius_ == Vector2::ZERO;
+            const bool topApex = params.topRadius_ == Vector2::ZERO;
+            const unsigned apexes = (bottomApex ? 1 : 0) + (topApex ? 1 : 0);
+            const unsigned sideTriangles = 2 * c[0] * c[1] - apexes * c[0];
+            const unsigned capTriangles = (2 - apexes) * c[0];
+            CHECK(mesh.indices_.size() == 3 * (sideTriangles + capTriangles));
+            CHECK(mesh.vertices_.size() == mesh.indices_.size());
+            CHECK(HasNoDegenerateTriangle(mesh));
+            const ea::vector<CsgPolygon> polygons = MeshToPolygons(mesh);
+            CHECK(IsEdgeClosed(polygons, 1e-6f));
+            CHECK(SignedVolume(polygons) > 0.0);
+            if (c[0] * c[1] <= 400)
+                CHECK(SolidVolume(mesh) > 0.0);
+
+            // The group order is side, top cap, bottom cap. A cone end has no group.
+            unsigned expectedGroups = 1 + (topApex ? 0 : 1) + (bottomApex ? 0 : 1);
+            REQUIRE(mesh.groups_.size() == expectedGroups);
+            CHECK(mesh.groups_[0].indexStart_ == 0);
+            CHECK(mesh.groups_[0].indexCount_ == 3 * sideTriangles);
+            CHECK(mesh.groups_[0].slot_ == 0);
+            unsigned next = 3 * sideTriangles;
+            for (unsigned i = 1; i < mesh.groups_.size(); ++i)
+            {
+                CHECK(mesh.groups_[i].indexStart_ == next);
+                CHECK(mesh.groups_[i].indexCount_ == 3 * c[0]);
+                next += mesh.groups_[i].indexCount_;
+            }
+            CHECK(next == mesh.indices_.size());
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateCylinder volume matches the independent polyhedron volume", "[shapes][procedural]")
+{
+    const double pi = 3.14159265358979323846;
+    // The default cylinder: n / 2 * sin(2pi / n) * r^2 * h.
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(CsgCylinderParams{}, mesh));
+    const double cylinder = 24.0 / 2.0 * std::sin(2.0 * pi / 24.0) * 0.25 * 1.0;
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(cylinder).epsilon(1e-5));
+    CHECK(SolidVolume(mesh) == Catch::Approx(cylinder).epsilon(1e-3));
+
+    // A frustum with circular ends: h / 3 * (A0 + A1 + sqrt(A0 A1)).
+    CsgCylinderParams frustum;
+    frustum.bottomRadius_ = Vector2(1.0f, 1.0f);
+    frustum.topRadius_ = Vector2(0.5f, 0.5f);
+    frustum.topCenter_ = Vector3(0.0f, 2.0f, 0.0f);
+    REQUIRE(CsgGenerateCylinder(frustum, mesh));
+    const double area0 = 12.0 * std::sin(2.0 * pi / 24.0) * 1.0;
+    const double area1 = 12.0 * std::sin(2.0 * pi / 24.0) * 0.25;
+    CHECK(SignedVolume(MeshToPolygons(mesh)) ==
+        Catch::Approx(2.5 / 3.0 * (area0 + area1 + std::sqrt(area0 * area1))).epsilon(1e-5));
+
+    // A cone: h / 3 * A.
+    CsgCylinderParams cone;
+    cone.topRadius_ = Vector2::ZERO;
+    REQUIRE(CsgGenerateCylinder(cone, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(1.0 / 3.0 * 12.0 * std::sin(2.0 * pi / 24.0) * 0.25).epsilon(1e-5));
+
+    // Slabs, bulge, shear, tilt, elliptical ends with one ratio, and a cone with a bulge.
+    for (const CsgCylinderParams& base : MakeCylinderVariants(24, 4))
+    {
+        for (const float bulge : {0.0f, 2.0f, -0.9f})
+        {
+            CsgCylinderParams params = base;
+            params.bulge_ = bulge;
+            // Skip the variants with different ratios.
+            if (params.bottomRadius_.x_ != params.bottomRadius_.y_ && params.bottomRadius_ != Vector2::ZERO)
+                params.bottomRadius_ = Vector2(1.0f, 0.5f);
+            if (params.topRadius_ != Vector2::ZERO)
+                params.topRadius_ = params.bottomRadius_ == Vector2::ZERO ? Vector2(0.4f, 0.4f) : params.bottomRadius_ * 0.5f;
+            if (params.bottomRadius_ == Vector2::ZERO && params.topRadius_ == Vector2::ZERO)
+                continue;
+            INFO("Bulge " << bulge);
+            REQUIRE(CsgGenerateCylinder(params, mesh));
+            CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(ExpectedCylinderVolume(params)).epsilon(2e-5));
+        }
+    }
+
+    // The fine mesh is close to pi r^2 h.
+    CsgCylinderParams fine;
+    fine.segments_ = 128;
+    fine.heightSegments_ = 64;
+    REQUIRE(CsgGenerateCylinder(fine, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(pi * 0.25).epsilon(1e-3));
+}
+
+TEST_CASE("CsgGenerateCylinder keeps the volume positive when the centers are swapped in Y", "[shapes][procedural]")
+{
+    for (const CsgCylinderParams& base : MakeCylinderVariants(12, 3))
+    {
+        CsgCylinderParams swapped = base;
+        swapped.bottomCenter_ = base.topCenter_;
+        swapped.topCenter_ = base.bottomCenter_;
+        swapped.bottomRadius_ = base.topRadius_;
+        swapped.topRadius_ = base.bottomRadius_;
+        if (swapped.bottomRadius_ == Vector2::ZERO && swapped.topRadius_ == Vector2::ZERO)
+            continue;
+        CsgShapeMesh mesh;
+        CsgShapeMesh original;
+        REQUIRE(CsgGenerateCylinder(base, original));
+        REQUIRE(CsgGenerateCylinder(swapped, mesh));
+        const ea::vector<CsgPolygon> polygons = MeshToPolygons(mesh);
+        CHECK(IsEdgeClosed(polygons, 1e-6f));
+        CHECK(SignedVolume(polygons) > 0.0);
+        CHECK(SignedVolume(polygons) == Catch::Approx(SignedVolume(MeshToPolygons(original))).epsilon(1e-4));
+        CHECK(SolidVolume(mesh) > 0.0);
+    }
+
+    // Only the centers are swapped: the shape is the same cylinder upside down. Normals point out.
+    CsgCylinderParams params;
+    params.bottomCenter_ = Vector3(0.0f, 0.5f, 0.0f);
+    params.topCenter_ = Vector3(0.0f, -0.5f, 0.0f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(params, mesh));
+    REQUIRE(mesh.groups_.size() == 3);
+    // The top cap is at the topCenter_, which is now at y = -0.5, and its normal is -Y.
+    const ModelVertex& topCapVertex = mesh.vertices_[mesh.indices_[mesh.groups_[1].indexStart_]];
+    CHECK(topCapVertex.GetPosition().y_ == -0.5f);
+    CHECK(topCapVertex.GetNormal().Equals(Vector3::DOWN, 1e-5f));
+    for (const ModelVertex& vertex : mesh.vertices_)
+    {
+        const Vector3 p = vertex.GetPosition();
+        CHECK(vertex.GetNormal().DotProduct(Vector3(p.x_, 0.0f, p.z_)) >= -1e-5f);
+    }
+}
+
+TEST_CASE("CsgGenerateCylinder has outward smooth normals, flat caps and UV", "[shapes][procedural]")
+{
+    for (const CsgCylinderParams& base : MakeCylinderVariants(16, 3))
+    {
+        for (const bool smooth : {true, false})
+        {
+            CsgCylinderParams params = base;
+            params.smoothNormals_ = smooth;
+            // Use the straight axis to check the normals against the body.
+            params.topCenter_ = Vector3(0.0f, 1.0f, 0.0f);
+            params.bottomCenter_ = Vector3(0.0f, -1.0f, 0.0f);
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateCylinder(params, mesh));
+            for (unsigned g = 0; g < mesh.groups_.size(); ++g)
+            {
+                const CsgShapeGroup& group = mesh.groups_[g];
+                for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+                {
+                    const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+                    const Vector3 n = vertex.GetNormal();
+                    INFO("Group " << g << " smooth " << smooth);
+                    CHECK(n.Length() == Catch::Approx(1.0).margin(1e-4));
+                    const Vector3 t = Vector3(vertex.tangent_.x_, vertex.tangent_.y_, vertex.tangent_.z_);
+                    CHECK(t.Length() == Catch::Approx(1.0).margin(1e-4));
+                    CHECK(std::fabs(t.DotProduct(n)) < 1e-3f);
+                    CHECK(vertex.uv_[0].x_ == vertex.uv_[1].x_);
+                    CHECK(vertex.uv_[0].y_ == vertex.uv_[1].y_);
+                    const Vector3 p = vertex.GetPosition();
+                    if (g == 0)
+                    {
+                        // The side normal has an outward radial part, except at an apex.
+                        const bool apex = p.x_ == 0.0f && p.z_ == 0.0f;
+                        if (!apex)
+                            CHECK(n.DotProduct(Vector3(p.x_, 0.0f, p.z_)) > 0.0f);
+                        if (apex)
+                            CHECK(std::fabs(n.y_) > 0.0f);
+                        // UV: u is the angle, v is the body fraction.
+                        CHECK(vertex.uv_[0].y_ >= 0.0f);
+                        CHECK(vertex.uv_[0].y_ <= 1.0f);
+                        CHECK(vertex.uv_[0].x_ >= 0.0f);
+                        CHECK(vertex.uv_[0].x_ <= 1.0f);
+                    }
+                    else
+                    {
+                        // A cap normal is flat and points away from the body.
+                        CHECK(n.Equals(group.slot_ == 1 ? Vector3::UP : Vector3::DOWN, 1e-5f));
+                        CHECK(vertex.uv_[0].x_ == Catch::Approx(p.x_ + 0.5f).margin(1e-6));
+                        CHECK(vertex.uv_[0].y_ == Catch::Approx(p.z_ + 0.5f).margin(1e-6));
+                    }
+                }
+            }
+            if (!smooth)
+            {
+                // Flat: the normal of a triangle is its face normal.
+                for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+                {
+                    const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+                    const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+                    const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+                    const Vector3 face = (p1 - p0).CrossProduct(p2 - p0).Normalized();
+                    for (unsigned k = 0; k < 3; ++k)
+                        CHECK(mesh.vertices_[mesh.indices_[i + k]].GetNormal().Equals(face, 1e-4f));
+                }
+            }
+        }
+    }
+
+    // The smooth normal of a straight cylinder is radial. The slope of a frustum tilts it up.
+    CsgCylinderParams straight;
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(straight, mesh));
+    for (unsigned i = 0; i < mesh.groups_[0].indexCount_; ++i)
+    {
+        const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+        const Vector3 p = vertex.GetPosition();
+        CHECK(vertex.GetNormal().Equals(Vector3(p.x_, 0.0f, p.z_).Normalized(), 1e-4f));
+    }
+    CsgCylinderParams frustum;
+    frustum.topRadius_ = Vector2(0.25f, 0.25f);
+    REQUIRE(CsgGenerateCylinder(frustum, mesh));
+    for (unsigned i = 0; i < mesh.groups_[0].indexCount_; ++i)
+        CHECK(mesh.vertices_[mesh.indices_[i]].GetNormal().y_ > 0.0f);
+    // The slope matches the analytic value: tan(a) = (0.5 - 0.25) / 1.
+    const Vector3 n = mesh.vertices_[mesh.indices_[0]].GetNormal();
+    CHECK(n.y_ / Vector3(n.x_, 0.0f, n.z_).Length() == Catch::Approx(0.25).epsilon(1e-3));
+}
+
+TEST_CASE("CsgGenerateCylinder shares bit-identical positions at the seam, the apex and the rims", "[shapes][procedural]")
+{
+    for (const CsgCylinderParams& base : MakeCylinderVariants(13, 3))
+    {
+        CsgCylinderParams params = base;
+        params.heightSegments_ = 3;
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateCylinder(params, mesh));
+        const bool bottomApex = params.bottomRadius_ == Vector2::ZERO;
+        const bool topApex = params.topRadius_ == Vector2::ZERO;
+
+        // The position table: the rows (13 positions, 1 at an apex) and the cap centers.
+        const unsigned expected = 13 * 2 + (bottomApex ? 1 : 13) + (topApex ? 1 : 13)
+            + (bottomApex ? 0 : 1) + (topApex ? 0 : 1);
+        CHECK(CountDistinctPositions(mesh) == expected);
+
+        // The seam vertices (u == 1) copy the position of a vertex with u == 0 in the same row.
+        for (unsigned i = 0; i < mesh.groups_[0].indexCount_; ++i)
+        {
+            const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+            if (vertex.uv_[0].x_ != 1.0f)
+                continue;
+            bool found = false;
+            for (const ModelVertex& other : mesh.vertices_)
+                found = found || (other.uv_[0].x_ == 0.0f && other.uv_[0].y_ == vertex.uv_[0].y_ && SamePositionBits(vertex, other));
+            CHECK(found);
+        }
+
+        // Any two vertices with nearly equal positions have bit-identical positions.
+        for (unsigned i = 0; i < mesh.vertices_.size(); ++i)
+        {
+            for (unsigned j = i + 1; j < mesh.vertices_.size(); ++j)
+            {
+                if (mesh.vertices_[i].GetPosition().Equals(mesh.vertices_[j].GetPosition(), 1e-6f))
+                    CHECK(SamePositionBits(mesh.vertices_[i], mesh.vertices_[j]));
+            }
+        }
+
+        // The apex is the end center. The cap center is the end center.
+        for (const ModelVertex& vertex : mesh.vertices_)
+        {
+            const Vector3 p = vertex.GetPosition();
+            if (bottomApex && p.x_ == params.bottomCenter_.x_ && p.z_ == params.bottomCenter_.z_ && p.y_ == params.bottomCenter_.y_)
+                CHECK(vertex.uv_[0].y_ == 0.0f);
+            if (topApex && p == params.topCenter_)
+                CHECK(vertex.uv_[0].y_ == 1.0f);
+        }
+
+        // Each rim vertex of a cap has the position of a body vertex of the end ring.
+        for (unsigned g = 1; g < mesh.groups_.size(); ++g)
+        {
+            const CsgShapeGroup& group = mesh.groups_[g];
+            const Vector3 center = group.slot_ == 1 ? params.topCenter_ : params.bottomCenter_;
+            const float v = group.slot_ == 1 ? 1.0f : 0.0f;
+            for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+            {
+                const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+                if (vertex.GetPosition() == center)
+                    continue;
+                bool found = false;
+                for (unsigned j = 0; j < mesh.groups_[0].indexCount_; ++j)
+                {
+                    const ModelVertex& body = mesh.vertices_[mesh.indices_[j]];
+                    found = found || (body.uv_[0].y_ == v && SamePositionBits(vertex, body));
+                }
+                CHECK(found);
+            }
+        }
+    }
+
+    // A pole of a cone is exactly the center.
+    CsgCylinderParams cone;
+    cone.topRadius_ = Vector2::ZERO;
+    cone.topCenter_ = Vector3(0.3f, 0.7f, -0.1f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(cone, mesh));
+    bool foundApex = false;
+    for (const ModelVertex& vertex : mesh.vertices_)
+        foundApex = foundApex || vertex.GetPosition() == cone.topCenter_;
+    CHECK(foundApex);
+}
+
+TEST_CASE("CsgGenerateCylinder refuses shapes that are not valid", "[shapes][procedural]")
+{
+    CsgShapeMesh mesh;
+    mesh.indices_.push_back(1);
+
+    CsgCylinderParams coincident;
+    coincident.topCenter_ = coincident.bottomCenter_;
+    CHECK(!CsgGenerateCylinder(coincident, mesh));
+    CHECK(mesh.vertices_.empty());
+    CHECK(mesh.indices_.empty());
+    CHECK(mesh.groups_.empty());
+
+    CsgCylinderParams close;
+    close.topCenter_ = close.bottomCenter_ + Vector3(0.0f, 0.0005f, 0.0f);
+    CHECK(!CsgGenerateCylinder(close, mesh));
+    close.topCenter_ = close.bottomCenter_ + Vector3(0.0f, 0.002f, 0.0f);
+    CHECK(CsgGenerateCylinder(close, mesh));
+
+    CsgCylinderParams both;
+    both.bottomRadius_ = Vector2::ZERO;
+    both.topRadius_ = Vector2(0.0f, 0.0005f);
+    CHECK(!CsgGenerateCylinder(both, mesh));
+
+    // One zero component is raised to the minimum: the end is an ellipse, not an apex.
+    CsgCylinderParams oneZero;
+    oneZero.topRadius_ = Vector2(0.0f, 0.5f);
+    REQUIRE(CsgGenerateCylinder(oneZero, mesh));
+    CHECK(mesh.groups_.size() == 3);
+    CsgSanitizeCylinderParams(oneZero);
+    CHECK(oneZero.topRadius_.x_ == CsgCylinderParams::MinRadius);
+    CHECK(oneZero.topRadius_.y_ == 0.5f);
+
+    // Cone with a horizontal axis: the end planes are the same plane.
+    CsgCylinderParams horizontal;
+    horizontal.bottomCenter_ = Vector3(-0.5f, 0.0f, 0.0f);
+    horizontal.topCenter_ = Vector3(0.5f, 0.0f, 0.0f);
+    CHECK(!CsgGenerateCylinder(horizontal, mesh));
+}
+
+TEST_CASE("CsgSanitizeCylinderParams clamps the range and replaces values that are not finite", "[shapes][procedural]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    CsgCylinderParams params;
+    params.bottomCenter_ = Vector3(nan, -1e9f, 1e9f);
+    params.topCenter_ = Vector3(inf, 5.0f, -inf);
+    params.bottomRadius_ = Vector2(nan, 1e9f);
+    params.topRadius_ = Vector2(-1.0f, -2.0f);
+    params.segments_ = 1;
+    params.heightSegments_ = 1000;
+    params.bulge_ = nan;
+    CsgSanitizeCylinderParams(params);
+    CHECK(params.bottomCenter_.Equals(Vector3(0.0f, -CsgCylinderParams::MaxCoordinate, CsgCylinderParams::MaxCoordinate)));
+    CHECK(params.topCenter_.Equals(Vector3(0.0f, 5.0f, 0.0f)));
+    CHECK(params.bottomRadius_.Equals(Vector2(0.5f, CsgCylinderParams::MaxRadius)));
+    CHECK(params.topRadius_ == Vector2::ZERO);
+    CHECK(params.segments_ == 3);
+    CHECK(params.heightSegments_ == 64);
+    CHECK(params.bulge_ == 0.0f);
+
+    params.segments_ = 100000;
+    params.heightSegments_ = -3;
+    params.bulge_ = 100.0f;
+    CsgSanitizeCylinderParams(params);
+    CHECK(params.segments_ == 128);
+    CHECK(params.heightSegments_ == 1);
+    CHECK(params.bulge_ == CsgCylinderParams::MaxBulge);
+    params.bulge_ = -100.0f;
+    CsgSanitizeCylinderParams(params);
+    CHECK(params.bulge_ == CsgCylinderParams::MinBulge);
+
+    // The generator uses the sanitized values and does not crash.
+    CsgCylinderParams raw;
+    raw.bottomRadius_ = Vector2(nan, inf);
+    raw.topRadius_ = Vector2(-inf, 1e30f);
+    raw.segments_ = 0;
+    raw.heightSegments_ = 0;
+    raw.bulge_ = inf;
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(raw, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+
+    // The extreme bulge does not give a negative radius.
+    CsgCylinderParams bulged;
+    bulged.bulge_ = CsgCylinderParams::MinBulge;
+    REQUIRE(CsgGenerateCylinder(bulged, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+    CHECK(HasNoDegenerateTriangle(mesh));
+}
+
+TEST_CASE("CsgBuildModelFromMesh uses the slot of the group as the geometry index", "[shapes][procedural]")
+{
+    auto context = MakeShared<Context>();
+
+    // A mesh with a free slot gets an empty geometry in it.
+    CsgShapeMesh mesh = MakeHandCubeMesh();
+    mesh.groups_ = {CsgShapeGroup{0, 12, 0}, CsgShapeGroup{12, 24, 2}};
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    REQUIRE(model->GetNumGeometries() == 3);
+    CHECK(model->GetGeometry(0, 0)->GetIndexCount() == 12);
+    CHECK(model->GetGeometry(1, 0)->GetIndexCount() == 0);
+    CHECK(model->GetGeometry(2, 0)->GetIndexStart() == 12);
+    CHECK(model->GetGeometry(2, 0)->GetIndexCount() == 24);
+    ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(model, Matrix3x4::IDENTITY);
+    REQUIRE(polygons.size() == 12);
+    for (const CsgPolygon& polygon : polygons)
+        CHECK((polygon.shared_ & 0xFFFFu) != 1);
+
+    // The default slot is the group index.
+    mesh.groups_ = {CsgShapeGroup{0, 12}, CsgShapeGroup{12, 24}};
+    model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 2);
+
+    // Two groups in one slot, and a slot that is too large, are refused.
+    mesh.groups_ = {CsgShapeGroup{0, 12, 1}, CsgShapeGroup{12, 24, 1}};
+    CHECK(!CsgBuildModelFromMesh(context, mesh));
+    mesh.groups_ = {CsgShapeGroup{0, 12, 0}, CsgShapeGroup{12, 24, 1000}};
+    CHECK(!CsgBuildModelFromMesh(context, mesh));
+    mesh.groups_ = {CsgShapeGroup{0, 12}, CsgShapeGroup{12, 24, 0}};
+    CHECK(!CsgBuildModelFromMesh(context, mesh));
+}
+
+TEST_CASE("CsgGenerateCylinder gives the cone group and slot mapping in the model", "[shapes][procedural]")
+{
+    auto context = MakeShared<Context>();
+
+    // The default cylinder: the side, the top cap and the bottom cap.
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(CsgCylinderParams{}, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 3);
+    CHECK(model->GetGeometry(0, 0)->GetIndexCount() == 3 * 48);
+    CHECK(model->GetGeometry(1, 0)->GetIndexCount() == 3 * 24);
+    CHECK(model->GetGeometry(2, 0)->GetIndexCount() == 3 * 24);
+
+    // A cone with the bottom apex: side = slot 0, top cap = slot 1, no slot 2.
+    CsgCylinderParams bottomApex;
+    bottomApex.bottomRadius_ = Vector2::ZERO;
+    REQUIRE(CsgGenerateCylinder(bottomApex, mesh));
+    REQUIRE(mesh.groups_.size() == 2);
+    CHECK(mesh.groups_[0].slot_ == 0);
+    CHECK(mesh.groups_[1].slot_ == 1);
+    model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 2);
+    // The top cap normal is +Y.
+    const Geometry* cap = model->GetGeometry(1, 0);
+    CHECK(cap->GetIndexCount() == 3 * 24);
+    CHECK(mesh.vertices_[mesh.indices_[cap->GetIndexStart()]].GetNormal().Equals(Vector3::UP));
+
+    // A cone with the top apex: side = slot 0, no slot 1, bottom cap = slot 2.
+    CsgCylinderParams topApex;
+    topApex.topRadius_ = Vector2::ZERO;
+    REQUIRE(CsgGenerateCylinder(topApex, mesh));
+    REQUIRE(mesh.groups_.size() == 2);
+    CHECK(mesh.groups_[0].slot_ == 0);
+    CHECK(mesh.groups_[1].slot_ == 2);
+    model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    REQUIRE(model->GetNumGeometries() == 3);
+    CHECK(model->GetGeometry(1, 0)->GetIndexCount() == 0);
+    const Geometry* bottomCap = model->GetGeometry(2, 0);
+    CHECK(bottomCap->GetIndexCount() == 3 * 24);
+    CHECK(mesh.vertices_[mesh.indices_[bottomCap->GetIndexStart()]].GetNormal().Equals(Vector3::DOWN));
+    ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(model, Matrix3x4::IDENTITY);
+    CHECK(polygons.size() == 24 + 24);
+    SharedPtr<CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    REQUIRE(solid);
+    CHECK(solid->IsClosed());
+}
+
+TEST_CASE("CsgGenerateCylinder gives the vertex layout of Box.mdl in the model", "[shapes][procedural]")
+{
+    auto context = MakeShared<Context>();
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(CsgCylinderParams{}, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    const Geometry* geometry = model->GetGeometry(0, 0);
+    REQUIRE(geometry);
+    REQUIRE(geometry->GetVertexBuffer(0));
+    const ea::vector<VertexElement>& elements = geometry->GetVertexBuffer(0)->GetElements();
+    const ea::vector<VertexElement>& expected = CsgGetShapeVertexElements();
+    REQUIRE(elements.size() == expected.size());
+    for (unsigned i = 0; i < elements.size(); ++i)
+    {
+        CHECK(elements[i].type_ == expected[i].type_);
+        CHECK(elements[i].semantic_ == expected[i].semantic_);
+        CHECK(elements[i].offset_ == expected[i].offset_);
+    }
+}
