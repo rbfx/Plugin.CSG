@@ -5770,3 +5770,32 @@ TEST_CASE("CsgRoot pick hits the outward side of a mirrored root", "[root][pick]
     // From inside the solid the ray sees only back faces.
     CHECK_FALSE(root->Pick(world * Vector3::ZERO, Vector3::FORWARD).hit_);
 }
+
+TEST_CASE("A root move does not rebuild but a brush move does", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Guard");
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 30);
+    const unsigned revision = root->GetRebuildRevision();
+
+    // The root moves in a frame. The operands in the root frame do not change, so no build runs.
+    root->GetNode()->SetPosition(Vector3(5.0f, 0.0f, 0.0f));
+    RunFrames(root, workQueue, 30);
+    CHECK(root->GetRebuildRevision() == revision);
+
+    // A brush move requests a new build. A read of the world transform clears the dirty flag of the node
+    // that the root move set. Node::MarkDirty notifies only a clean node. The editor reads it every frame.
+    cut->GetNode()->GetWorldTransform();
+    cut->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+    RunFrames(root, workQueue, 30);
+    CHECK(root->GetRebuildRevision() != revision);
+}
