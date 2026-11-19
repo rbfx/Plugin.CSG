@@ -193,4 +193,187 @@ bool CsgGenerateBox(const CsgBoxParams& params, CsgShapeMesh& mesh)
     return true;
 }
 
+void CsgSanitizeSphereParams(CsgSphereParams& params)
+{
+    params.radius_ = SanitizeVector(params.radius_, CsgSphereParams::MinRadius, CsgSphereParams::MaxRadius,
+        Vector3(0.5f, 0.5f, 0.5f));
+    params.segments_ = Clamp(params.segments_, CsgSphereParams::MinSegments, CsgSphereParams::MaxSegments);
+    params.rings_ = Clamp(params.rings_, CsgSphereParams::MinRings, CsgSphereParams::MaxRings);
+}
+
+namespace
+{
+
+/// One corner of a sphere triangle.
+struct SphereCorner
+{
+    /// The position from the table.
+    Vector3 position_;
+    /// The latitude row: 0 is the top pole, `rings` is the bottom pole.
+    int row_;
+    /// The longitude index. The seam has `segments` here. A pole corner uses the middle of the fan.
+    double lon_;
+};
+
+} // namespace
+
+bool CsgGenerateSphere(const CsgSphereParams& params, CsgShapeMesh& mesh)
+{
+    mesh.vertices_.clear();
+    mesh.indices_.clear();
+    mesh.groups_.clear();
+
+    CsgSphereParams sanitized = params;
+    CsgSanitizeSphereParams(sanitized);
+    const unsigned segments = static_cast<unsigned>(sanitized.segments_);
+    const unsigned rings = static_cast<unsigned>(sanitized.rings_);
+    const Vector3 radius = sanitized.radius_;
+    const double twoPi = 2.0 * M_PI;
+
+    // The trigonometric tables. The poles and the equator have exact values.
+    ea::vector<double> rowCos(rings + 1);
+    ea::vector<double> rowSin(rings + 1);
+    for (unsigned row = 0; row <= rings; ++row)
+    {
+        const double theta = M_PI * row / rings;
+        rowCos[row] = row == 0 ? 1.0 : row == rings ? -1.0 : 2 * row == rings ? 0.0 : std::cos(theta);
+        rowSin[row] = row == 0 || row == rings ? 0.0 : std::sin(theta);
+    }
+    ea::vector<double> lonCos(segments + 1);
+    ea::vector<double> lonSin(segments + 1);
+    for (unsigned lon = 0; lon <= segments; ++lon)
+    {
+        lonCos[lon] = std::cos(twoPi * lon / segments);
+        lonSin[lon] = std::sin(twoPi * lon / segments);
+    }
+
+    // Each vertex copies its position from this table, so the shared positions are bit-identical.
+    // Index 0 is the top pole. Then come the rings. The last index is the bottom pole.
+    const unsigned topPole = 0;
+    const unsigned bottomPole = 1 + (rings - 1) * segments;
+    ea::vector<Vector3> positions(bottomPole + 1);
+    positions[topPole] = Vector3(0.0f, radius.y_, 0.0f);
+    positions[bottomPole] = Vector3(0.0f, -radius.y_, 0.0f);
+    for (unsigned row = 1; row < rings; ++row)
+    {
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            positions[1 + (row - 1) * segments + lon] =
+                Vector3(static_cast<float>(radius.x_ * rowSin[row] * lonCos[lon]),
+                    static_cast<float>(radius.y_ * rowCos[row]),
+                    static_cast<float>(radius.z_ * rowSin[row] * lonSin[lon]));
+        }
+    }
+    const auto ringCorner = [&](unsigned row, unsigned lon) -> SphereCorner
+    {
+        // The seam (lon == segments) copies the position of lon 0.
+        return {positions[1 + (row - 1) * segments + lon % segments], static_cast<int>(row), static_cast<double>(lon)};
+    };
+
+    const Vector4 white = Color::WHITE.ToVector4();
+    const double rx2 = static_cast<double>(radius.x_) * radius.x_;
+    const double ry2 = static_cast<double>(radius.y_) * radius.y_;
+    const double rz2 = static_cast<double>(radius.z_) * radius.z_;
+    double volume = 0.0;
+
+    const auto emitTriangle = [&](const SphereCorner& c0, const SphereCorner& c1, const SphereCorner& c2)
+    {
+        const SphereCorner* corners[3] = {&c0, &c1, &c2};
+        const Vector3 flatNormal =
+            (c1.position_ - c0.position_).CrossProduct(c2.position_ - c0.position_).NormalizedOrDefault(Vector3::UP);
+        volume += TripleProduct(c0.position_, c1.position_, c2.position_) / 6.0;
+
+        for (const SphereCorner* corner : corners)
+        {
+            const Vector3& p = corner->position_;
+            const unsigned row = static_cast<unsigned>(corner->row_);
+            const double cosTheta = rowCos[row];
+            const double sinTheta = rowSin[row];
+            double cosPhi;
+            double sinPhi;
+            const unsigned lonIndex = static_cast<unsigned>(corner->lon_);
+            if (static_cast<double>(lonIndex) == corner->lon_)
+            {
+                cosPhi = lonCos[lonIndex];
+                sinPhi = lonSin[lonIndex];
+            }
+            else
+            {
+                // A pole corner uses the middle of its fan.
+                const double phi = twoPi * corner->lon_ / segments;
+                cosPhi = std::cos(phi);
+                sinPhi = std::sin(phi);
+            }
+
+            Vector3 normal = flatNormal;
+            if (sanitized.smoothNormals_)
+            {
+                normal = Vector3(static_cast<float>(p.x_ / rx2), static_cast<float>(p.y_ / ry2),
+                    static_cast<float>(p.z_ / rz2)).NormalizedOrDefault(flatNormal);
+            }
+
+            // The tangent follows the longitude direction, in the tangent plane.
+            const Vector3 longitude(static_cast<float>(-radius.x_ * sinPhi), 0.0f, static_cast<float>(radius.z_ * cosPhi));
+            const Vector3 longitudeDir = longitude.NormalizedOrDefault(Vector3::FORWARD);
+            const Vector3 tangent =
+                (longitudeDir - normal * normal.DotProduct(longitudeDir)).NormalizedOrDefault(longitudeDir);
+            // V grows toward the bottom pole. The shader bitangent is cross(tangent, normal) * w.
+            const Vector3 down(static_cast<float>(radius.x_ * cosTheta * cosPhi), static_cast<float>(-radius.y_ * sinTheta),
+                static_cast<float>(radius.z_ * cosTheta * sinPhi));
+            const float handedness = tangent.CrossProduct(normal).DotProduct(down) >= 0.0f ? 1.0f : -1.0f;
+
+            const float u = static_cast<float>(corner->lon_ / segments);
+            const float v = static_cast<float>(static_cast<double>(corner->row_) / rings);
+
+            ModelVertex vertex{};
+            vertex.SetPosition(p);
+            vertex.SetNormal(normal);
+            vertex.tangent_ = Vector4(tangent, handedness);
+            vertex.uv_[0] = Vector4(u, v, 0.0f, 0.0f);
+            vertex.uv_[1] = Vector4(u, v, 0.0f, 0.0f);
+            vertex.color_[0] = white;
+
+            mesh.indices_.push_back(mesh.vertices_.size());
+            mesh.vertices_.push_back(vertex);
+        }
+    };
+
+    mesh.vertices_.reserve(3 * 2 * segments * (rings - 1));
+    mesh.indices_.reserve(3 * 2 * segments * (rings - 1));
+    for (unsigned lon = 0; lon < segments; ++lon)
+    {
+        // The pole fans. The pole corner uses the middle longitude of its triangle for UV and tangent.
+        const SphereCorner top{positions[topPole], 0, lon + 0.5};
+        emitTriangle(top, ringCorner(1, lon + 1), ringCorner(1, lon));
+    }
+    for (unsigned row = 1; row + 1 < rings; ++row)
+    {
+        for (unsigned lon = 0; lon < segments; ++lon)
+        {
+            const SphereCorner a = ringCorner(row, lon);
+            const SphereCorner b = ringCorner(row, lon + 1);
+            const SphereCorner c = ringCorner(row + 1, lon + 1);
+            const SphereCorner d = ringCorner(row + 1, lon);
+            emitTriangle(a, b, d);
+            emitTriangle(b, c, d);
+        }
+    }
+    for (unsigned lon = 0; lon < segments; ++lon)
+    {
+        const SphereCorner bottom{positions[bottomPole], static_cast<int>(rings), lon + 0.5};
+        emitTriangle(ringCorner(rings - 1, lon), ringCorner(rings - 1, lon + 1), bottom);
+    }
+
+    mesh.groups_.push_back(CsgShapeGroup{0u, static_cast<unsigned>(mesh.indices_.size())});
+
+    if (!(volume > 0.0))
+    {
+        mesh.vertices_.clear();
+        mesh.indices_.clear();
+        mesh.groups_.clear();
+        return false;
+    }
+    return true;
+}
+
 } // namespace Urho3D

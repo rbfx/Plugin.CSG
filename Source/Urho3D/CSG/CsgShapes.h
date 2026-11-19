@@ -101,4 +101,41 @@ PLUGIN_RBFXCSG_API void CsgSanitizeBoxParams(CsgBoxParams& params);
 /// Return false if the box is not valid. Then `mesh` is empty.
 PLUGIN_RBFXCSG_API bool CsgGenerateBox(const CsgBoxParams& params, CsgShapeMesh& mesh);
 
+/// The parameters of a procedural UV sphere (an ellipsoid with three radii).
+struct CsgSphereParams
+{
+    static constexpr float MinRadius = 0.001f;
+    static constexpr float MaxRadius = 16384.0f;
+    static constexpr int MinSegments = 3;
+    static constexpr int MaxSegments = 128;
+    static constexpr int MinRings = 2;
+    static constexpr int MaxRings = 64;
+
+    /// The radius along each axis.
+    Vector3 radius_{0.5f, 0.5f, 0.5f};
+    /// The number of longitude divisions.
+    int segments_{24};
+    /// The number of latitude bands from the top pole to the bottom pole.
+    int rings_{12};
+    /// True: normals follow the ellipsoid. False: each triangle has a flat normal.
+    bool smoothNormals_{true};
+};
+
+/// Clamp the radii to [MinRadius, MaxRadius], the segments to [3, 128] and the rings to [2, 64].
+/// A radius that is not finite gets its default value.
+PLUGIN_RBFXCSG_API void CsgSanitizeSphereParams(CsgSphereParams& params);
+
+/// Generate a UV sphere. The poles are on the +Y and -Y axes.
+///
+/// The mesh has one position table: the top pole, (rings - 1) rings of `segments` positions, the bottom pole.
+/// A pole is one position and has a fan of triangles. The seam duplicates the vertices only for UV.
+/// Their positions are bit-identical copies from the table.
+/// The mesh has one face group (group 0) for the whole surface.
+/// Smooth normals are normalize(p / radius^2). Tangents follow the longitude direction.
+/// UV 0 is (longitude / 2pi, latitude / pi). UV 1 is equal to UV 0.
+///
+/// The function uses a sanitized copy of the parameters. See `CsgSanitizeSphereParams`.
+/// Return false if the mesh has no positive volume. This does not happen for sanitized parameters.
+PLUGIN_RBFXCSG_API bool CsgGenerateSphere(const CsgSphereParams& params, CsgShapeMesh& mesh);
+
 } // namespace Urho3D
