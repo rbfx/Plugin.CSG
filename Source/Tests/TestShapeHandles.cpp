@@ -12,6 +12,7 @@
 #include "Urho3D/CSG/CsgShapeProtocol.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
+#include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 #include "TestGeneratedBrush.h"
 
@@ -967,4 +968,179 @@ TEST_CASE("The fold in a root is the same after a recenter", "[shapes][handles][
     CHECK(IsNear(boundsAfter.min_, boundsBefore.min_, 1e-2f));
     CHECK(IsNear(boundsAfter.max_, boundsBefore.max_, 1e-2f));
     CHECK(f.errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// Return true if the point lies on a triangle of the mesh, within eps.
+bool IsPointOnMesh(const CsgShapeMesh& mesh, const Vector3& point, float eps = 1e-5f)
+{
+    for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+    {
+        const Vector3 a = mesh.vertices_[mesh.indices_[i]].GetPosition();
+        const Vector3 b = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+        const Vector3 c = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+        const Vector3 n = (b - a).CrossProduct(c - a);
+        const float area2 = n.Length();
+        if (area2 <= 0.0f)
+            continue;
+        if (Abs((point - a).DotProduct(n) / area2) > eps)
+            continue;
+        // Barycentric test with a tolerance on each edge.
+        const auto outside = [&](const Vector3& p0, const Vector3& p1)
+        {
+            const Vector3 edge = p1 - p0;
+            return (edge.CrossProduct(point - p0)).DotProduct(n) / area2 < -eps * edge.Length();
+        };
+        if (!outside(a, b) && !outside(b, c) && !outside(c, a))
+            return true;
+    }
+    return false;
+}
+
+/// Check the 6 resize handles of a box-shaped procedural brush (wedge, stairs).
+/// The ids are 0 -X, 1 +X, 2 -Z, 3 +Z, 4 +Y, 5 -Y. The opposite handle of id is id ^ 1.
+template <class T, class G> void CheckBoxResizeHandles(HandleFixture<T>& f, G generate)
+{
+    Node* node = f.brush->GetNode();
+    node->SetPosition(Vector3(1.0f, -2.0f, 0.5f));
+    node->SetRotation(Quaternion(20.0f, 30.0f, 40.0f));
+    node->SetScale(Vector3(1.0f, 2.0f, 0.5f));
+    const auto start = f.brush->GetParams();
+    const auto startHandles = f.Handles();
+    REQUIRE(GetIds(startHandles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5});
+    const Vector3 axes[6] = {Vector3::LEFT, Vector3::RIGHT, Vector3::BACK, Vector3::FORWARD, Vector3::UP, Vector3::DOWN};
+    const unsigned axisIndex[6] = {0, 0, 2, 2, 1, 1};
+
+    // Each handle is on the generated shape.
+    CsgShapeMesh mesh;
+    REQUIRE(generate(start, mesh));
+    for (const CsgShapeHandle& handle : startHandles)
+    {
+        INFO("Handle " << handle.id_);
+        CHECK(handle.kind_ == CsgShapeHandleKind::Axis);
+        CHECK(handle.axis_ == axes[handle.id_]);
+        CHECK(IsPointOnMesh(mesh, handle.position_));
+    }
+
+    for (unsigned id = 0; id < 6; ++id)
+    {
+        INFO("Handle " << id);
+        f.brush->SetParams(start);
+        const unsigned opposite = id ^ 1u;
+        // A part of the delta across the axis does nothing.
+        const Vector3 across = axes[id].CrossProduct(Vector3(0.3f, 0.5f, 0.7f));
+        REQUIRE(f.brush->MoveHandles({id}, axes[id] * 0.25f + across));
+        const auto moved = f.brush->GetParams();
+        CHECK(moved.size_.Data()[axisIndex[id]] == Catch::Approx(start.size_.Data()[axisIndex[id]] + 0.25f));
+        const auto handles = f.Handles();
+        // The opposite face stays fixed in the world. The handle follows the cursor on its axis.
+        CHECK(IsNear(node->LocalToWorld(handles[opposite].position_),
+            node->LocalToWorld(startHandles[opposite].position_), 1e-5f));
+        CHECK(IsNear(handles[id].position_, startHandles[id].position_ + axes[id] * 0.25f, 1e-5f));
+
+        // Stateless: the same delta after a restore gives the same parameters.
+        f.brush->SetParams(start);
+        REQUIRE(f.brush->MoveHandles({id, id}, axes[id] * 0.25f + across));
+        CHECK(f.brush->GetParams().size_ == moved.size_);
+        CHECK(f.brush->GetParams().center_ == moved.center_);
+
+        // A shrink below the minimum clamps the size and keeps the opposite face.
+        f.brush->SetParams(start);
+        REQUIRE(f.brush->MoveHandles({id}, axes[id] * -100.0f));
+        CHECK(f.brush->GetParams().size_.Data()[axisIndex[id]] == Catch::Approx(0.001f));
+        CHECK(IsNear(node->LocalToWorld(f.Handles()[opposite].position_),
+            node->LocalToWorld(startHandles[opposite].position_), 1e-4f));
+        CHECK(f.brush->IsShapeValid());
+    }
+
+    // Two handles in one move: both faces move.
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({1, 4}, Vector3(0.5f, 0.5f, 0.0f)));
+    CHECK(f.brush->GetParams().size_.x_ == Catch::Approx(start.size_.x_ + 0.5f));
+    CHECK(f.brush->GetParams().size_.y_ == Catch::Approx(start.size_.y_ + 0.5f));
+
+    // Moves that are not valid or give no change return false and keep the parameters.
+    f.brush->SetParams(start);
+    CHECK_FALSE(f.brush->MoveHandles({6}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(INFINITY, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(0.0f, 0.3f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({}, Vector3(0.3f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetParams().size_ == start.size_);
+    CHECK(f.brush->GetParams().center_ == start.center_);
+
+    // The events give the same handles.
+    const VariantMap data = Query(f.brush);
+    CHECK(data.find(CsgShapeQueryHandles::P_VALID)->second.GetBool());
+    CHECK(data.find(CsgShapeQueryHandles::P_HANDLES)->second.GetVariantVector().size() == 6);
+    CHECK(SendMove(f.brush, {3}, Vector3(0.0f, 0.0f, 0.5f)));
+    CHECK(f.brush->GetParams().size_.z_ == Catch::Approx(start.size_.z_ + 0.5f));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+/// Move a face, then recenter: the world positions of the handles stay. The center becomes zero.
+template <class T> void CheckCenterRecenter(HandleFixture<T>& f)
+{
+    Node* node = f.brush->GetNode();
+    node->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+    node->SetRotation(Quaternion(30.0f, 50.0f, 70.0f));
+    node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    REQUIRE(f.brush->MoveHandles({1}, Vector3(1.5f, 0.0f, 0.0f)));
+    const Vector3 expected = f.brush->GetParams().center_;
+    REQUIRE(IsNear(expected, Vector3(0.75f, 0.0f, 0.0f), 1e-5f));
+    const auto before = f.Handles();
+    ea::vector<Vector3> worldBefore;
+    for (const CsgShapeHandle& handle : before)
+        worldBefore.push_back(node->LocalToWorld(handle.position_));
+
+    bool accepted = false;
+    const Vector3 offset = SendRecenter(f.brush, accepted);
+    REQUIRE(accepted);
+    CHECK(offset == expected);
+    CHECK(f.brush->GetParams().center_ == Vector3::ZERO);
+    node->SetPosition(node->GetTransform() * offset);
+    const auto after = f.Handles();
+    for (unsigned i = 0; i < after.size(); ++i)
+        CHECK(IsNear(node->LocalToWorld(after[i].position_), worldBefore[i], 1e-4f));
+    CHECK(f.brush->IsShapeValid());
+
+    // The second call has nothing to do.
+    SendRecenter(f.brush, accepted);
+    CHECK_FALSE(accepted);
+    CHECK_FALSE(RecenterShapePivot(f.brush));
+
+    // The editor operation moves the node.
+    auto params = f.brush->GetParams();
+    params.center_ = Vector3(0.0f, 0.5f, -0.25f);
+    f.brush->SetParams(params);
+    const Vector3 worldHandle = node->LocalToWorld(f.Handles()[0].position_);
+    REQUIRE(RecenterShapePivot(f.brush));
+    CHECK(IsNear(node->LocalToWorld(f.Handles()[0].position_), worldHandle, 1e-4f));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+} // namespace
+
+TEST_CASE("The wedge brush has 6 resize handles that keep the opposite face", "[shapes][handles]")
+{
+    HandleFixture<CsgWedgeBrush> f;
+    CsgWedgeParams params;
+    params.size_ = Vector3(2.0f, 1.0f, 3.0f);
+    params.center_ = Vector3(0.5f, -0.25f, 1.0f);
+    f.brush->SetParams(params);
+    const auto handles = f.Handles();
+    REQUIRE(handles.size() == 6);
+    CHECK(IsNear(handles[0].position_, Vector3(-0.5f, -0.25f - 0.5f / 3.0f, 1.0f + 0.5f), 1e-5f));
+    CHECK(IsNear(handles[2].position_, Vector3(0.5f, -0.75f, -0.5f), 1e-5f));
+    CHECK(IsNear(handles[3].position_, Vector3(0.5f, -0.25f, 2.5f), 1e-5f));
+    CHECK(IsNear(handles[4].position_, Vector3(0.5f, 0.25f, 2.5f), 1e-5f));
+    CHECK(IsNear(handles[5].position_, Vector3(0.5f, -0.75f, 1.0f), 1e-5f));
+    CheckBoxResizeHandles(f, [](const CsgWedgeParams& p, CsgShapeMesh& mesh) { return CsgGenerateWedge(p, mesh); });
+}
+
+TEST_CASE("Wedge recenter keeps the world positions", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgWedgeBrush> f;
+    CheckCenterRecenter(f);
 }

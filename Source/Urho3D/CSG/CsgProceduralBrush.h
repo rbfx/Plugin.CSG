@@ -84,6 +84,12 @@ protected:
     static bool PrepareHandleMove(const ea::vector<unsigned>& ids, const Vector3& delta, ea::vector<unsigned>& unique);
     /// Return true if all components are finite.
     static bool IsFinite(const Vector3& value);
+    /// Move one face of a box-shaped bound along its axis by `change`.
+    /// `axisIndex` is 0 for X, 1 for Y and 2 for Z. `sign` is 1 for the + face and -1 for the - face.
+    /// The size on the axis grows by the change, clamped to [minSize, maxSize].
+    /// The center moves by sign * (size change) / 2 on the axis, so the opposite face stays fixed.
+    static void MoveBoxFace(Vector3& size, Vector3& center, unsigned axisIndex, float sign, float change,
+        float minSize, float maxSize);
 
     /// Sanitize the parameters, mark the mesh dirty and request a rebuild of the root.
     /// A typed setter calls this after it changes a parameter.

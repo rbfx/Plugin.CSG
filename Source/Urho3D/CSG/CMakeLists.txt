@@ -32,6 +32,8 @@ set (SOURCE_FILES
     CsgCylinderBrush.h
     CsgRingBrush.cpp
     CsgRingBrush.h
+    CsgWedgeBrush.cpp
+    CsgWedgeBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h

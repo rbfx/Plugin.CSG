@@ -81,6 +81,16 @@ bool CsgProceduralBrush::IsFinite(const Vector3& value)
     return std::isfinite(value.x_) && std::isfinite(value.y_) && std::isfinite(value.z_);
 }
 
+void CsgProceduralBrush::MoveBoxFace(
+    Vector3& size, Vector3& center, unsigned axisIndex, float sign, float change, float minSize, float maxSize)
+{
+    float& component = axisIndex == 0 ? size.x_ : axisIndex == 1 ? size.y_ : size.z_;
+    float& centerComponent = axisIndex == 0 ? center.x_ : axisIndex == 1 ? center.y_ : center.z_;
+    const float newSize = Clamp(component + change, minSize, maxSize);
+    centerComponent += sign * (newSize - component) * 0.5f;
+    component = newSize;
+}
+
 bool CsgProceduralBrush::PrepareHandleMove(
     const ea::vector<unsigned>& ids, const Vector3& delta, ea::vector<unsigned>& unique)
 {

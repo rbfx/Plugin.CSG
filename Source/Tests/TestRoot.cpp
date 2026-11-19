@@ -17,6 +17,7 @@
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
+#include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "TestGeneratedBrush.h"
 
 #include <Urho3D/Core/Context.h>
@@ -5798,4 +5799,340 @@ TEST_CASE("A root move does not rebuild but a brush move does", "[root]")
     cut->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
     RunFrames(root, workQueue, 30);
     CHECK(root->GetRebuildRevision() != revision);
+}
+
+namespace
+{
+
+/// Add a procedural brush of the type T with the parameters under the node of the root.
+template <class T, class P>
+T* AddProceduralShape(CsgRoot* root, const ea::string& name, const P& params, CsgOperation op,
+    const Vector3& position = Vector3::ZERO)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<T>();
+    brush->SetParams(params);
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Add the model of a generated mesh to the resource cache.
+void AddGeneratedMeshModel(Context* context, const ea::string& name, const CsgShapeMesh& mesh)
+{
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+}
+
+/// Build the cut with the procedural brush and with a model brush of the same mesh. Check the same output.
+template <class T, class P>
+void CheckCutSameAsModel(Context* context, Scene* scene, WorkQueue* workQueue, const ea::string& name,
+    const P& params, const CsgShapeMesh& mesh, const Vector3& position)
+{
+    CsgRoot* root = MakeBoxRoot(scene, name + "Procedural");
+    AddProceduralShape<T>(root, "Cut", params, CsgOperation::DifferenceAB, position);
+    BuildFully(root, workQueue);
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().closed_);
+
+    const ea::string modelName = "Csg/Generated" + name + ".mdl";
+    AddGeneratedMeshModel(context, modelName, mesh);
+    CsgRoot* expected = MakeBoxRoot(scene, name + "Model");
+    Node* cutNode = expected->GetNode()->CreateChild("Cut");
+    cutNode->SetPosition(position);
+    auto* cut = cutNode->CreateComponent<CsgBrush>();
+    cut->SetModel(ResourceRef(Model::GetTypeStatic(), modelName));
+    cut->SetOperation(CsgOperation::DifferenceAB);
+    BuildFully(expected, workQueue);
+    CheckSameOutput(root, expected);
+}
+
+/// Save and load the scene. Check that the brush of the type T keeps all attributes and the root keeps the volume.
+template <class T> void CheckSaveLoadRoundTrip(Scene* scene, CsgRoot* root, WorkQueue* workQueue, const ea::string& nodeName)
+{
+    Context* context = scene->GetContext();
+    BuildFully(root, workQueue);
+    const double volume = root->GetLastBuildStats().volume_;
+    T* brush = root->GetNode()->GetChild(nodeName)->GetComponent<T>();
+    REQUIRE(brush);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild(root->GetNode()->GetName());
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    auto* loadedBrush = loadedRootNode->GetChild(nodeName)->GetComponent<T>();
+    REQUIRE(loadedBrush);
+    unsigned count = 0;
+    for (const AttributeInfo& info : *brush->GetAttributes())
+    {
+        INFO("Attribute " << info.name_.c_str());
+        CHECK(loadedBrush->GetAttribute(info.name_) == brush->GetAttribute(info.name_));
+        ++count;
+    }
+    CHECK(count > 5);
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(loadedRoot->GetLastBuildStats().volume_ == Catch::Approx(volume).epsilon(1e-9));
+}
+
+/// Register the materials "Materials/Slot<i>.xml" for the slots.
+ea::vector<ea::string> AddSlotMaterials(Context* context, unsigned numSlots)
+{
+    ea::vector<ea::string> names;
+    for (unsigned i = 0; i < numSlots; ++i)
+    {
+        names.push_back(Format("Materials/Slot{}.xml", i));
+        auto material = MakeShared<Material>(context);
+        material->SetName(names.back());
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+    return names;
+}
+
+/// Check the material slots of a procedural brush of the type T: the attributes, slot 0 alone, and one slot.
+/// `inSlot` returns true for an output triangle (with its unit normal and centroid) of the face group of `slot`.
+/// `names` are the materials of `AddSlotMaterials`. Add them before the error counter: a new material logs an error
+/// for its default technique.
+template <class T, class P, class F>
+void CheckSlotMaterials(Scene* scene, WorkQueue* workQueue, const P& params, const ea::vector<ea::string>& names,
+    unsigned slot, F inSlot)
+{
+    const unsigned numSlots = names.size();
+
+    // The attributes: one material entry for each slot and no "Model".
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Slots");
+    T* brush = AddProceduralShape<T>(root, "Shape", params, CsgOperation::Union);
+    Component* component = brush;
+    CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == numSlots);
+    for (const AttributeInfo& info : *component->GetAttributes())
+        CHECK(info.name_ != "Model");
+    CHECK(component->GetAttribute("Center").GetVector3() == Vector3::ZERO);
+    brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(9u, names[0])));
+    CHECK(brush->GetMaterialsAttr().names_.size() == numSlots);
+
+    // Only slot 0: the empty slots fall back to it. One output geometry with the material has all faces.
+    brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {names[0]}));
+    BuildFully(root, workQueue);
+    CHECK(!root->GetLastBuildFailed());
+    REQUIRE(GetOutput(root)->GetModel());
+    CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+    CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{names[0]});
+
+    // Slot 0 and the tested slot: the material of the slot reaches only the triangles of its face group.
+    ea::vector<ea::string> two(numSlots);
+    two[0] = names[0];
+    two[slot] = names[slot];
+    brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), two));
+    BuildFully(root, workQueue);
+    const Model* output = GetOutput(root)->GetModel();
+    REQUIRE(output);
+    const ea::vector<ea::string>& outputNames = GetOutput(root)->GetMaterialsAttr().names_;
+    REQUIRE(output->GetNumGeometries() == outputNames.size());
+    CHECK(outputNames.size() == 2);
+    unsigned inGroup = 0;
+    unsigned outGroup = 0;
+    for (const CsgPolygon& polygon : CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY))
+    {
+        Vector3 centroid;
+        for (const ModelVertex& vertex : polygon.vertices_)
+            centroid += vertex.GetPosition();
+        centroid /= static_cast<float>(polygon.vertices_.size());
+        const Vector3 a = polygon.vertices_[0].GetPosition();
+        const Vector3 normal = (polygon.vertices_[1].GetPosition() - a)
+                                   .CrossProduct(polygon.vertices_[2].GetPosition() - a)
+                                   .Normalized();
+        const bool expected = inSlot(normal, centroid);
+        const bool actual = outputNames[polygon.shared_ & 0xFFFFu] == names[slot];
+        CHECK(expected == actual);
+        (actual ? inGroup : outGroup) += 1;
+    }
+    CHECK(inGroup > 0);
+    CHECK(outGroup > 0);
+}
+
+/// Measure the best time of generation and model build. Check the limits of the sphere test.
+template <class P, class G> double MeasureShapeBuild(Context* context, const P& params, G generate)
+{
+    // The best of several runs. The limits are generous, so a loaded CI machine does not fail.
+    double best = 1e9;
+    for (unsigned run = 0; run < 5; ++run)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        CsgShapeMesh mesh;
+        const bool generated = generate(params, mesh);
+        SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+        const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - start;
+        REQUIRE(generated);
+        REQUIRE(model);
+        best = ea::min(best, elapsed.count());
+    }
+    return best;
+}
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+constexpr double ShapeSlowFactor = 10.0;
+#else
+constexpr double ShapeSlowFactor = 1.0;
+#endif
+
+} // namespace
+
+TEST_CASE("CsgWedgeBrush is an operand with the wedge volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A wedge alone gives sx * sy * sz / 2")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgWedgeParams params;
+        params.size_ = Vector3(2.0f, 1.0f, 1.5f);
+        params.center_ = Vector3(0.5f, 0.25f, -1.0f);
+        CsgWedgeBrush* brush = AddProceduralShape<CsgWedgeBrush>(root, "Wedge", params, CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(1.5).epsilon(1e-6));
+    }
+
+    SECTION("A ramp cut from a box is closed and gives the same output as a model brush")
+    {
+        // The base box is the cube from -1 to 1. The slope cuts its top.
+        CsgWedgeParams params;
+        params.size_ = Vector3(3.0f, 1.0f, 3.0f);
+        params.center_ = Vector3(0.0f, 0.6f, 0.0f);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateWedge(params, mesh));
+        CheckCutSameAsModel<CsgWedgeBrush>(context, scene, workQueue, "Ramp", params, mesh, Vector3(0.1f, 0.0f, 0.2f));
+        CsgRoot* root = scene->GetChild("RampProcedural")->GetComponent<CsgRoot>();
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.1);
+        CHECK(root->GetLastBuildStats().volume_ > 8.0 - 1.8);
+    }
+
+    SECTION("A wedge united with a rotated box folds without a failure")
+    {
+        CsgRoot* united = MakeEmptyBaseRoot(scene, "United");
+        AddProceduralBox(united, "Box", Vector3::ZERO, Vector3(2.0f, 1.0f, 1.0f), CsgOperation::Union)
+            ->GetNode()->SetRotation(Quaternion(30.0f, Vector3(0.3f, 1.0f, 0.2f)));
+        AddProceduralShape<CsgWedgeBrush>(united, "Wedge", CsgWedgeParams{}, CsgOperation::Union, Vector3(0.7f, 0.1f, 0.2f));
+        BuildFully(united, workQueue);
+        CHECK(!united->GetLastBuildFailed());
+        CHECK(united->GetLastBuildStats().valid_);
+        CHECK(united->GetLastBuildStats().closed_);
+        CHECK(united->GetLastBuildStats().foldSteps_ == 2);
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgWedgeBrush* brush = AddProceduralShape<CsgWedgeBrush>(root, "Wedge", CsgWedgeParams{}, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgWedgeBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgWedgeBrush* third =
+        AddProceduralShape<CsgWedgeBrush>(root, "Third", CsgWedgeParams{}, CsgOperation::Union, Vector3(1.2f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    const double volume = root->GetLastBuildStats().volume_;
+
+    Component* component = third;
+    CHECK(component->SetAttribute("Size", Vector3(1.0f, 1.0f, 2.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSize() == Vector3(1.0f, 1.0f, 2.0f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.01);
+
+    CHECK(component->SetAttribute("Center", Vector3(0.5f, 0.0f, 0.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetCenter() == Vector3(0.5f, 0.0f, 0.0f));
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Size", Vector3(-1.0f, 1e9f, 1.0f)));
+    CHECK(component->SetAttribute("Center", Vector3(1e9f, 0.0f, -1e9f)));
+    component->ApplyAttributes();
+    CHECK(third->GetSize() == Vector3(CsgWedgeParams::MinSize, CsgWedgeParams::MaxSize, 1.0f));
+    CHECK(third->GetCenter() == Vector3(CsgMaxShapeCenter, 0.0f, -CsgMaxShapeCenter));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgWedgeBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgWedgeParams params;
+    params.size_ = Vector3(1.5f, 0.75f, 2.5f);
+    params.center_ = Vector3(0.25f, 0.5f, -0.125f);
+    AddProceduralShape<CsgWedgeBrush>(root, "Wedge", params, CsgOperation::DifferenceAB, Vector3(0.0f, 0.1f, 0.0f));
+    CheckSaveLoadRoundTrip<CsgWedgeBrush>(scene, root, workQueue, "Wedge");
+    CHECK(root->GetLastBuildStats().volume_ < 8.0);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgWedgeBrush has five material slots and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    const ea::vector<ea::string> names = AddSlotMaterials(context, 5);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgWedgeParams params;
+    params.size_ = Vector3(1.0f, 1.0f, 2.0f);
+    const Vector3 slopeNormal = Vector3(0.0f, 2.0f, -1.0f).Normalized();
+    CheckSlotMaterials<CsgWedgeBrush>(scene, workQueue, params, names, 2,
+        [&](const Vector3& normal, const Vector3&) { return normal.Equals(slopeNormal, 1e-3f); });
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgWedgeBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto generate = [](const CsgWedgeParams& p, CsgShapeMesh& mesh) { return CsgGenerateWedge(p, mesh); };
+    const double defaultMs = MeasureShapeBuild(context, CsgWedgeParams{}, generate);
+    WARN("Wedge generation and model build: " << defaultMs << " ms");
+    CHECK(defaultMs < 15.0 * ShapeSlowFactor);
 }
