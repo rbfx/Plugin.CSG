@@ -911,6 +911,9 @@ struct CsgBooleanDiagnostics
     /// Crossings that break a rule in the non strict form: a fold. The counters by rule are for inside, order, segments.
     std::atomic<int> foldCrossings_{};
     std::atomic<int> foldInside_{};
+    /// Crossings that fold only by a position on the line of a triangle edge, not across an edge. The rule is
+    /// "inside", but foldInside_ does not count them. Such a crossing has no valid corner and keeps its rounding.
+    std::atomic<int> foldOnEdge_{};
     std::atomic<int> foldOrder_{};
     std::atomic<int> foldSegments_{};
     /// Crossings that ConstrainCrossings moved to another grid point, and crossings that it could not move.
@@ -932,7 +935,7 @@ struct CsgBooleanDiagnostics
         for (auto* counter : {&failedSplits_, &failedRegionFits_, &splitTriangles_, &patches_, &mixedVotePatches_,
                  &zeroSumPatches_, &lobeSplits_, &lobeHoleKept_, &invalidCrossings_,
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
-                 &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
+                 &foldCrossings_, &foldInside_, &foldOnEdge_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
                  &unconstrainableCrossings_, &zeroSumUnclassifiedPatches_, &zeroSumDegeneratePatches_,
                  &componentsRemoved_, &thickRetries_, &wantedSideRetries_, &flatRepairs_})
             counter->store(0, std::memory_order_relaxed);

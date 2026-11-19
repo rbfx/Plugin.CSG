@@ -1588,9 +1588,10 @@ struct CsgOpenCounts
 };
 
 /// The exact pass. Call it with the exact decisions. DifferenceAB, Intersection and Union use the wanted side rule of
-/// ConstrainCrossings on the fine grid. Then a repeated identical boolean does not add triangles. A move of the rule
-/// can open a result that the nearest rounding keeps closed. If the result has more open edges than the operands, the
-/// pass runs again with the nearest rounding. The result with fewer open edges stays.
+/// ConstrainCrossings on the fine grid (double mode only, see CsgPreferWantedSide). Then a repeated identical boolean
+/// does not add triangles. In float mode the rule is off. Then a repeated identical cut is not idempotent: it can add
+/// faces, and its result can be not valid. A move of the rule can open a result that the nearest rounding keeps
+/// closed. If the result has more open edges than the operands, the pass runs again with the nearest rounding. The result with fewer open edges stays.
 /// Union also keeps the nearest rounding of crossings with a shared nearest grid point (see CsgWantedSides).
 /// Without this, the union of rotated boxes A + B is closed, but (A + B) + C opens the rule pass.
 SharedPtr<const CsgSolid> ExactPass(const SharedPtr<const CsgSolid>& a, const SharedPtr<const CsgSolid>& b,

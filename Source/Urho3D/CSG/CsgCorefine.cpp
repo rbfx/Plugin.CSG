@@ -3114,6 +3114,12 @@ struct VolumeSignPlane
 
 } // namespace
 
+#ifdef CSG_DIAGNOSTICS
+/// True if the last failed rule "inside" of CrossingInvalidRules on this thread was a position across an edge.
+/// False if the position was only on the line of an edge. The validity count of SplitFaces reads it.
+static thread_local bool t_insideAcrossEdge = false;
+#endif
+
 unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGridPoint& candidate, CsgScratch& scratch,
     bool stopAtFirst, bool strict, bool segmentRule) const
 {
@@ -3244,7 +3250,13 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
         const bool outside = strict ? (q0 != side || q1 != side || q2 != side)
                                     : (outsideOf(q0, 0) || outsideOf(q1, 1) || outsideOf(q2, 2));
         if (side == 0 || outside)
+        {
             rules |= CsgRuleInside;
+#ifdef CSG_DIAGNOSTICS
+            t_insideAcrossEdge = side == 0 || strict
+                || (q0 == -side && !onTwin(0)) || (q1 == -side && !onTwin(1)) || (q2 == -side && !onTwin(2));
+#endif
+        }
     }
     if (finished())
         return rules;
@@ -4061,7 +4073,19 @@ void Corefinement::SplitFaces(CsgScratch& scratch)
         g_csgDiagnostics.invalidCorner_.fetch_add(perRule[3], std::memory_order_relaxed);
         const int fold = CountInvalidCrossings(scratch, perRule, false);
         g_csgDiagnostics.foldCrossings_.fetch_add(fold, std::memory_order_relaxed);
-        g_csgDiagnostics.foldInside_.fetch_add(perRule[0], std::memory_order_relaxed);
+        // Split the rule "inside": a position across an edge, or only on the line of an edge.
+        int onEdge = 0;
+        if (perRule[0] != 0)
+        {
+            for (const Crossing& crossing : crossings_)
+            {
+                if ((CrossingInvalidRules(crossing, crossing.grid_, scratch, false, false, false) & CsgRuleInside) != 0
+                    && !t_insideAcrossEdge)
+                    ++onEdge;
+            }
+        }
+        g_csgDiagnostics.foldInside_.fetch_add(perRule[0] - onEdge, std::memory_order_relaxed);
+        g_csgDiagnostics.foldOnEdge_.fetch_add(onEdge, std::memory_order_relaxed);
         g_csgDiagnostics.foldOrder_.fetch_add(perRule[1], std::memory_order_relaxed);
         g_csgDiagnostics.foldSegments_.fetch_add(perRule[2], std::memory_order_relaxed);
     }

@@ -77,6 +77,11 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - In rare cases the result stays open (`IsClosed()` false). In a sweep of 1028 rotations of a box union with coplanar contact, no sample fails in float mode and 1 sample fails in double mode. This sample is 5.9000 degrees on the axis (1, 1, 1), left union. The union of A and B is right, but the next boolean on the result fails. Three sheets of one operand lie in one grid cell. The sheets give a T-junction between them. In the sweep, no closed result has a wrong volume.
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
 - An operand with a coordinate outside of +-8192 units gives an empty solid with `IsOutOfRange()` true.
+- A second identical cut is not idempotent in float mode. It adds sliver faces at the grid points of the first cut.
+- Some second identical cuts are not valid. A sweep cuts a box with a sphere near a corner, then cuts the result with the same sphere again (8868 cases). The first cut is valid in all cases. 449 second cuts are not valid: 336 have duplicate sheets, 131 have open edges. In 8 cases the volume changes by more than 0.001 units, up to 0.49 units. Large volume losses occur also with the fold rule before the on-edge rule.
+- The single cut of these sweeps has no failure in 13788 cases (a grid of 8788 centers and 5000 random centers).
+- An open case: a vertex of the first cut is on the edge line of a sphere triangle. The weld rule covers only the vertices of the chain of that edge. The crossing then moves, and the second cut keeps a duplicate sheet. The test tag `[known]` holds this case.
+- A crossing with no valid corner in its grid cell keeps its nearest rounding. This rounding can stay on the line of a triangle edge. The result can still be valid.
 
 ## Editor roadmap
 

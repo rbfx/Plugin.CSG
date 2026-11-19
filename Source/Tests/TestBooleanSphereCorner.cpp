@@ -34,8 +34,10 @@ struct BoolResult
     SharedPtr<CsgTriangulatedModel> model_;
     /// Crossings that fold after ConstrainCrossings (non strict rules), summed over all passes of the boolean.
     int fold_{};
-    /// Crossings that fold by the rule "inside" after ConstrainCrossings.
+    /// Crossings that fold by the rule "inside" after ConstrainCrossings: a position across a triangle edge.
     int foldInside_{};
+    /// Crossings that fold only by a position on the line of a triangle edge.
+    int foldOnEdge_{};
     /// Crossings that fold and that ConstrainCrossings could not move.
     int unconstrainable_{};
     /// Crossings that the count tested.
@@ -55,6 +57,7 @@ BoolResult RunBoolean(const CsgSolid& a, const CsgSolid& b, CsgOperation operati
     diagnostics.countInvalid_.store(wasCounting);
     result.fold_ = diagnostics.foldCrossings_.load();
     result.foldInside_ = diagnostics.foldInside_.load();
+    result.foldOnEdge_ = diagnostics.foldOnEdge_.load();
     result.unconstrainable_ = diagnostics.unconstrainableCrossings_.load();
     result.checked_ = diagnostics.checkedCrossings_.load();
     REQUIRE(result.solid_);
@@ -496,7 +499,8 @@ TEST_CASE("Boolean: a sphere at the top diagonal of a box, and a second identica
         // So the test does not check the face count, and the volume changes only by a small amount.
         const BoolResult again = RunBoolean(*cut.solid_, *b, CsgOperation::DifferenceAB);
         INFO("faces of the first cut " << cut.solid_->FaceCount() << ", of the second cut "
-                                       << again.solid_->FaceCount() << ", fold inside " << again.foldInside_);
+                                       << again.solid_->FaceCount() << ", fold inside " << again.foldInside_
+                                       << ", fold on edge " << again.foldOnEdge_);
         CHECK(IsValid(again));
         CHECK(again.check_.volume_ == Catch::Approx(cut.check_.volume_).margin(2e-5));
     }
