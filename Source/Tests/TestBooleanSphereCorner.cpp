@@ -58,6 +58,7 @@ BoxMinusSphere MakeBoxMinusSphere(Context* context, float radius, const Vector3&
     return result;
 }
 
+/// The rule of `CsgBuildStats::valid_` in the root build for a result with faces.
 bool IsValid(const BoxMinusSphere& r)
 {
     return r.closed_ && r.check_.openEdges_ == 0 && r.check_.duplicates_ == 0 && r.check_.degenerates_ == 0
@@ -128,6 +129,7 @@ TEST_CASE("Box minus a sphere: a crossing on the twin of a coplanar edge keeps t
         CHECK(result.check_.duplicates_ == 0);
         CHECK(result.check_.openEdges_ == 0);
         CHECK(result.check_.degenerates_ == 0);
+        CHECK(result.solid_->FaceCount() > 0);
         CHECK(IsValid(result));
     }
 }
@@ -146,6 +148,7 @@ TEST_CASE("Box minus a sphere: a crossing inside its triangle does not round ont
         CHECK(result.check_.duplicates_ == 0);
         CHECK(result.check_.openEdges_ == 0);
         CHECK(result.check_.degenerates_ == 0);
+        CHECK(result.solid_->FaceCount() > 0);
         CHECK(IsValid(result));
     }
 }
@@ -160,4 +163,33 @@ TEST_CASE("Box minus a sphere near a corner over a long random sweep", "[.][bool
 {
     auto context = MakeShared<Context>();
     CHECK(SweepCorner(context, 1u, 5000) == 0);
+}
+
+TEST_CASE("Box minus a sphere near a corner over a grid of centers", "[.][boolean][sweep]")
+{
+    // Offsets in [-0.2, 0.2] with the step 0.05, and small offsets near zero, on each axis.
+    auto context = MakeShared<Context>();
+    static constexpr float radii[] = {0.25f, 0.3f, 0.5f, 0.75f};
+    float offsets[13];
+    for (int i = -4; i <= 4; ++i)
+        offsets[i + 4] = static_cast<float>(i) * 0.05f;
+    offsets[9] = 1e-4f;
+    offsets[10] = 1.0f / 1024.0f;
+    offsets[11] = 1.0f / 2048.0f;
+    offsets[12] = -1.0f / 1024.0f;
+    unsigned failed = 0;
+    for (const float radius : radii)
+        for (const float a : offsets)
+            for (const float b : offsets)
+                for (const float c : offsets)
+                {
+                    const Vector3 center(0.5f + a, 0.5f + b, 0.5f + c);
+                    if (!IsValid(MakeBoxMinusSphere(context, radius, center)))
+                    {
+                        ++failed;
+                        UNSCOPED_INFO("radius " << radius << " center (" << center.x_ << ", " << center.y_ << ", "
+                                                << center.z_ << ")");
+                    }
+                }
+    CHECK(failed == 0);
 }
