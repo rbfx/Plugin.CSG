@@ -31,7 +31,9 @@ bool IsRootNode(Node* node);
 Node* CreateRootNode(Node* parent, const Vector3& worldPosition);
 /// Create a child node "Brush" at the end of the operand list. The model name may be empty.
 /// The local scale is the inverse of the root world scale. The brush world scale is about 1.
-Node* AddBrushNode(Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition);
+/// A disabled brush is not an operand. The root does not rebuild when it gets the node.
+Node* AddBrushNode(
+    Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition, bool enabled = true);
 
 /// Return the operation of the brush, or -1 if the node has no brush.
 int GetOperation(Node* brush);

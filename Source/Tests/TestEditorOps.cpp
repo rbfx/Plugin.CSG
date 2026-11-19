@@ -256,6 +256,29 @@ TEST_CASE("AddBrushNode gives the brush a world scale of 1", "[editorops]")
         CHECK(worldBoxSize(brush).Equals(Vector3::ONE, 1e-3f));
     }
 
+    SECTION("Root with a negative scale")
+    {
+        Node* rootNode = f.MakeRoot();
+        rootNode->SetScale(Vector3(-72.0f, 1.0f, -82.0f));
+        Node* brush = AddBrushNode(rootNode, "Csg/Unit.mdl", 0, Vector3(3.0f, 1.0f, -2.0f));
+        REQUIRE(brush);
+        CHECK(brush->GetWorldPosition().Equals(Vector3(3.0f, 1.0f, -2.0f), 1e-3f));
+        CHECK(worldBoxSize(brush).Equals(Vector3::ONE, 1e-4f));
+    }
+
+    SECTION("Root under a scaled parent")
+    {
+        Node* parent = f.scene->CreateChild("Parent");
+        parent->SetScale(Vector3(2.0f, 3.0f, 0.5f));
+        Node* rootNode = CreateRootNode(parent, Vector3(1.0f, 2.0f, 3.0f));
+        REQUIRE(rootNode);
+        rootNode->SetScale(Vector3(72.0f, 1.0f, 82.0f));
+        Node* brush = AddBrushNode(rootNode, "Csg/Unit.mdl", 0, Vector3(3.0f, 1.0f, -2.0f));
+        REQUIRE(brush);
+        CHECK(brush->GetWorldPosition().Equals(Vector3(3.0f, 1.0f, -2.0f), 1e-3f));
+        CHECK(worldBoxSize(brush).Equals(Vector3::ONE, 1e-4f));
+    }
+
     SECTION("Root with a zero scale component")
     {
         Node* rootNode = f.MakeRoot();
@@ -264,6 +287,30 @@ TEST_CASE("AddBrushNode gives the brush a world scale of 1", "[editorops]")
         REQUIRE(brush);
         CHECK(brush->GetScale().Equals(Vector3(0.5f, 1.0f, 0.25f), 1e-6f));
     }
+}
+
+TEST_CASE("AddBrushNode with enabled false does not request a rebuild", "[editorops]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    RunFrames(f.scene, 5);
+    const unsigned revision = root->GetRebuildRevision();
+
+    Node* brush = AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3(1.0f, 0.0f, 0.0f), false);
+    REQUIRE(brush);
+    CHECK_FALSE(brush->GetComponent(StringHash("CsgBrush"))->IsEnabled());
+    CHECK(root->GetRebuildRevision() == revision);
+    CHECK(GetOperands(rootNode).empty());
+
+    // A disabled brush can move without a rebuild.
+    brush->SetWorldPosition(Vector3(2.0f, 0.0f, 0.0f));
+    RunFrames(f.scene, 2);
+    CHECK(root->GetRebuildRevision() == revision);
+
+    REQUIRE(SetBrushEnabled(brush, true));
+    CHECK(root->GetRebuildRevision() != revision);
+    CHECK(GetOperands(rootNode).size() == 1);
 }
 
 TEST_CASE("Operation functions use the attribute enum names", "[editorops]")

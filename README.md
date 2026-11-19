@@ -142,10 +142,10 @@ The toolbar has the same commands. The toolbar "add" buttons put the brush at th
 Drag a model (`.mdl`) from the resource browser into the scene view. The active selected node selects the case:
 
 - A CSG root, or its result node: the drop adds a union brush with the model under the root, at the hit point. Hold Shift at drop time to add a subtract brush (`DifferenceAB`). The new brush is selected. One undo step removes it.
-- A brush: the drop sets the model of all selected brushes. The brushes stay at their positions. One undo step restores the old models.
+- A brush: the drop sets the model of all selected brushes. The brushes stay at their positions. One undo step restores the old models. A drop of the same model adds no undo step.
 - Any other node, or no selection: the stock editor behavior. The editor adds a plain node with a `StaticModel`.
 
-During the drag, the scene shows a preview. The preview brush of the "add" case does not change the CSG result until the drop. A move out of the view removes the preview.
+During the drag, the scene shows a preview. The preview brush of the "add" case is disabled, so the CSG result does not change and does not rebuild until the drop. A move out of the view removes the preview.
 
 ### Manual check list
 

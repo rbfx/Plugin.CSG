@@ -67,28 +67,35 @@ Node* CreateRootNode(Node* parent, const Vector3& worldPosition)
     return node;
 }
 
-Node* AddBrushNode(Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition)
+Node* AddBrushNode(
+    Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition, bool enabled)
 {
     if (!IsRootNode(rootNode))
         return nullptr;
-    Node* node = rootNode->CreateChild("Brush");
+
+    // The node gets its brush, attributes and transform before it goes under the root.
+    // Then an enabled brush registers once and requests one rebuild. A disabled brush requests none.
+    auto node = MakeShared<Node>(rootNode->GetContext());
+    node->SetName("Brush");
     Component* brush = node->CreateComponent(brushType);
     if (!brush)
-    {
-        node->Remove();
         return nullptr;
-    }
+    if (!enabled)
+        brush->SetEnabled(false);
+    brush->SetAttribute("Model", MakeModelRef(modelName));
+    brush->SetAttribute("Operation", operation);
+    brush->ApplyAttributes();
+
     // The world position is correct for a root with any transform.
-    node->SetWorldPosition(worldPosition);
+    node->SetPosition(rootNode->WorldToLocal(worldPosition));
     // The inverse of the root world scale gives the brush a world scale of about 1.
     // The local rotation stays identity, so the root scale cancels.
     // A rotated root with a non-uniform scale can shear the brush when the brush rotates later.
     const Vector3 rootScale = rootNode->GetWorldScale();
     const auto inverse = [](float value) { return Abs(value) > M_EPSILON ? 1.0f / value : 1.0f; };
     node->SetScale(Vector3(inverse(rootScale.x_), inverse(rootScale.y_), inverse(rootScale.z_)));
-    brush->SetAttribute("Model", MakeModelRef(modelName));
-    brush->SetAttribute("Operation", operation);
-    brush->ApplyAttributes();
+
+    rootNode->AddChild(node);
     return node;
 }
 

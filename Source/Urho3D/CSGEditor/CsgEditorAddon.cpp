@@ -363,17 +363,16 @@ void CsgEditorAddon::BeginDragDrop(SceneViewPage& page, DragDropPayload* payload
 
         // The builder must exist before the brush. Then one undo step removes the brush.
         dropActionBuilder_ = ea::make_unique<CreateNodeActionBuilder>(page.scene_, AttributeScopeHint::Node);
-        dropBrush_ = AddBrushNode(rootNode, desc->resourceName_, operation, rootNode->GetWorldPosition());
+        // The brush is disabled during the drag, so the CSG result does not change.
+        // If the result contains the brush, the cursor ray hits the brush and the brush moves to the camera.
+        dropBrush_ = AddBrushNode(rootNode, desc->resourceName_, operation, rootNode->GetWorldPosition(), false);
         if (!dropBrush_)
         {
             dropActionBuilder_ = nullptr;
             return;
         }
 
-        // The brush is disabled during the drag, so the CSG result does not change.
-        // If the result contains the brush, the cursor ray hits the brush and the brush moves to the camera.
-        // A temporary StaticModel shows the brush shape instead.
-        SetBrushEnabled(dropBrush_, false);
+        // A temporary StaticModel shows the brush shape.
         auto cache = GetSubsystem<ResourceCache>();
         if (auto model = cache->GetResource<Model>(desc->resourceName_))
         {
@@ -415,41 +414,50 @@ void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
 
 void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
 {
-    if (dropMode_ == DropMode::ReplaceModel && dropPage_)
+    Scene* scene = dropPage_ ? dropPage_->scene_.Get() : nullptr;
+    if (dropMode_ == DropMode::ReplaceModel && scene)
     {
+        // The action skips a component that is removed or that is not in the scene of the page.
+        // It also skips a component with no change of the model.
         ea::vector<Component*> components;
         VariantVector oldValues;
         VariantVector newValues;
         for (unsigned index = 0; index < dropComponents_.size(); ++index)
         {
-            if (Component* component = dropComponents_[index])
-            {
-                components.push_back(component);
-                oldValues.push_back(dropOldModels_[index]);
-                newValues.push_back(dropNewModel_);
-            }
+            Component* component = dropComponents_[index];
+            if (!component || !component->GetNode() || component->GetScene() != scene)
+                continue;
+            if (dropOldModels_[index] == dropNewModel_)
+                continue;
+            components.push_back(component);
+            oldValues.push_back(dropOldModels_[index]);
+            newValues.push_back(dropNewModel_);
         }
         if (!components.empty())
-            owner_->PushAction<ChangeComponentAttributesAction>(dropPage_->scene_.Get(), "Model", components, oldValues, newValues);
+            owner_->PushAction<ChangeComponentAttributesAction>(scene, "Model", components, oldValues, newValues);
     }
-    else if (dropMode_ == DropMode::NewBrush && dropBrush_ && dropActionBuilder_)
+    else if (dropMode_ == DropMode::NewBrush && dropBrush_ && dropActionBuilder_ && scene
+        && dropBrush_->GetParent() && dropBrush_->GetScene() == scene)
     {
         if (dropPreview_)
             dropPreview_->Remove();
 
         // Shift at drop time makes a subtract brush.
         const int difference = FindOperation(DifferenceName);
-        if (ui::IsKeyDown(KEY_SHIFT) && difference >= 0)
+        const bool shift = ui::IsKeyDown(KEY_LSHIFT) || ui::IsKeyDown(KEY_RSHIFT);
+        if (shift && difference >= 0)
             SetOperation(dropBrush_, difference);
         SetBrushEnabled(dropBrush_, true);
 
-        if (dropPage_)
-        {
-            dropPage_->selection_.Clear();
-            dropPage_->selection_.SetSelected(dropBrush_, true);
-        }
+        dropPage_->selection_.Clear();
+        dropPage_->selection_.SetSelected(dropBrush_, true);
 
         owner_->PushAction(dropActionBuilder_->Build(dropBrush_));
+    }
+    else if (dropMode_ == DropMode::NewBrush && dropBrush_ && dropBrush_->GetParent())
+    {
+        // The root or the scene changed during the drag. The preview brush must not stay without an undo step.
+        dropBrush_->Remove();
     }
 
     ResetDrop();
