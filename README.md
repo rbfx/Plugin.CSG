@@ -78,6 +78,24 @@ Use `CsgBuildPolygonsFromModel` or `CsgBuildSolidFromModel` to get an operand fr
 - `ConstrainCrossings` costs time. On the benchmark it adds about 3% (box-box) to 20-25% (rotated coplanar union) to the boolean.
 - An operand with a coordinate outside of +-8192 units gives an empty solid with `IsOutOfRange()` true.
 
+## Editor roadmap
+
+Later work. The editor does not have these yet:
+
+- Translucent cutters: draw subtract brushes as see-through volumes.
+- Isolate: show one brush alone.
+- Lock: protect a brush from edits.
+- Align: align brushes to each other.
+- Vertex snap: snap a handle to a vertex of another brush.
+- Array and mirror: copy a brush many times.
+- Groups: nest operands in a group.
+
+Not planned:
+
+- A prefab library of brushes.
+- Bevel.
+- Typed numeric input for handle positions. The inspector attributes already take typed values.
+
 ## Benchmark
 
 The benchmark is a hidden test (tag `[.benchmark]`). A normal run skips it. Run it with:
