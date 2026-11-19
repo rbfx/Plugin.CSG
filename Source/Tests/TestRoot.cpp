@@ -6935,3 +6935,106 @@ TEST_CASE("CsgRoot saves the result model and the model loads back equal", "[roo
         }
     }
 }
+
+TEST_CASE("CsgRoot answers the stats query event", "[root][stats]")
+{
+    using namespace CsgRootQueryStats;
+
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/OpenBoxA.mdl", Vector3::ONE, 2);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A root that built nothing has zeros")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Fresh");
+        VariantMap data;
+        root->SendEvent(E_CSGROOTQUERYSTATS, data);
+        CHECK(data[P_VERSION].GetInt() == CsgRootQueryStatsVersion);
+        CHECK(!data[P_VALID].GetBool());
+        CHECK(data[P_BRUSHCOUNT].GetUInt() == 0);
+        CHECK(data[P_TRIANGLES].GetUInt() == 0);
+        CHECK(data[P_VERTICES].GetUInt() == 0);
+        CHECK(data[P_REBUILDMS].GetFloat() == 0.0f);
+        CHECK(data[P_REUSEDOPERANDS].GetUInt() == 0);
+        CHECK(data[P_ERROR].GetString().empty());
+    }
+
+    SECTION("The values match the getters of the root and the prefix reuse shows")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Built");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+
+        VariantMap data;
+        root->SendEvent(E_CSGROOTQUERYSTATS, data);
+        const CsgBuildStats& stats = root->GetLastBuildStats();
+        const Model* model = GetOutput(root)->GetModel();
+        unsigned vertices = 0;
+        for (const VertexBuffer* buffer : model->GetVertexBuffers())
+            vertices += buffer->GetVertexCount();
+        CHECK(data[P_VALID].GetBool() == stats.valid_);
+        CHECK(data[P_VALID].GetBool());
+        CHECK(data[P_BRUSHCOUNT].GetUInt() == 1);
+        CHECK(data[P_TRIANGLES].GetUInt() == stats.triangleCount_);
+        CHECK(data[P_TRIANGLES].GetUInt() * 3 == CountIndices(model));
+        CHECK(data[P_VERTICES].GetUInt() == vertices);
+        CHECK(data[P_VERTICES].GetUInt() > 0);
+        CHECK(data[P_REBUILDMS].GetFloat() == Catch::Approx(stats.booleanMs_ + stats.triangulateMs_ + stats.buildModelMs_));
+        CHECK(data[P_REUSEDOPERANDS].GetUInt() == 0);
+        CHECK(!data[P_BUILDING].GetBool());
+        CHECK(data[P_ERROR].GetString().empty());
+
+        // A new last operand reuses the fold state of the first operand.
+        AddBoxBrush(root, "Cut2", Vector3(-1.0f, -1.0f, -1.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        VariantMap second;
+        root->SendEvent(E_CSGROOTQUERYSTATS, second);
+        CHECK(second[P_BRUSHCOUNT].GetUInt() == 2);
+        CHECK(second[P_REUSEDOPERANDS].GetUInt() == 1);
+        CHECK(second[P_TRIANGLES].GetUInt() == root->GetLastBuildStats().triangleCount_);
+    }
+
+    SECTION("The flag building is true while a job runs")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Busy");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        root->Rebuild();
+        VariantMap data;
+        root->SendEvent(E_CSGROOTQUERYSTATS, data);
+        CHECK(data[P_BUILDING].GetBool() == (root->GetBuildStatus() == "Building..."));
+        CHECK(data[P_BUILDING].GetBool());
+        RunFrames(root, workQueue, 60);
+    }
+
+    SECTION("An invalid fold reports valid false and a reason")
+    {
+        CsgRoot* root = scene->CreateChild("Open")->CreateComponent<CsgRoot>();
+        root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/OpenBoxA.mdl"));
+        root->SetDeferredDelaySec(0.0f);
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+
+        VariantMap data;
+        root->SendEvent(E_CSGROOTQUERYSTATS, data);
+        CHECK(!data[P_VALID].GetBool());
+        CHECK(data[P_TRIANGLES].GetUInt() == root->GetLastBuildStats().triangleCount_);
+        CHECK(!data[P_ERROR].GetString().empty());
+        CHECK(data[P_ERROR].GetString().contains("open"));
+    }
+
+    SECTION("A component that is not a root does not answer")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Host");
+        auto* brush = root->GetNode()->CreateChild("Brush")->CreateComponent<CsgBrush>();
+        VariantMap data;
+        brush->SendEvent(E_CSGROOTQUERYSTATS, data);
+        CHECK(data.find(P_VERSION) == data.end());
+    }
+}

@@ -46,4 +46,33 @@ URHO3D_EVENT(E_CSGROOTPICK, CsgRootPick)
     URHO3D_PARAM(P_DISTANCE, Distance); // float
 }
 
+/// The current version of the stats event.
+constexpr int CsgRootQueryStatsVersion = 1;
+
+/// Read the diagnostics of the root.
+/// In: none. The editor sends the event to the root component.
+/// Out: P_VERSION (int), P_VALID (bool), P_BRUSHCOUNT (unsigned), P_TRIANGLES (unsigned), P_VERTICES (unsigned),
+/// P_REBUILDMS (float), P_REUSEDOPERANDS (unsigned), P_BUILDING (bool) and P_ERROR (string).
+/// The numbers describe the last applied build. A root that built nothing has zeros and P_VALID false.
+/// P_VALID is the valid flag of the fold result. P_BRUSHCOUNT is the number of operands of that build.
+/// P_TRIANGLES and P_VERTICES are the sizes of the applied result model.
+/// P_REBUILDMS is the job time in milliseconds: boolean, triangulation and model build.
+/// P_REUSEDOPERANDS is the number of operands that the build took from the cached fold states (the prefix).
+/// P_BUILDING is true while a build job runs. P_ERROR is empty for a valid result.
+/// Else it tells why: a failed build, an open solid, open edges, duplicate or degenerate triangles, or no volume.
+/// The root does not know which brush made the problem, so the event has no brush ID.
+/// A component that is not a root does not answer. Then P_VERSION is not in the event data.
+URHO3D_EVENT(E_CSGROOTQUERYSTATS, CsgRootQueryStats)
+{
+    URHO3D_PARAM(P_VERSION, Version); // int
+    URHO3D_PARAM(P_VALID, Valid); // bool
+    URHO3D_PARAM(P_BRUSHCOUNT, BrushCount); // unsigned
+    URHO3D_PARAM(P_TRIANGLES, Triangles); // unsigned
+    URHO3D_PARAM(P_VERTICES, Vertices); // unsigned
+    URHO3D_PARAM(P_REBUILDMS, RebuildMs); // float
+    URHO3D_PARAM(P_REUSEDOPERANDS, ReusedOperands); // unsigned
+    URHO3D_PARAM(P_BUILDING, Building); // bool
+    URHO3D_PARAM(P_ERROR, Error); // string
+}
+
 } // namespace Urho3D

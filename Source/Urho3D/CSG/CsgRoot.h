@@ -49,6 +49,8 @@ struct CsgBuildStats
     unsigned droppedComponents_{};
     /// Number of operands that the build evaluated. The build reuses the cached fold states of the other operands.
     unsigned foldSteps_{};
+    /// Number of operands of the build. `operandCount_ - foldSteps_` operands come from the reused prefix.
+    unsigned operandCount_{};
     /// Number of triangles of the triangulated result.
     unsigned triangleCount_{};
     /// True if the result solid is closed. An empty solid is closed.
@@ -348,6 +350,7 @@ private:
     void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
     void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
     void HandlePick(StringHash eventType, VariantMap& eventData);
+    void HandleQueryStats(StringHash eventType, VariantMap& eventData);
     /// Set the pick table of the applied result. A null model clears it.
     void SetPickTable(Model* model, CsgPickTable table);
 

@@ -303,6 +303,7 @@ CsgRoot::CsgRoot(Context* context)
 {
     // The pick uses only the applied result, so it works also while the root is not active.
     SubscribeToEvent(this, E_CSGROOTPICK, URHO3D_HANDLER(CsgRoot, HandlePick));
+    SubscribeToEvent(this, E_CSGROOTQUERYSTATS, URHO3D_HANDLER(CsgRoot, HandleQueryStats));
 }
 
 void CsgRoot::RegisterObject(Context* context)
@@ -604,6 +605,49 @@ void CsgRoot::HandlePick(StringHash /*eventType*/, VariantMap& eventData)
     eventData[P_POSITION] = hit.position_;
     eventData[P_NORMAL] = hit.normal_;
     eventData[P_DISTANCE] = hit.distance_;
+}
+
+void CsgRoot::HandleQueryStats(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace CsgRootQueryStats;
+    const CsgBuildStats& stats = lastBuildStats_;
+
+    unsigned vertices = 0;
+    const StaticModel* output = output_;
+    if (const Model* model = output ? output->GetModel() : nullptr)
+    {
+        for (const SharedPtr<VertexBuffer>& buffer : model->GetVertexBuffers())
+            vertices += buffer->GetVertexCount();
+    }
+
+    // The reason of an invalid result. A root that built nothing has no reason.
+    ea::string error;
+    if (lastBuildFailed_)
+        error = "The build failed";
+    else if (hasAppliedBuild_ && !stats.valid_)
+    {
+        if (!stats.closed_)
+            error += "the solid is not closed; ";
+        if (stats.openEdges_)
+            error += Format("{} open edges; ", stats.openEdges_);
+        if (stats.duplicates_)
+            error += Format("{} duplicate triangles; ", stats.duplicates_);
+        if (stats.degenerates_)
+            error += Format("{} degenerate triangles; ", stats.degenerates_);
+        if (error.empty())
+            error = "the volume is not positive; ";
+        error.resize(error.size() - 2);
+    }
+
+    eventData[P_VERSION] = CsgRootQueryStatsVersion;
+    eventData[P_VALID] = stats.valid_;
+    eventData[P_BRUSHCOUNT] = stats.operandCount_;
+    eventData[P_TRIANGLES] = stats.triangleCount_;
+    eventData[P_VERTICES] = vertices;
+    eventData[P_REBUILDMS] = stats.booleanMs_ + stats.triangulateMs_ + stats.buildModelMs_;
+    eventData[P_REUSEDOPERANDS] = stats.operandCount_ - ea::min(stats.operandCount_, stats.foldSteps_);
+    eventData[P_BUILDING] = rebuildInFlight_;
+    eventData[P_ERROR] = error;
 }
 
 void CsgRoot::AddBrush()
@@ -1387,6 +1431,7 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
             job->baseSolid_ = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->basePolygons_), job->epsilon_);
         EvaluateOperands(job->operands_, job->baseSolid_, job->stepSolids_, job->epsilon_);
         job->stats_.foldSteps_ = job->operands_.size() - job->reusedOperands_;
+        job->stats_.operandCount_ = static_cast<unsigned>(job->operands_.size());
         // The shell filter applies to the final solid only. The fold states keep all shells.
         // A raw pointer to the last fold state prevents reference count changes that are not necessary.
         const CsgSolid* solid = job->stepSolids_.back().Get();
