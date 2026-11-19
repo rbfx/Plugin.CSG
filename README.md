@@ -103,18 +103,26 @@ The root writes the result to a `StaticModel` on the same node.
 ### Shape handles (protocol)
 
 A procedural brush offers handles. A handle is a point that the user drags in the viewport.
-The editor addon stays independent of the shape types. It uses two events and does not link Plugin.CSG.
+The editor addon stays independent of the shape types. It uses three events and does not link Plugin.CSG.
 The header `Source/Urho3D/CSG/CsgShapeProtocol.h` has the events and the keys. It needs only the Urho3D core types.
 The addon sends an event with `component->SendEvent(...)`. The brush answers on itself and writes the result into the event data.
 A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
 
-- `E_CSGSHAPEQUERYHANDLES`. Out: `P_VERSION` (int, 1), `P_VALID` (bool) and `P_HANDLES` (a `VariantVector`).
+- `E_CSGSHAPEQUERYHANDLES`. Out: `P_VERSION` (int, 2), `P_VALID` (bool) and `P_HANDLES` (a `VariantVector`).
   Each element is a `VariantMap` with the keys `Id` (int), `Name` (string), `Kind` (int: 0 point, 1 axis),
   `Position` (Vector3) and `Axis` (unit Vector3, zero for a point). The key constants are in `CsgShapeProtocol`.
   The positions and axes are in the local space of the brush. A shape that is not valid gives `P_VALID` false and no handle.
 - `E_CSGSHAPEMOVEHANDLES`. In: `P_INDICES` (a `VariantVector` of int ids) and `P_DELTA` (Vector3).
   The delta is the total delta from the drag start, in the local space of the brush.
   Out: `P_ACCEPTED` (bool).
+- `E_CSGSHAPERECENTER` (protocol version 2). Out: `P_ACCEPTED` (bool) and `P_OFFSET` (Vector3).
+  The offset is the amount, in the local space of the brush, that the shape center was away from the origin.
+  The brush moves its parameters by minus the offset. The editor then moves the node by `node->GetTransform() * offset`.
+  Then the world shape does not change. Only the local transform of the node changes, so the parent transforms do not matter.
+  `P_ACCEPTED` is false if the shape is centered (offset below 1e-6), always centered (sphere, ring) or the new parameters are not valid.
+  Then the parameters stay. The handle ids do not change. The editor queries the positions again.
+  In C++ the same API is `CsgProceduralBrush::Recenter`. The box center is the mean of the 8 positions `Size * Corner`.
+  The cylinder center is the midpoint of the two end centers.
 
 The move is stateless. The brush applies the delta to its current parameters. The editor restores the attributes before each call.
 The brush clamps the result with the sanitizer of the shape. It refuses a result that is not valid.
@@ -235,6 +243,7 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 
 - "Size": the box size. Each component is in [0.001, 16384]. The default is (1, 1, 1).
 - "Corner 0" to "Corner 7": the corners. Index bit 0 is +X, bit 1 is +Y and bit 2 is +Z. Each component is in [-64, 64]. The default is (+-0.5, +-0.5, +-0.5). The local corner position is Size * Corner, per component.
+- The scale of the node applies as for a model brush. The operand transform is `rootFrame * brush world transform`, with the root frame equal to the metric scale of the root times the inverse world transform of the root. A box of size 1 on a node with the scale 0.5 under a root with the scale 1 has the volume 0.125. Under a root with the scale 2 it has the world scale 1, so the volume in the fold space is 1. The output model is in the node space of the root, so its volume there is 0.125.
 - "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot uses the material of slot 0. Faces with equal materials share one output geometry.
 - Each face is two triangles with a fixed diagonal. A moved corner can make a face that is not planar. The CSG accepts this.
 - UV 0 is a planar projection in local units, so the texel density does not change with the size. UV 1 puts each face in one cell of a 3x2 atlas.
@@ -361,7 +370,12 @@ The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBru
 - Ctrl+Z or Ctrl+Y during the drag cancels the drag first. Then the undo or redo applies as usual.
 - Two handles on the same screen point (for example the -Z and +Z faces seen along Z): the click picks the handle nearer to the camera.
 - The result of the root updates during the drag. One undo step reverts a full drag.
-- The overlay of the root has a "Shape" section: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. It has the "Show handles" check box and the "Snap step" field. The CSG menu of the tab context menu has the same two settings. The editor settings keep them.
+- Recenter pivot: a drag moves a face or a corner, so the shape goes off the origin of its node. Then the node gizmo and the rotation pivot are in the wrong place. "Recenter pivot" moves the shape parameters so the shape is centered around the origin of the node. It moves the node by the same amount, so the shape in the world does not change.
+- The editor recenters at the end of a drag if the check box "Recenter pivot after drag" is set (default on, setting `CsgEditor.AutoRecenter`). It does not recenter during the drag, after a cancelled drag or after a drag that changed nothing. The command "Recenter pivot" in the "Shape" section and in the CSG menu does it for the active brush at any time.
+- The drag and the recenter are one undo step. Ctrl+Z reverts the shape and the node position together. The handle selection stays valid after a recenter.
+- A sphere and a ring are always centered, so they do not recenter.
+- A brush with "UV Mode" `Local` can shift its UV after a recenter, because the UV is in the local coordinates of the brush. The default `Root` is not changed.
+- The overlay of the root has a "Shape" section: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. It has the "Show handles" and "Recenter pivot after drag" check boxes, the "Recenter pivot" command and the "Snap step" field. The CSG menu of the tab context menu has the same items. The editor settings keep them.
 
 The handles of each shape:
 
@@ -440,6 +454,9 @@ The editor has no test harness for addons. Do these checks by hand:
 62. Repeat step 54 with the "Sphere", "Cylinder" and "Ring" presets. Each brush shows the handles of the table above.
 63. Clear "Show handles" in the overlay. The handles go. Restart the editor. The check box stays clear.
 64. Select the root. Click a cut face of a subtract brush in the view. The brush becomes the selection. For a box, the face handle is cyan and the overlay shows "Selected handles: 1". Alt+click selects the root.
+65. Add a box. Drag a face handle by some distance. At the release the node gizmo and the handles show at the center of the box (check box on). Ctrl+Z restores the shape and the node position. Ctrl+Y gives the centered state again.
+66. Clear "Recenter pivot after drag". Drag a face. The box stays off the node origin. Use "Recenter pivot" in the "Shape" section. The origin goes to the center and the box does not move. Ctrl+Z reverts it. Restart the editor. The check box keeps its state.
+67. Push Escape during a drag. The shape and the node position stay as before the drag.
 
 ## How to try the sample scene
 
