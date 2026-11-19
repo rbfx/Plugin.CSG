@@ -8,6 +8,7 @@
 
 #include <Editor/Core/CommonEditorActions.h>
 #include <Editor/Core/HotkeyManager.h>
+#include <Editor/Core/IniHelpers.h>
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
@@ -35,8 +36,25 @@ namespace Urho3D
 namespace
 {
 
-/// The model of a new brush. A preset system replaces this constant later.
-const char* const DefaultBrushModel = "Models/Box.mdl";
+/// A primitive model for new brushes.
+struct BrushPreset
+{
+    const char* name_;
+    const char* model_;
+};
+
+/// The presets use the CoreData models. Tests.CSG checks that CSG accepts each model as a closed mesh.
+const BrushPreset BrushPresets[] = {
+    {"Box", "Models/Box.mdl"},
+    {"Sphere", "Models/Sphere.mdl"},
+    {"Cylinder", "Models/Cylinder.mdl"},
+    {"Cone", "Models/Cone.mdl"},
+    {"Pyramid", "Models/Pyramid.mdl"},
+    {"Torus", "Models/Torus.mdl"},
+};
+const unsigned NumBrushPresets = sizeof(BrushPresets) / sizeof(BrushPresets[0]);
+/// The editor settings key of the chosen preset.
+const char* const PresetIniKey = "CsgEditor.BrushPreset";
 /// The distance of a new brush from the camera if the ray hits nothing.
 const float FallbackDistance = 10.0f;
 
@@ -190,7 +208,7 @@ void CsgEditorAddon::AddBrush(int operation, bool useCursorRay)
         createdNode = rootNode;
     }
 
-    Node* brushNode = AddBrushNode(rootNode, DefaultBrushModel, operation, position);
+    Node* brushNode = AddBrushNode(rootNode, BrushPresets[presetIndex_].model_, operation, position);
     if (!brushNode)
     {
         if (createdNode)
@@ -277,6 +295,8 @@ bool CsgEditorAddon::RenderToolbar()
         return label.empty() ? title : Format("{} ({})", title, label);
     };
 
+    RenderPresetCombo();
+
     if (Widgets::ToolbarButton(ICON_FA_SQUARE_PLUS, makeTooltip("Add CSG Union Brush", &Hotkey_AddUnion).c_str()))
         AddBrush(FindOperation(UnionName), false);
     if (Widgets::ToolbarButton(
@@ -302,6 +322,52 @@ bool CsgEditorAddon::RenderToolbar()
 
     Widgets::ToolbarSeparator();
     return true;
+}
+
+void CsgEditorAddon::RenderPresetCombo()
+{
+    // The padding gives the combo the height of a toolbar button.
+    const ImGuiStyle& style = ui::GetStyle();
+    const float paddingY = ea::max(0.0f, (Widgets::GetSmallButtonSize() - ui::GetFontSize()) * 0.5f);
+    ui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{style.FramePadding.x, paddingY});
+    ui::SetNextItemWidth(ui::CalcTextSize("Cylinder").x + style.FramePadding.x * 2.0f + ui::GetFrameHeight());
+
+    if (ui::BeginCombo("##CsgBrushPreset", BrushPresets[presetIndex_].name_))
+    {
+        for (unsigned index = 0; index < NumBrushPresets; ++index)
+        {
+            const bool selected = index == presetIndex_;
+            if (ui::Selectable(BrushPresets[index].name_, selected))
+                presetIndex_ = index;
+            if (selected)
+                ui::SetItemDefaultFocus();
+        }
+        ui::EndCombo();
+    }
+    ui::PopStyleVar();
+
+    if (ui::IsItemHovered())
+        ui::SetTooltip("%s", Format("CSG brush preset: {}", BrushPresets[presetIndex_].model_).c_str());
+    ui::SameLine(0, 0);
+    Widgets::ToolbarSeparator();
+}
+
+void CsgEditorAddon::WriteIniSettings(ImGuiTextBuffer& output)
+{
+    WriteStringToIni(output, PresetIniKey, BrushPresets[presetIndex_].name_);
+}
+
+void CsgEditorAddon::ReadIniSettings(const char* line)
+{
+    // An unknown name keeps the current preset.
+    if (const auto value = ReadStringFromIni(line, PresetIniKey))
+    {
+        for (unsigned index = 0; index < NumBrushPresets; ++index)
+        {
+            if (*value == BrushPresets[index].name_)
+                presetIndex_ = index;
+        }
+    }
 }
 
 CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const

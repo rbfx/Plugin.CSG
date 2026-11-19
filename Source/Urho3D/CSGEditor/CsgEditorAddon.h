@@ -22,6 +22,7 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 ///
 /// The "active root" is the CsgRoot of the active selected node or of its parent.
 /// The addon adds brushes and sets the operation of the selected brushes.
+/// A new brush from a hotkey or a toolbar button uses the model of the chosen preset.
 /// It does nothing and hides its toolbar if the type "CsgRoot" is not registered.
 ///
 /// A Model dropped in the viewport has two CSG cases. Other cases go to the stock handlers.
@@ -45,6 +46,8 @@ public:
     bool RenderToolbar() override;
     bool RenderTabContextMenu() override;
     void Render(SceneViewPage& page) override;
+    void WriteIniSettings(ImGuiTextBuffer& output) override;
+    void ReadIniSettings(const char* line) override;
     /// The priority is above 0. Then the addon gets a Model drop before SceneDragAndDropPrefab.
     int GetInputPriority() const override { return 10; }
     bool IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const override;
@@ -68,6 +71,8 @@ private:
     };
 
     bool IsAvailable() const;
+    /// Render the toolbar combo of the brush presets.
+    void RenderPresetCombo();
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
     /// Move the preview brush to the cursor hit point.
@@ -84,6 +89,9 @@ private:
     void SetUnion();
     void SetDifference();
     void SetIntersection();
+
+    /// The index of the preset model for new brushes. The editor settings keep the preset name.
+    unsigned presetIndex_{};
 
     DropMode dropMode_{DropMode::None};
     WeakPtr<SceneViewPage> dropPage_;

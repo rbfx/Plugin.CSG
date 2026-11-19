@@ -58,6 +58,8 @@ target_compile_definitions (${TARGET_NAME} PRIVATE Plugin_RbfxCsg_EXPORT=1)
 # The diagnostic tests ([.diagnose]) read counters inside the boolean. The plugin build does not define this macro.
 target_compile_definitions (${TARGET_NAME} PRIVATE CSG_DIAGNOSTICS=1)
 target_compile_definitions (${TARGET_NAME} PRIVATE CSG_SAMPLE_DATA_DIR="${RbfxCsg_SOURCE_DIR}/SampleData")
+# The preset test loads the brush preset models from the CoreData of the engine package.
+target_compile_definitions (${TARGET_NAME} PRIVATE CSG_CORE_DATA_DIR="${Urho3D_PACKAGE_ROOT}/bin/CoreData")
 target_compile_options (${TARGET_NAME} PRIVATE ${CSG_STRICT_FP_OPTIONS})
 if (CSG_EXACT_USE_DOUBLE)
     target_compile_definitions (${TARGET_NAME} PRIVATE CSG_EXACT_USE_DOUBLE=1)

@@ -2608,3 +2608,64 @@ TEST_CASE("CsgBrush draws its debug shape with and without the depth test", "[ro
     static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
     CHECK(debug->HasContent());
 }
+
+namespace
+{
+
+/// Load a model file of the engine CoreData into the resource cache. Return null if the file is missing.
+SharedPtr<Model> LoadCoreDataModel(Context* context, const ea::string& name)
+{
+    const ea::string path = ea::string(CSG_CORE_DATA_DIR) + "/" + name;
+    if (!std::ifstream(path.c_str()).good())
+        return nullptr;
+    File file(context, path, FILE_READ);
+    if (!file.IsOpen())
+        return nullptr;
+    auto model = MakeShared<Model>(context);
+    if (!model->Load(file))
+        return nullptr;
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+    return model;
+}
+
+} // namespace
+
+// The editor addon offers these models as brush presets. Each one must be a closed mesh that CSG accepts.
+TEST_CASE("CSG accepts each CoreData brush preset model as a closed mesh", "[root][preset]")
+{
+    const char* const presets[] = {"Models/Box.mdl", "Models/Sphere.mdl", "Models/Cylinder.mdl", "Models/Cone.mdl",
+        "Models/Pyramid.mdl", "Models/Torus.mdl"};
+
+    for (const char* preset : presets)
+    {
+        DYNAMIC_SECTION(preset)
+        {
+            auto context = MakeCsgTestContext();
+            context->RegisterSubsystem<VirtualFileSystem>();
+            auto* workQueue = context->GetSubsystem<WorkQueue>();
+            if (!LoadCoreDataModel(context, preset))
+            {
+                WARN("Test skipped. The model is missing in " << CSG_CORE_DATA_DIR << ": " << preset);
+                continue;
+            }
+
+            ErrorCounter errors(context);
+            auto scene = MakeShared<Scene>(context);
+            scene->CreateComponent<Octree>();
+            CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+            Node* brushNode = root->GetNode()->CreateChild("Brush");
+            auto* brush = brushNode->CreateComponent<CsgBrush>();
+            brush->SetModel(ResourceRef(Model::GetTypeStatic(), preset));
+            brush->SetOperation(CsgOperation::Union);
+            BuildFully(root, workQueue);
+
+            const CsgBuildStats stats = root->GetLastBuildStats();
+            CHECK(!root->GetLastBuildFailed());
+            CHECK(stats.volume_ > 0.0);
+            CHECK(stats.closed_);
+            CHECK(stats.valid_);
+            CHECK(errors.GetCount() == 0);
+        }
+    }
+}
