@@ -91,6 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
+A procedural brush (`CsgBoxBrush`) generates its model from parameters. See "Procedural box".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. The root drops a stale result and schedules a new build.
@@ -131,7 +132,26 @@ The toolbar has the add and operation commands. The toolbar "add" buttons put th
 
 ### Brush presets
 
-The toolbar combo in front of the "add" buttons selects the model of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are the CoreData models `Box`, `Sphere`, `Cylinder`, `Cone`, `Pyramid` and `Torus`. The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. Tests.CSG builds a root with one union brush for each preset model. Each build succeeds and gives a closed and valid mesh with a positive volume. If a model file is missing, the test shows a warning and skips the model. To make a missing model a failure, set the CMake option `RBFX_CSG_REQUIRE_CORE_DATA=ON` or the environment variable `CSG_REQUIRE_CORE_DATA=1`.
+The toolbar combo in front of the "add" buttons selects the shape of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are:
+
+- `Box`: a procedural `CsgBoxBrush`. It has no model file.
+- `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
+
+The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the default preset. The combo hides a procedural preset if its type is not registered.
+
+Tests.CSG builds a root with one union brush for each preset model. Each build succeeds and gives a closed and valid mesh with a positive volume. If a model file is missing, the test shows a warning and skips the model. To make a missing model a failure, set the CMake option `RBFX_CSG_REQUIRE_CORE_DATA=ON` or the environment variable `CSG_REQUIRE_CORE_DATA=1`.
+
+### Procedural box
+
+`CsgBoxBrush` generates its mesh from parameters. It has no "Model" attribute, so a model drop does not change it.
+
+- "Size": the box size. Each component is in [0.001, 16384]. The default is (1, 1, 1).
+- "Corner 0" to "Corner 7": the corners. Index bit 0 is +X, bit 1 is +Y and bit 2 is +Z. Each component is in [-64, 64]. The default is (+-0.5, +-0.5, +-0.5). The local corner position is Size * Corner, per component.
+- "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot uses the material of slot 0. Faces with equal materials share one output geometry.
+- Each face is two triangles with a fixed diagonal. A moved corner can make a face that is not planar. The CSG accepts this.
+- UV 0 is a planar projection in local units, so the texel density does not change with the size. UV 1 puts each face in one cell of a 3x2 atlas.
+- Validity: at each corner, the three edges to the neighbor corners must give a positive triple product, and the volume must be positive. A corner that goes through the opposite face makes the box not valid. A box that is not valid gives no operand and logs one warning.
+- A value that is not finite gets its default value.
 
 ### Operation colors and operand overlay
 
@@ -192,7 +212,7 @@ The editor has no test harness for addons. Do these checks by hand:
 17. Select the root. Drop a material or a prefab. The stock behavior applies.
 18. Select a root with the scale (72, 1, 82). Push B. The new brush has about the size of the box model, not 72 units.
 19. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
-20. Select "Sphere" in the preset combo. Push B. The new brush is a sphere. Restart the editor. The combo shows "Sphere".
+20. Select "Sphere.mdl" in the preset combo. Push B. The new brush is a sphere. Restart the editor. The combo shows "Sphere.mdl".
 21. Select a brush of a root with two brushes. The overlay shows the root name, the build status and two lines. The union brush has a green mark and a green wireframe. The subtract brush has red. Each wireframe has one color layer, not two.
 22. Push [ on the second brush. It moves to line 0 and the build status changes. Push Ctrl+Z. The old order comes back and the root rebuilds. Push Ctrl+Y. The move comes back.
 23. Push H. The line shows "(off)" and the result loses the brush. Push Ctrl+Z. The brush comes back.
@@ -200,6 +220,11 @@ The editor has no test harness for addons. Do these checks by hand:
 25. Hover a CSG toolbar button. The tooltip shows the build status of the active root.
 26. Turn off "Draw Debug Geometry" in the tab context menu. No brush wireframes show.
 27. Add more brushes than the overlay can show. The overlay stops at 40 percent of the view height and scrolls.
+28. Select "Box" in the preset combo. Push B. A `CsgBoxBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgBoxBrush".
+29. Change "Size" of the box in the inspector. The wireframe and the result change at once.
+30. Move "Corner 7" to (-1, 0.5, 0.5). The box is not valid: the wireframe goes, the result loses the brush and the log shows one warning. Set the corner back. The brush comes back.
+31. Set a material in slot 3 (+Y) of the box. Only the top face of the box gets the material. Clear slot 3. The top face uses the material of slot 0.
+32. Select a box brush and drop a model on it. The box does not change.
 
 ## How to try the sample scene
 

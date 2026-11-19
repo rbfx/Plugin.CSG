@@ -7,6 +7,7 @@
 #include <Urho3D/Container/Str.h>
 #include <Urho3D/Math/Vector3.h>
 
+#include <EASTL/span.h>
 #include <EASTL/vector.h>
 
 namespace Urho3D
@@ -42,6 +43,33 @@ Node* CreateRootNode(Node* parent, const Vector3& worldPosition);
 Node* AddBrushNode(
     Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition, bool enabled = true);
 
+/// Create a child node "Brush" with a brush component of the type at the end of the operand list.
+/// The type must derive from CsgBrush. A procedural type needs no model. The transform rules are those of AddBrushNode.
+/// Return null with no error log if the type is not registered or is not a brush type.
+Node* AddBrushNodeOfType(
+    Node* rootNode, const ea::string& typeName, int operation, const Vector3& worldPosition, bool enabled = true);
+/// Return true if the type is registered and derives from CsgBrush.
+bool IsBrushTypeRegistered(Context* context, const ea::string& typeName);
+
+/// A preset for new brushes. It has a model path (a CsgBrush with the model) or a brush type name.
+struct CsgBrushPreset
+{
+    /// The name in the editor and in the editor settings.
+    const char* name_;
+    /// The model of a model preset, or null.
+    const char* model_;
+    /// The brush type of a procedural preset, or null.
+    const char* typeName_;
+};
+
+/// Return the brush presets. The first preset is the procedural box.
+ea::span<const CsgBrushPreset> GetBrushPresets();
+/// Return true if the editor can use the preset. A procedural preset needs its registered type.
+bool IsBrushPresetAvailable(Context* context, const CsgBrushPreset& preset);
+/// Add a brush node from the preset. See AddBrushNode and AddBrushNodeOfType.
+Node* AddPresetBrushNode(
+    Node* rootNode, const CsgBrushPreset& preset, int operation, const Vector3& worldPosition, bool enabled = true);
+
 /// Return the operation of the brush, or -1 if the node has no brush.
 int GetOperation(Node* brush);
 bool SetOperation(Node* brush, int operation);
@@ -68,6 +96,7 @@ bool SetBrushEnabled(Node* brush, bool enabled);
 bool ToggleBrushEnabled(Node* brush);
 
 /// Return a text with one line for each operand and the build status of the root.
+/// A brush without a "Model" attribute shows its type name.
 ea::string DescribeRoot(Node* rootNode);
 
 } // namespace Urho3D

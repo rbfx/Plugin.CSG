@@ -5,6 +5,7 @@
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 
 #include <Urho3D/Core/Context.h>
+#include <Urho3D/Core/ObjectReflection.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
@@ -95,8 +96,12 @@ Node* CreateRootNode(Node* parent, const Vector3& worldPosition)
     return node;
 }
 
-Node* AddBrushNode(
-    Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition, bool enabled)
+namespace
+{
+
+/// Create the brush node. A null model name means a brush without a "Model" attribute.
+Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* modelName, int operation,
+    const Vector3& worldPosition, bool enabled)
 {
     if (!IsRootNode(rootNode))
         return nullptr;
@@ -105,12 +110,13 @@ Node* AddBrushNode(
     // Then an enabled brush registers once and requests one rebuild. A disabled brush requests none.
     auto node = MakeShared<Node>(rootNode->GetContext());
     node->SetName("Brush");
-    Component* brush = node->CreateComponent(brushType);
+    Component* brush = node->CreateComponent(type);
     if (!brush)
         return nullptr;
     if (!enabled)
         brush->SetEnabled(false);
-    brush->SetAttribute("Model", MakeModelRef(modelName));
+    if (modelName)
+        brush->SetAttribute("Model", MakeModelRef(*modelName));
     brush->SetAttribute("Operation", operation);
     brush->ApplyAttributes();
 
@@ -125,6 +131,59 @@ Node* AddBrushNode(
 
     rootNode->AddChild(node);
     return node;
+}
+
+/// The procedural box is first. The model presets use the CoreData models.
+/// Tests.CSG checks that CSG accepts each model as a closed mesh.
+const CsgBrushPreset BrushPresets[] = {
+    {"Box", nullptr, "CsgBoxBrush"},
+    {"Box.mdl", "Models/Box.mdl", nullptr},
+    {"Sphere.mdl", "Models/Sphere.mdl", nullptr},
+    {"Cylinder.mdl", "Models/Cylinder.mdl", nullptr},
+    {"Cone.mdl", "Models/Cone.mdl", nullptr},
+    {"Pyramid.mdl", "Models/Pyramid.mdl", nullptr},
+    {"Torus.mdl", "Models/Torus.mdl", nullptr},
+};
+
+} // namespace
+
+Node* AddBrushNode(
+    Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition, bool enabled)
+{
+    return AddBrushNodeInternal(rootNode, brushType, &modelName, operation, worldPosition, enabled);
+}
+
+bool IsBrushTypeRegistered(Context* context, const ea::string& typeName)
+{
+    const ObjectReflection* reflection = context && !typeName.empty() ? context->GetReflection(StringHash(typeName)) : nullptr;
+    return reflection && reflection->HasObjectFactory() && reflection->GetTypeInfo()
+        && reflection->GetTypeInfo()->IsTypeOf(brushType);
+}
+
+Node* AddBrushNodeOfType(
+    Node* rootNode, const ea::string& typeName, int operation, const Vector3& worldPosition, bool enabled)
+{
+    // The check comes first: the factory logs an error for an unknown type.
+    if (!rootNode || !IsBrushTypeRegistered(rootNode->GetContext(), typeName))
+        return nullptr;
+    return AddBrushNodeInternal(rootNode, StringHash(typeName), nullptr, operation, worldPosition, enabled);
+}
+
+ea::span<const CsgBrushPreset> GetBrushPresets() { return BrushPresets; }
+
+bool IsBrushPresetAvailable(Context* context, const CsgBrushPreset& preset)
+{
+    if (preset.typeName_)
+        return IsBrushTypeRegistered(context, preset.typeName_);
+    return context && context->GetReflection(brushType) != nullptr;
+}
+
+Node* AddPresetBrushNode(
+    Node* rootNode, const CsgBrushPreset& preset, int operation, const Vector3& worldPosition, bool enabled)
+{
+    if (preset.typeName_)
+        return AddBrushNodeOfType(rootNode, preset.typeName_, operation, worldPosition, enabled);
+    return AddBrushNode(rootNode, preset.model_ ? preset.model_ : "", operation, worldPosition, enabled);
 }
 
 int GetOperation(Node* brush)
@@ -255,7 +314,8 @@ ea::string DescribeRoot(Node* rootNode)
         Component* brush = GetBrushComponent(operand);
         const bool hasModel = HasModelAttribute(brush);
         const ea::string model = hasModel ? brush->GetAttribute("Model").GetResourceRef().name_ : EMPTY_STRING;
-        const char* modelText = !hasModel ? "(generated)" : model.empty() ? "(no model)" : model.c_str();
+        const char* modelText =
+            !hasModel ? brush->GetTypeName().c_str() : model.empty() ? "(no model)" : model.c_str();
         text += ea::string(ea::string::CtorSprintf(), "%u: %s | %s | %s\n", index++, operand->GetName().c_str(),
             OperationName(context, GetOperation(operand)).c_str(), modelText);
     }

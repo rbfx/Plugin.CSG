@@ -535,7 +535,7 @@ TEST_CASE("Editor functions find a brush of a derived type", "[editorops][genera
         CHECK(IsModelBrushNode(cut));
         CHECK_FALSE(SetBrushModel(grow, "Csg/BoxA.mdl"));
         CHECK(SetBrushModel(cut, "Csg/BoxB.mdl"));
-        CHECK(DescribeRoot(rootNode).find("(generated)") != ea::string::npos);
+        CHECK(DescribeRoot(rootNode).find("TestGeneratedBrush") != ea::string::npos);
     }
 
     CHECK(errors.GetCount() == 0);
@@ -557,4 +557,72 @@ TEST_CASE("Editor functions treat a procedural box as a brush without a model", 
     // The drop of a model does not replace the shape of a procedural brush.
     CHECK_FALSE(SetBrushModel(boxNode, "Csg/BoxA.mdl"));
     CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("AddBrushNodeOfType creates a procedural box as the last operand", "[editorops][procedural]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    rootNode->SetScale(Vector3(2.0f, 4.0f, 0.5f));
+    AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3::ZERO);
+
+    const int diff = f.FindOperation("DifferenceAB");
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", diff, Vector3(1.0f, 2.0f, 3.0f));
+    REQUIRE(boxNode);
+    CHECK(rootNode->GetChildren().back() == boxNode);
+    auto* box = boxNode->GetComponent<CsgBoxBrush>();
+    REQUIRE(box);
+    CHECK(GetOperation(boxNode) == diff);
+    CHECK(GetOperands(rootNode).back() == boxNode);
+    CHECK(boxNode->GetWorldPosition().Equals(Vector3(1.0f, 2.0f, 3.0f), 1e-3f));
+    CHECK(boxNode->GetScale().Equals(Vector3(0.5f, 0.25f, 2.0f), 1e-5f));
+    CHECK(boxNode->GetWorldScale().Equals(Vector3::ONE, 1e-5f));
+    CHECK(DescribeRoot(rootNode).find("CsgBoxBrush") != ea::string::npos);
+
+    // A disabled brush is not an operand.
+    Node* disabled = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO, false);
+    REQUIRE(disabled);
+    CHECK(GetOperands(rootNode).back() == boxNode);
+
+    // An unknown type and a type that is not a brush give null with no error log.
+    const unsigned numChildren = rootNode->GetNumChildren();
+    CHECK(AddBrushNodeOfType(rootNode, "NoSuchBrush", 0, Vector3::ZERO) == nullptr);
+    CHECK(AddBrushNodeOfType(rootNode, "StaticModel", 0, Vector3::ZERO) == nullptr);
+    CHECK(AddBrushNodeOfType(rootNode, "CsgProceduralBrush", 0, Vector3::ZERO) == nullptr);
+    CHECK(AddBrushNodeOfType(rootNode, "", 0, Vector3::ZERO) == nullptr);
+    CHECK(rootNode->GetNumChildren() == numChildren);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("The brush presets have the procedural box and the model presets", "[editorops][procedural]")
+{
+    Fixture f;
+    const ea::span<const CsgBrushPreset> presets = GetBrushPresets();
+    ea::vector<ea::string> names;
+    for (const CsgBrushPreset& preset : presets)
+    {
+        names.push_back(preset.name_);
+        // A preset has a model or a type, not both.
+        CHECK((preset.model_ == nullptr) != (preset.typeName_ == nullptr));
+        CHECK(IsBrushPresetAvailable(f.context, preset));
+    }
+    CHECK(names == ea::vector<ea::string>{
+        "Box", "Box.mdl", "Sphere.mdl", "Cylinder.mdl", "Cone.mdl", "Pyramid.mdl", "Torus.mdl"});
+    CHECK(ea::string(presets[0].typeName_) == "CsgBoxBrush");
+
+    Node* rootNode = f.MakeRoot();
+    Node* box = AddPresetBrushNode(rootNode, presets[0], 0, Vector3::ZERO);
+    REQUIRE(box);
+    CHECK(box->GetComponent<CsgBoxBrush>());
+    Node* model = AddPresetBrushNode(rootNode, presets[1], 0, Vector3::ZERO);
+    REQUIRE(model);
+    CHECK(model->GetComponent<CsgBrush>()->GetModelAttr().name_ == "Models/Box.mdl");
+}
+
+TEST_CASE("No brush preset is available without CSG", "[editorops][procedural]")
+{
+    auto plain = MakeContext(false);
+    for (const CsgBrushPreset& preset : GetBrushPresets())
+        CHECK_FALSE(IsBrushPresetAvailable(plain, preset));
 }

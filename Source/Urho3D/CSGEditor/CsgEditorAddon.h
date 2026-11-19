@@ -12,6 +12,8 @@
 namespace Urho3D
 {
 
+struct CsgBrushPreset;
+
 class Component;
 class Node;
 
@@ -22,7 +24,7 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 ///
 /// The "active root" is the CsgRoot of the active selected node or of its parent.
 /// The addon adds brushes and sets the operation of the selected brushes.
-/// A new brush from a hotkey or a toolbar button uses the model of the chosen preset.
+/// A new brush from a hotkey or a toolbar button uses the chosen preset: a procedural type or a model.
 /// It does nothing and hides its toolbar if the type "CsgRoot" is not registered.
 ///
 /// A Model dropped in the viewport has two CSG cases. Other cases go to the stock handlers.
@@ -84,6 +86,8 @@ private:
     bool IsSelectionDebugGeometryEnabled() const;
     /// Render the toolbar combo of the brush presets.
     void RenderPresetCombo();
+    /// Return the chosen preset. A hidden preset gives the first preset that the editor can use.
+    const CsgBrushPreset& GetActivePreset() const;
     /// Render the operand list of the root in the corner of the view.
     void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
