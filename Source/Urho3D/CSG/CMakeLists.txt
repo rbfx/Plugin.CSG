@@ -36,6 +36,8 @@ set (SOURCE_FILES
     CsgWedgeBrush.h
     CsgStairsBrush.cpp
     CsgStairsBrush.h
+    CsgArchBrush.cpp
+    CsgArchBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h

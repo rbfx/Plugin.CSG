@@ -12,6 +12,7 @@
 #include "Urho3D/CSG/CsgShapeProtocol.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
+#include "Urho3D/CSG/CsgArchBrush.h"
 #include "Urho3D/CSG/CsgStairsBrush.h"
 #include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
@@ -1173,4 +1174,156 @@ TEST_CASE("Stairs recenter keeps the world positions", "[shapes][handles][recent
     HandleFixture<CsgStairsBrush> f;
     CheckCenterRecenter(f);
     CHECK(f.brush->GetSteps() == 5);
+}
+
+TEST_CASE("The arch brush has 5 handles on the shape", "[shapes][handles]")
+{
+    for (const float arc : {180.0f, 120.0f, 1.0f})
+    {
+        for (const float thickness : {0.25f, 1.0f})
+        {
+            INFO("Arc " << arc << " thickness " << thickness);
+            HandleFixture<CsgArchBrush> f;
+            CsgArchParams params;
+            params.arc_ = arc;
+            params.thickness_ = thickness;
+            params.center_ = Vector3(0.5f, -1.0f, 2.0f);
+            f.brush->SetParams(params);
+            const auto handles = f.Handles();
+            REQUIRE(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3, 4});
+            const float inner = thickness == 1.0f ? 0.0f : 0.75f;
+            CHECK(IsNear(handles[1].position_, Vector3(0.5f, 0.0f, 2.0f)));
+            CHECK(IsNear(handles[2].position_, Vector3(0.5f, -1.0f + inner, 2.0f)));
+            CHECK(handles[2].axis_ == Vector3::DOWN);
+            CHECK(IsNear(handles[3].position_, Vector3(0.5f, -1.0f + (1.0f + inner) * 0.5f, 2.5f)));
+            CHECK(handles[3].axis_ == Vector3::FORWARD);
+            const float a1 = (90.0f + arc * 0.5f) * 3.14159265f / 180.0f;
+            CHECK(IsNear(handles[4].position_, Vector3(0.5f + std::cos(a1), -1.0f + std::sin(a1), 2.0f)));
+            CHECK(IsNear(handles[4].axis_, Vector3(-std::sin(a1), std::cos(a1), 0.0f)));
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateArch(f.brush->GetParams(), mesh));
+            for (const CsgShapeHandle& handle : handles)
+            {
+                INFO("Handle " << handle.id_);
+                CHECK(handle.kind_ == CsgShapeHandleKind::Axis);
+                CHECK(handle.axis_.Length() == Catch::Approx(1.0f));
+                // The default 16 segments are even, so the top handles are on the mesh too.
+                CHECK(IsPointOnMesh(mesh, handle.position_));
+            }
+            CHECK(f.errors.GetCount() == 0);
+        }
+    }
+}
+
+TEST_CASE("Arch handle moves", "[shapes][handles]")
+{
+    HandleFixture<CsgArchBrush> f;
+    Node* node = f.brush->GetNode();
+    node->SetRotation(Quaternion(10.0f, 20.0f, 30.0f));
+    node->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+    CsgArchParams start;
+    start.arc_ = 120.0f;
+    start.center_ = Vector3(0.0f, 0.5f, 0.25f);
+    f.brush->SetParams(start);
+    const auto startHandles = f.Handles();
+
+    REQUIRE(f.brush->MoveHandles({0}, Vector3(0.2f, 4.0f, 4.0f)));
+    CHECK(f.brush->GetRadius().x_ == Catch::Approx(1.2f));
+    CHECK(f.brush->GetRadius().y_ == 1.0f);
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({1}, Vector3(4.0f, 0.3f, 4.0f)));
+    CHECK(f.brush->GetRadius().y_ == Catch::Approx(1.3f));
+    CHECK(IsNear(f.Handles()[1].position_, startHandles[1].position_ + Vector3(0.0f, 0.3f, 0.0f)));
+
+    // The thickness grows when the handle moves into the hole (down).
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({2}, Vector3(0.0f, -0.1f, 0.0f)));
+    CHECK(f.brush->GetThickness() == Catch::Approx(0.35f));
+    CHECK(IsNear(f.Handles()[2].position_, startHandles[2].position_ + Vector3(0.0f, -0.1f, 0.0f)));
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({2}, Vector3(0.0f, -100.0f, 0.0f)));
+    CHECK(f.brush->GetThickness() == 1.0f);
+    CHECK(CsgGetArchInnerRadius(f.brush->GetParams()) == Vector2::ZERO);
+    CHECK(f.brush->IsShapeValid());
+
+    // The depth handle keeps the back face fixed in the world.
+    f.brush->SetParams(start);
+    const Vector3 backBefore = node->LocalToWorld(Vector3(0.0f, 0.0f, start.center_.z_ - start.depth_ * 0.5f));
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(0.0f, 0.0f, 0.5f)));
+    CHECK(f.brush->GetDepth() == Catch::Approx(1.5f));
+    CHECK(f.brush->GetCenter().z_ == Catch::Approx(0.5f));
+    const CsgArchParams& moved = f.brush->GetParams();
+    CHECK(IsNear(node->LocalToWorld(Vector3(0.0f, 0.0f, moved.center_.z_ - moved.depth_ * 0.5f)), backBefore));
+    CHECK(IsNear(f.Handles()[3].position_, startHandles[3].position_ + Vector3(0.0f, 0.0f, 0.5f)));
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(0.0f, 0.0f, -100.0f)));
+    CHECK(f.brush->GetDepth() == CsgArchParams::MinDepth);
+    CHECK(IsNear(node->LocalToWorld(Vector3(0.0f, 0.0f, f.brush->GetCenter().z_ - f.brush->GetDepth() * 0.5f)),
+        backBefore, 1e-4f));
+
+    // The arc end: a move of radius * 10 degrees in radians along the tangent moves each end by 10 degrees.
+    f.brush->SetParams(start);
+    const float step = 10.0f * 3.14159265f / 180.0f;
+    REQUIRE(f.brush->MoveHandles({4}, startHandles[4].axis_ * step));
+    CHECK(f.brush->GetArc() == Catch::Approx(140.0f).margin(1e-3));
+    const float a1 = 160.0f * 3.14159265f / 180.0f;
+    CHECK(IsNear(f.Handles()[4].position_, start.center_ + Vector3(std::cos(a1), std::sin(a1), 0.0f), 1e-5f));
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({4}, startHandles[4].axis_ * 100.0f));
+    CHECK(f.brush->GetArc() == CsgArchParams::MaxArc);
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({4}, startHandles[4].axis_ * -100.0f));
+    CHECK(f.brush->GetArc() == CsgArchParams::MinArc);
+
+    // Stateless: the same delta after a restore gives the same parameters.
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({0, 4, 0}, Vector3(0.1f, 0.1f, 0.0f)));
+    const CsgArchParams once = f.brush->GetParams();
+    f.brush->SetParams(start);
+    REQUIRE(f.brush->MoveHandles({0, 4}, Vector3(0.1f, 0.1f, 0.0f)));
+    CHECK(f.brush->GetParams().radius_ == once.radius_);
+    CHECK(f.brush->GetParams().arc_ == once.arc_);
+
+    // Moves that are not valid or give no change return false and keep the parameters.
+    f.brush->SetParams(start);
+    CHECK_FALSE(f.brush->MoveHandles({5}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(INFINITY, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({3}, Vector3(1.0f, 1.0f, 0.0f)));
+    CHECK(f.brush->GetArc() == 120.0f);
+    CHECK(f.brush->GetDepth() == 1.0f);
+    CHECK(SendMove(f.brush, {1}, Vector3(0.0f, 0.5f, 0.0f)));
+    CHECK(f.brush->GetRadius().y_ == Catch::Approx(1.5f));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Arch recenter keeps the world positions", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgArchBrush> f;
+    Node* node = f.brush->GetNode();
+    node->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+    node->SetRotation(Quaternion(30.0f, 50.0f, 70.0f));
+    node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    REQUIRE(f.brush->MoveHandles({3}, Vector3(0.0f, 0.0f, 1.0f)));
+    CsgArchParams params = f.brush->GetParams();
+    params.center_ += Vector3(0.25f, -0.5f, 0.0f);
+    f.brush->SetParams(params);
+    const Vector3 expected(0.25f, -0.5f, 0.5f);
+    REQUIRE(IsNear(f.brush->GetCenter(), expected));
+    ea::vector<Vector3> worldBefore;
+    for (const CsgShapeHandle& handle : f.Handles())
+        worldBefore.push_back(node->LocalToWorld(handle.position_));
+
+    bool accepted = false;
+    const Vector3 offset = SendRecenter(f.brush, accepted);
+    REQUIRE(accepted);
+    CHECK(IsNear(offset, expected));
+    CHECK(f.brush->GetCenter() == Vector3::ZERO);
+    node->SetPosition(node->GetTransform() * offset);
+    const auto after = f.Handles();
+    for (unsigned i = 0; i < after.size(); ++i)
+        CHECK(IsNear(node->LocalToWorld(after[i].position_), worldBefore[i], 1e-4f));
+    SendRecenter(f.brush, accepted);
+    CHECK_FALSE(accepted);
+    CHECK_FALSE(RecenterShapePivot(f.brush));
+    CHECK(f.errors.GetCount() == 0);
 }

@@ -17,6 +17,7 @@
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
+#include "Urho3D/CSG/CsgArchBrush.h"
 #include "Urho3D/CSG/CsgStairsBrush.h"
 #include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "TestGeneratedBrush.h"
@@ -6302,6 +6303,213 @@ TEST_CASE("CsgStairsBrush generates the model fast", "[root][procedural]")
     fine.steps_ = 64;
     const double fineMs = MeasureShapeBuild(context, fine, generate);
     WARN("Stairs generation and model build: default " << defaultMs << " ms, 64 steps " << fineMs << " ms");
+    CHECK(defaultMs < 15.0 * ShapeSlowFactor);
+    CHECK(fineMs < 150.0 * ShapeSlowFactor);
+}
+
+TEST_CASE("CsgArchBrush is an operand with the polygon volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    const double pi = 3.14159265358979323846;
+
+    SECTION("An arch alone gives the area of the annular polygon times the depth")
+    {
+        // A circular arch with the inner radius 0.75: each of the 16 segments is (R^2 - r^2) / 2 sin(pi / 16).
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgArchParams params;
+        params.center_ = Vector3(0.5f, 0.25f, -1.0f);
+        CsgArchBrush* brush = AddProceduralShape<CsgArchBrush>(root, "Arch", params, CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        const double expected = 16.0 * 0.5 * (1.0 - 0.75 * 0.75) * std::sin(pi / 16.0);
+        // The fold snaps the positions to its integer grid, so the volume is near the polygon volume.
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(expected).epsilon(3e-3));
+    }
+
+    SECTION("A door cut through a wall with coplanar faces is closed and valid")
+    {
+        // The wall is from y 0 to 3 and z -0.25 to 0.25. The door body is a box from y 0 to 1 and x -0.8 to 0.8.
+        // Its top is in the plane of the ends of the filled half ellipse arch above it (radius 0.8 x 1).
+        // Its bottom is in the plane of the wall bottom. The volume is the wall minus the box minus the
+        // polygon of the arch (16 fan triangles of 0.8 / 2 sin(pi / 16)) times the wall depth.
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Door");
+        AddProceduralBox(root, "Wall", Vector3(0.0f, 1.5f, 0.0f), Vector3(4.0f, 3.0f, 0.5f), CsgOperation::Union);
+        AddProceduralBox(root, "Body", Vector3(0.0f, 0.5f, 0.0f), Vector3(1.6f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        CsgArchParams params;
+        params.radius_ = Vector2(0.8f, 1.0f);
+        params.thickness_ = 1.0f;
+        params.center_ = Vector3(0.0f, 1.0f, 0.0f);
+        AddProceduralShape<CsgArchBrush>(root, "Arch", params, CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().closed_);
+        const double archArea = 16.0 * 0.5 * 0.8 * 1.0 * std::sin(pi / 16.0);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(6.0 - 0.8 - archArea * 0.5).epsilon(3e-4));
+    }
+
+    SECTION("An arch cut through a box gives the same output as a model brush")
+    {
+        CsgArchParams params;
+        params.radius_ = Vector2(0.8f, 0.9f);
+        params.thickness_ = 0.3f;
+        params.depth_ = 3.0f;
+        params.segments_ = 128;
+        params.center_ = Vector3(0.0f, -0.3f, 0.0f);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateArch(params, mesh));
+        CheckCutSameAsModel<CsgArchBrush>(context, scene, workQueue, "Arch", params, mesh, Vector3(0.05f, 0.0f, 0.1f));
+    }
+
+    SECTION("An arch of 1 degree with 3 segments cuts a box")
+    {
+        CsgArchParams params;
+        params.arc_ = 1.0f;
+        params.segments_ = 3;
+        params.radius_ = Vector2(1.5f, 1.5f);
+        params.depth_ = 3.0f;
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateArch(params, mesh));
+        CheckCutSameAsModel<CsgArchBrush>(context, scene, workQueue, "ArchThin", params, mesh, Vector3(0.1f, 0.0f, 0.0f));
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgArchBrush* brush = AddProceduralShape<CsgArchBrush>(root, "Arch", CsgArchParams{}, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgArchBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgArchBrush* third =
+        AddProceduralShape<CsgArchBrush>(root, "Third", CsgArchParams{}, CsgOperation::Union, Vector3(1.2f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    double volume = root->GetLastBuildStats().volume_;
+
+    Component* component = third;
+    CHECK(component->SetAttribute("Thickness", 0.5f));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetThickness() == 0.5f);
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.01);
+    volume = root->GetLastBuildStats().volume_;
+
+    CHECK(component->SetAttribute("Arc", 90.0f));
+    CHECK(component->SetAttribute("Segments", 5));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetArc() == 90.0f);
+    CHECK(third->GetSegments() == 5);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().volume_ < volume);
+
+    CHECK(component->SetAttribute("Radius", Vector2(1.5f, 0.5f)));
+    CHECK(component->SetAttribute("Depth", 0.5f));
+    CHECK(component->SetAttribute("Center", Vector3(0.0f, 0.2f, 0.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetRadius() == Vector2(1.5f, 0.5f));
+    CHECK(third->GetDepth() == 0.5f);
+    CHECK(third->GetCenter() == Vector3(0.0f, 0.2f, 0.0f));
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Radius", Vector2(-1.0f, 1e9f)));
+    CHECK(component->SetAttribute("Thickness", 1e9f));
+    CHECK(component->SetAttribute("Depth", -1.0f));
+    CHECK(component->SetAttribute("Arc", 1000.0f));
+    CHECK(component->SetAttribute("Segments", 0));
+    component->ApplyAttributes();
+    CHECK(third->GetRadius() == Vector2(CsgArchParams::MinRadius, CsgArchParams::MaxRadius));
+    CHECK(third->GetThickness() == CsgArchParams::MaxRadius);
+    CHECK(third->GetDepth() == CsgArchParams::MinDepth);
+    CHECK(third->GetArc() == 180.0f);
+    CHECK(third->GetSegments() == 3);
+    CHECK(component->GetAttribute("Segments").GetInt() == 3);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgArchBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgArchParams params;
+    params.radius_ = Vector2(0.9f, 0.7f);
+    params.thickness_ = 0.2f;
+    params.depth_ = 3.0f;
+    params.arc_ = 150.0f;
+    params.segments_ = 11;
+    params.center_ = Vector3(0.1f, -0.2f, 0.0f);
+    AddProceduralShape<CsgArchBrush>(root, "Arch", params, CsgOperation::DifferenceAB, Vector3(0.0f, 0.1f, 0.0f));
+    CheckSaveLoadRoundTrip<CsgArchBrush>(scene, root, workQueue, "Arch");
+    CHECK(root->GetLastBuildStats().volume_ < 8.0);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgArchBrush has five material slots and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    const ea::vector<ea::string> names = AddSlotMaterials(context, 5);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // Slot 1: the inner curved face. Its normals point toward the center and lie in the XY plane.
+    CheckSlotMaterials<CsgArchBrush>(scene, workQueue, CsgArchParams{}, names, 1,
+        [&](const Vector3& normal, const Vector3& centroid)
+        {
+            const Vector3 radial(centroid.x_, centroid.y_, 0.0f);
+            return Abs(normal.z_) < 0.5f && centroid.y_ > 0.01f && normal.DotProduct(radial) < 0.0f;
+        });
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgArchBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto generate = [](const CsgArchParams& p, CsgShapeMesh& mesh) { return CsgGenerateArch(p, mesh); };
+    const double defaultMs = MeasureShapeBuild(context, CsgArchParams{}, generate);
+    CsgArchParams fine;
+    fine.segments_ = 128;
+    const double fineMs = MeasureShapeBuild(context, fine, generate);
+    WARN("Arch generation and model build: default " << defaultMs << " ms, 128 segments " << fineMs << " ms");
     CHECK(defaultMs < 15.0 * ShapeSlowFactor);
     CHECK(fineMs < 150.0 * ShapeSlowFactor);
 }

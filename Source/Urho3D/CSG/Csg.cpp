@@ -10,6 +10,7 @@
 #include "Urho3D/CSG/CsgComponent.h"
 #include "Urho3D/CSG/CsgCylinderBrush.h"
 #include "Urho3D/CSG/CsgRingBrush.h"
+#include "Urho3D/CSG/CsgArchBrush.h"
 #include "Urho3D/CSG/CsgStairsBrush.h"
 #include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "Urho3D/CSG/CsgProceduralBrush.h"
@@ -534,6 +535,7 @@ void RegisterCsgLibrary(Context* context)
     CsgRingBrush::RegisterObject(context);
     CsgWedgeBrush::RegisterObject(context);
     CsgStairsBrush::RegisterObject(context);
+    CsgArchBrush::RegisterObject(context);
     CsgRoot::RegisterObject(context);
 }
 
@@ -548,6 +550,7 @@ void RegisterCsgLibrary(PluginApplication& plugin)
     plugin.RegisterObject<CsgRingBrush>();
     plugin.RegisterObject<CsgWedgeBrush>();
     plugin.RegisterObject<CsgStairsBrush>();
+    plugin.RegisterObject<CsgArchBrush>();
     plugin.RegisterObject<CsgRoot>();
 }
 
