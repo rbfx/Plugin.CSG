@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring", "Procedural wedge" and "Procedural stairs".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`, `CsgArchBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring", "Procedural wedge", "Procedural stairs" and "Procedural arch".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -122,7 +122,7 @@ A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
   `P_ACCEPTED` is false if the shape is centered (offset below 1e-6), always centered (sphere, ring) or the new parameters are not valid.
   Then the parameters stay. The handle ids do not change. The editor queries the positions again.
   In C++ the same API is `CsgProceduralBrush::Recenter`. The box center is the mean of the 8 positions `Size * Corner`.
-  The cylinder center is the midpoint of the two end centers. The wedge and stairs center is the "Center" attribute. The recenter sets it to zero.
+  The cylinder center is the midpoint of the two end centers. The wedge, stairs and arch center is the "Center" attribute. The recenter sets it to zero.
 
 The move is stateless. The brush applies the delta to its current parameters. The editor restores the attributes before each call.
 The brush clamps the result with the sanitizer of the shape. It refuses a result that is not valid.
@@ -147,6 +147,11 @@ The ids are a file contract.
 | Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
 | Wedge | 0 to 5 | Faces (axes) in the order -X, +X, -Z (front edge), +Z (back), +Y (top edge), -Y (bottom). The size on the axis grows by the move and "Center" moves by half of it, so the opposite face stays. |
 | Stairs | 0 to 5 | Faces (axes) in the order -X (side center), +X (side center), -Z (first riser), +Z (back), +Y (top tread), -Y (bottom). The move is as for the wedge. There is no handle for "Steps". |
+| Arch | 0 | Outer X radius at the start end of the outer curve (axis +X). The radius grows by the move. |
+| Arch | 1 | Outer Y radius at the top of the outer curve (axis +Y). |
+| Arch | 2 | Thickness at the top of the inner curve (axis -Y, into the hole). A move into the hole makes the wall thicker. |
+| Arch | 3 | Depth at the front (axis +Z). The depth grows by the move and "Center" moves by half of it, so the back stays. |
+| Arch | 4 | Arc end (axis is the tangent at the end angle). The arc grows by 2 d / s radians, with s the length of the tangent (-r.x sin a, r.y cos a). Both ends move, so the handle follows the cursor. |
 
 ### Pick event (provenance)
 
@@ -181,7 +186,7 @@ Each `CsgBrush` has three UV attributes. They come after "Materials" in the insp
 - "UV Scale": the texture repeats for each unit. The default is 1.
 - "UV Offset": a `Vector2` that is added after the scale. The default is (0, 0).
 
-Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) uses `Root`.
+Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`, `CsgArchBrush`) uses `Root`.
 
 `Root` mode rules:
 
@@ -235,6 +240,7 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 - `Ring`: a procedural `CsgRingBrush`. It has no model file.
 - `Wedge`: a procedural `CsgWedgeBrush`. It has no model file.
 - `Stairs`: a procedural `CsgStairsBrush`. It has no model file.
+- `Arch`: a procedural `CsgArchBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -328,6 +334,23 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - Validity: the volume must be positive and no triangle can have two equal positions. Very small steps far from the origin merge their float positions. Then the shape is not valid, gives no operand and logs one warning.
 - A value that is not finite gets its default value.
 
+### Procedural arch
+
+`CsgArchBrush` generates an arch from parameters: an elliptic annular sector in the XY plane, extruded along Z. It has no "Model" attribute. See `CsgGenerateArch`.
+
+- "Radius": the outer radius along X and along Y. Each component is in [0.01, 16384]. The default is (1, 1).
+- "Thickness": the wall thickness, in [0.005, max(Radius.x, Radius.y)]. The default is 0.25. The inner radius is Radius - Thickness per axis. If a component of the inner radius is below 0.001, the arch is a filled sector: the front and the back are fans from the center.
+- "Depth": the extrusion along Z, in [0.001, 16384]. The default is 1. The arch is from z = -Depth / 2 to Depth / 2 around "Center".
+- "Arc": 1 to 180 degrees. The default is 180. The arch is symmetric about +Y: the angles go from 90 - Arc / 2 to 90 + Arc / 2, measured from +X. A point on the outer curve is (Radius.x cos t, Radius.y sin t).
+- "Segments": 3 to 128. The default is 16.
+- "Center": the center of the curves in the local space of the brush. Each component is in [-16384, 16384]. The default is (0, 0, 0). An arc of 180 degrees stands on the plane y = Center.y, as a door top.
+- "Materials": five slots, in this order: 0 the outer curved face, 1 the inner curved face, 2 the front (+Z), 3 the back (-Z), 4 the two ends. A filled sector has no inner face. Its slot stays free. The order is a file contract.
+- The curved faces have smooth normals (the analytic normal of the ellipse). The other faces are flat. UV 0 of a curved face is (arc length along the curve, -z). UV 0 of a flat face is a planar projection in local units, relative to "Center". UV 1 is equal to UV 0.
+- Each front and back quad between the inner and the outer curve is two triangles. The generator uses the first diagonal that gives two triangles with a positive area.
+- Handles: see the table in "Shape handles (protocol)". The top handles are on the mesh if "Segments" is even. Otherwise they are on the ellipse, a little outside the mesh.
+- Validity: the volume must be positive, no triangle can have two equal positions and each front quad needs a good diagonal. A very small arch far from the origin is not valid. Then it gives no operand and logs one warning.
+- A value that is not finite gets its default value.
+
 ### Operation colors and operand overlay
 
 - The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
@@ -381,7 +404,7 @@ The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the te
 
 ### Shape handles
 
-The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) in the view. A brush with a model has no handles.
+The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`, `CsgArchBrush`) in the view. A brush with a model has no handles.
 
 - Select exactly one node with a procedural brush. The handles show on the brush. With two or more selected nodes, no handles show.
 - A point handle is a square. It moves freely. An axis handle is a circle with a short line. It moves only along its axis.
@@ -419,6 +442,7 @@ The handles of each shape:
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
 | Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. |
 | Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. |
+| Arch | The X and Y radius, the thickness, the depth and the arc end (axes). |
 
 ### Manual check list
 
@@ -497,6 +521,10 @@ The editor has no test harness for addons. Do these checks by hand:
 71. Select "Stairs" in the preset combo. Push B. A `CsgStairsBrush` appears as a wireframe with 5 steps and the root rebuilds. The overlay line shows "CsgStairsBrush".
 72. Set "Steps" to 1, then to 64. The wireframe follows at once. Set a material in slot 0. Only the treads get it.
 73. Drag the +Z handle of the stairs. The treads get deeper and the front riser stays. Subtract the stairs from a box. The stair-shaped cut stays closed.
+74. Select "Arch" in the preset combo. Push B. A `CsgArchBrush` appears as a wireframe half ring and the root rebuilds. The overlay line shows "CsgArchBrush".
+75. Drag the thickness handle down into the hole. The wall gets thicker. At the full radius the arch is a filled half ellipse and the inner face goes.
+76. Drag the arc end handle. Both ends of the arch move and the handle stays under the cursor. The arc stops at 1 and at 180 degrees.
+77. Put a box wall in a root. Subtract an arch with "Thickness" equal to the radius and a box under it. The door cut stays closed. Set a material in slot 1. Only the inner face gets it.
 
 ## How to try the sample scene
 
