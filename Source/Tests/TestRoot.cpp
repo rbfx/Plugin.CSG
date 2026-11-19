@@ -39,6 +39,11 @@
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/IO/VectorBuffer.h>
 #include <Urho3D/IO/VirtualFileSystem.h>
+#ifdef URHO3D_PHYSICS
+    #include <Urho3D/Physics/CollisionShape.h>
+    #include <Urho3D/Physics/PhysicsWorld.h>
+    #include <Urho3D/Physics/RigidBody.h>
+#endif
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Resource/ResourceEvents.h>
 #include <Urho3D/Scene/Node.h>
@@ -6670,3 +6675,202 @@ TEST_CASE("CsgArchBrush generates the model fast", "[root][procedural]")
     CHECK(defaultMs < 15.0 * ShapeSlowFactor);
     CHECK(fineMs < 150.0 * ShapeSlowFactor);
 }
+
+TEST_CASE("CsgRoot keeps the collision attributes in a round trip", "[root][collision]")
+{
+    auto context = MakeCsgTestContext();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CHECK(!root->GetGenerateCollision());
+    CHECK(root->GetCollisionStaticBody());
+    CHECK(root->GetAttribute("Generate Collision") == Variant(false));
+    CHECK(root->GetAttribute("Collision Static Body") == Variant(true));
+
+    root->SetGenerateCollision(true);
+    root->SetCollisionStaticBody(false);
+    VectorBuffer buffer;
+    REQUIRE(root->GetNode()->Save(buffer));
+
+    auto loadedScene = MakeShared<Scene>(context);
+    Node* loadedNode = loadedScene->CreateChild("Loaded");
+    buffer.Seek(0);
+    REQUIRE(loadedNode->Load(buffer));
+    auto* loaded = loadedNode->GetComponent<CsgRoot>();
+    REQUIRE(loaded);
+    CHECK(loaded->GetGenerateCollision());
+    CHECK(!loaded->GetCollisionStaticBody());
+
+    // This context has no physics library. The root logs a warning and makes no components.
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    RunFrames(loaded, workQueue, 30);
+    REQUIRE(loaded->GetResultNode());
+    CHECK(!loaded->GetResultCollisionShape());
+    CHECK(!loaded->GetResultRigidBody());
+    CHECK(loaded->GetResultNode()->GetNumComponents() == 1);
+}
+
+#ifdef URHO3D_PHYSICS
+namespace
+{
+
+/// Create the CSG test context with the physics library.
+SharedPtr<Context> MakeCsgPhysicsTestContext()
+{
+    SharedPtr<Context> context = MakeCsgTestContext();
+    RegisterPhysicsLibrary(context);
+    return context;
+}
+
+/// Count the components of the given type on the node.
+unsigned CountComponents(const Node* node, StringHash type)
+{
+    unsigned count = 0;
+    for (const SharedPtr<Component>& component : node->GetComponents())
+        count += component->GetType() == type ? 1 : 0;
+    return count;
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot puts a triangle mesh of the applied model on the result node", "[root][collision]")
+{
+    auto context = MakeCsgPhysicsTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    Node* resultNode = root->GetResultNode();
+    REQUIRE(resultNode);
+    // The attribute is off: no collision components.
+    CHECK(!root->GetResultCollisionShape());
+    CHECK(CountComponents(resultNode, CollisionShape::GetTypeStatic()) == 0);
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 0);
+
+    root->SetGenerateCollision(true);
+    auto* shape = dynamic_cast<CollisionShape*>(root->GetResultCollisionShape());
+    REQUIRE(shape);
+    CHECK(shape->GetNode() == resultNode);
+    CHECK(shape->IsTemporary());
+    CHECK(shape->GetShapeType() == SHAPE_TRIANGLEMESH);
+    CHECK(shape->GetModel() == GetOutput(root)->GetModel());
+    CHECK(shape->GetCollisionShape() != nullptr);
+    auto* body = dynamic_cast<RigidBody*>(root->GetResultRigidBody());
+    REQUIRE(body);
+    CHECK(body->GetNode() == resultNode);
+    CHECK(body->IsTemporary());
+    CHECK(body->GetMass() == 0.0f);
+
+    // A brush change gives a new model. The same shape and the same body follow it.
+    const unsigned oldIndices = CountIndices(shape->GetModel());
+    const SharedPtr<Model> oldModel{shape->GetModel()};
+    brush->GetNode()->SetPosition(Vector3(3.0f, 0.0f, 0.0f));
+    brush->SetOperation(CsgOperation::Union);
+    BuildFully(root, workQueue);
+    CHECK(root->GetResultCollisionShape() == shape);
+    CHECK(root->GetResultRigidBody() == body);
+    CHECK(shape->GetModel() == GetOutput(root)->GetModel());
+    CHECK(shape->GetModel() != oldModel.Get());
+    // The corner cut and the two separate boxes both have 72 indices. The bounds show the change.
+    CHECK(CountIndices(shape->GetModel()) == oldIndices);
+    CHECK(shape->GetModel()->GetBoundingBox().max_.x_ > 3.5f);
+    CHECK(oldModel->GetBoundingBox().max_.x_ < 1.5f);
+    CHECK(shape->GetCollisionShape() != nullptr);
+    CHECK(CountComponents(resultNode, CollisionShape::GetTypeStatic()) == 1);
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 1);
+
+    // The root node does not save the temporary components.
+    VectorBuffer buffer;
+    REQUIRE(root->GetNode()->Save(buffer));
+    const ea::string_view data(reinterpret_cast<const char*>(buffer.GetData()), buffer.GetSize());
+    CHECK(data.find("CollisionShape") == ea::string_view::npos);
+    CHECK(data.find("RigidBody") == ea::string_view::npos);
+    CHECK(data.find("CsgResult") == ea::string_view::npos);
+
+    // Without the static body the shape stays and the body goes.
+    root->SetCollisionStaticBody(false);
+    CHECK(root->GetResultCollisionShape() == shape);
+    CHECK(!root->GetResultRigidBody());
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 0);
+    root->SetCollisionStaticBody(true);
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 1);
+
+    // The attribute turns off: the shape and the body go.
+    root->SetGenerateCollision(false);
+    CHECK(!root->GetResultCollisionShape());
+    CHECK(!root->GetResultRigidBody());
+    CHECK(CountComponents(resultNode, CollisionShape::GetTypeStatic()) == 0);
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 0);
+}
+
+TEST_CASE("CsgRoot removes the collision for an empty result", "[root][collision]")
+{
+    auto context = MakeCsgPhysicsTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    root->SetGenerateCollision(true);
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    Node* resultNode = root->GetResultNode();
+    REQUIRE(resultNode);
+    REQUIRE(root->GetResultCollisionShape());
+
+    // The brush removes all of the base box.
+    brush->GetNode()->SetPosition(Vector3::ZERO);
+    brush->GetNode()->SetScale(2.0f);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    REQUIRE(GetOutput(root)->GetModel());
+    CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 0);
+    CHECK(!root->GetResultCollisionShape());
+    CHECK(!root->GetResultRigidBody());
+    CHECK(CountComponents(resultNode, CollisionShape::GetTypeStatic()) == 0);
+    CHECK(CountComponents(resultNode, RigidBody::GetTypeStatic()) == 0);
+
+    // A result with triangles makes the shape again.
+    brush->GetNode()->SetScale(1.0f);
+    brush->GetNode()->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+    BuildFully(root, workQueue);
+    auto* shape = dynamic_cast<CollisionShape*>(root->GetResultCollisionShape());
+    REQUIRE(shape);
+    CHECK(shape->GetModel() == GetOutput(root)->GetModel());
+    CHECK(CountComponents(resultNode, CollisionShape::GetTypeStatic()) == 1);
+}
+
+TEST_CASE("CsgRoot keeps the collision of a baked result", "[root][collision]")
+{
+    auto context = MakeCsgPhysicsTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    root->SetGenerateCollision(true);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    const Model* bakedModel = GetOutput(root)->GetModel();
+    Component* shapeBefore = root->GetResultCollisionShape();
+    REQUIRE(shapeBefore);
+
+    REQUIRE(root->Bake());
+    RunFrames(root, workQueue, 60);
+    auto* shape = dynamic_cast<CollisionShape*>(root->GetResultCollisionShape());
+    REQUIRE(shape);
+    CHECK(shape == shapeBefore);
+    CHECK(shape->GetModel() == bakedModel);
+    CHECK(root->GetResultRigidBody());
+    CHECK(CountComponents(root->GetResultNode(), CollisionShape::GetTypeStatic()) == 1);
+}
+#endif

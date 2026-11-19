@@ -19,12 +19,17 @@
 #include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/Graphics/VertexBuffer.h>
 #include <Urho3D/IO/Log.h>
+#ifdef URHO3D_PHYSICS
+    #include <Urho3D/Physics/CollisionShape.h>
+    #include <Urho3D/Physics/RigidBody.h>
+#endif
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Resource/ResourceEvents.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
 #include <Urho3D/Scene/SceneEvents.h>
 
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <memory>
@@ -241,6 +246,14 @@ void CanonicalizeSharedKeys(ea::vector<CsgPolygon>& polygons, const ea::hash_map
     }
 }
 
+/// Log one warning for the process if the root cannot make the physics components.
+void WarnNoPhysicsOnce()
+{
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+        URHO3D_LOGWARNING("CsgRoot: physics is not available, so \"Generate Collision\" has no effect");
+}
+
 /// Name of the temporary child node that holds the result.
 const char* const CSG_RESULT_NODE_NAME = "CsgResult";
 
@@ -299,6 +312,8 @@ void CsgRoot::RegisterObject(Context* context)
     URHO3D_ATTRIBUTE("Deferred Delay Sec", float, deferredDelaySec_, 0.1f, AM_DEFAULT);
     URHO3D_ATTRIBUTE("Epsilon", float, epsilon_, CSG_DEFAULT_EPSILON, AM_DEFAULT);
     URHO3D_ATTRIBUTE("Min Component Volume Fraction", float, minComponentVolumeFraction_, 0.0f, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("Generate Collision", GetGenerateCollision, SetGenerateCollision, bool, false, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("Collision Static Body", GetCollisionStaticBody, SetCollisionStaticBody, bool, true, AM_DEFAULT);
     URHO3D_COPY_BASE_ATTRIBUTES(CsgComponent);
     URHO3D_ACTION_STATIC_LABEL("Rebuild", Rebuild, "Rebuild component CSG now");
     URHO3D_ACTION_STATIC_LABEL("Add Brush", AddBrush, "Create new brush child node");
@@ -522,6 +537,8 @@ void CsgRoot::RemoveResultNode()
     const SharedPtr<Node> resultNode{resultNode_.Get()};
     resultNode_ = nullptr;
     output_ = nullptr;
+    collisionShape_ = nullptr;
+    collisionBody_ = nullptr;
     if (resultNode)
         resultNode->Remove();
 }
@@ -598,6 +615,98 @@ void CsgRoot::ApplyResultToOutput(Model* model, const ResourceRefList& materials
     output->SetModel(model);
 
     output->SetMaterialsAttr(materials);
+    UpdateResultCollision();
+}
+
+void CsgRoot::SetGenerateCollision(bool value)
+{
+    if (generateCollision_ == value)
+        return;
+    generateCollision_ = value;
+    UpdateResultCollision();
+}
+
+void CsgRoot::SetCollisionStaticBody(bool value)
+{
+    if (collisionStaticBody_ == value)
+        return;
+    collisionStaticBody_ = value;
+    UpdateResultCollision();
+}
+
+Component* CsgRoot::GetResultCollisionShape() const
+{
+    return collisionShape_;
+}
+
+Component* CsgRoot::GetResultRigidBody() const
+{
+    return collisionBody_;
+}
+
+void CsgRoot::UpdateResultCollision()
+{
+    Node* resultNode = resultNode_;
+    const StaticModel* output = output_;
+    Model* model = output ? output->GetModel() : nullptr;
+    // An empty model gives no triangle mesh. Then the root removes the components.
+    const bool wantShape = generateCollision_ && resultNode && model && model->GetNumGeometries() > 0;
+    const bool wantBody = wantShape && collisionStaticBody_;
+
+    // A component on another node comes from an old result node. The scene removed that node, or removes it soon.
+    Component* shape = collisionShape_;
+    if (shape && (!wantShape || shape->GetNode() != resultNode))
+    {
+        if (shape->GetNode() == resultNode)
+            shape->Remove();
+        collisionShape_ = nullptr;
+    }
+    Component* body = collisionBody_;
+    if (body && (!wantBody || body->GetNode() != resultNode))
+    {
+        if (body->GetNode() == resultNode)
+            body->Remove();
+        collisionBody_ = nullptr;
+    }
+    if (!wantShape)
+        return;
+
+#ifdef URHO3D_PHYSICS
+    // The engine caches the triangle mesh by the model pointer, not by the name. Each build makes a new model,
+    // so an unnamed model is correct. The shape holds the old model until it gets the new one, so no
+    // new model can have the address of a model that still has a cached mesh.
+    auto* collisionShape = static_cast<CollisionShape*>(collisionShape_.Get());
+    if (!collisionShape)
+    {
+        // The creation fails if the context did not register the physics library.
+        collisionShape = resultNode->CreateComponent<CollisionShape>();
+        if (!collisionShape)
+        {
+            WarnNoPhysicsOnce();
+            return;
+        }
+        collisionShape->SetTemporary(true);
+        collisionShape_ = collisionShape;
+    }
+    if (collisionShape->GetShapeType() != SHAPE_TRIANGLEMESH || collisionShape->GetModel() != model)
+        collisionShape->SetTriangleMesh(model);
+
+    // The result node belongs to the root. A body on it is the body that the root made.
+    if (wantBody && !collisionBody_)
+    {
+        auto* rigidBody = resultNode->CreateComponent<RigidBody>();
+        if (!rigidBody)
+        {
+            WarnNoPhysicsOnce();
+            return;
+        }
+        rigidBody->SetTemporary(true);
+        rigidBody->SetMass(0.0f);
+        collisionBody_ = rigidBody;
+    }
+#else
+    WarnNoPhysicsOnce();
+#endif
 }
 
 void CsgRoot::UpdateSubscriptions()

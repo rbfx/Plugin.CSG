@@ -129,6 +129,15 @@ struct CsgPickHit
 /// - The result node and its model follow the effective enabled state of the root.
 /// - The root removes the result node when the root leaves its node.
 /// - Only the `Model` and material slots are overwritten; unrelated `StaticModel` settings are preserved.
+///
+/// Collision:
+/// - If "Generate Collision" is on, the result node gets a temporary `CollisionShape` with a triangle mesh.
+///   The mesh is the applied result model. Each applied result updates the same shape.
+/// - If "Collision Static Body" is also on, the result node gets a temporary static `RigidBody` (mass 0).
+/// - The root removes the shape and the body when the attribute turns off or when the result is empty.
+/// - If the engine has no physics, or the context did not register it, the root makes no components.
+///   The root logs one warning.
+/// - A `CollisionShape` adds a `PhysicsWorld` to the scene if the scene has none. The scene saves that world.
 class PLUGIN_RBFXCSG_API CsgRoot : public CsgComponent
 {
     URHO3D_OBJECT(CsgRoot, CsgComponent);
@@ -161,6 +170,18 @@ public:
     /// Set whether a finished rebuild goes to the output model at once.
     /// If false, the root queues each finished result. Call ApplyPendingResult to apply the oldest one.
     void SetAutoApplyResults(bool value) { autoApplyResults_ = value; }
+    /// Get whether the result node gets a collision shape from the result model.
+    bool GetGenerateCollision() const { return generateCollision_; }
+    /// Set whether the result node gets a collision shape from the result model.
+    void SetGenerateCollision(bool value);
+    /// Get whether the result node gets a static rigid body together with the collision shape.
+    bool GetCollisionStaticBody() const { return collisionStaticBody_; }
+    /// Set whether the result node gets a static rigid body together with the collision shape.
+    void SetCollisionStaticBody(bool value);
+    /// Return the collision shape on the result node. Return null if the root has no collision shape now.
+    Component* GetResultCollisionShape() const;
+    /// Return the rigid body that the root made on the result node. Return null if the root made no body.
+    Component* GetResultRigidBody() const;
     /// Get the current rebuild revision. The revision changes when an input changes.
     unsigned GetRebuildRevision() const { return rebuildRequestId_; }
     /// Return true if a finished result waits to be applied.
@@ -295,6 +316,8 @@ private:
     void UpdateResultEnabled();
     /// Remove the result node from the node of the root.
     void RemoveResultNode();
+    /// Make, update or remove the collision components of the result node. They follow the applied model.
+    void UpdateResultCollision();
     void UpdateSubscriptions();
     void RegisterBrushInternal(CsgBrush* brush, bool requestRebuild);
     void UnregisterBrushInternal(CsgBrush* brush);
@@ -380,6 +403,12 @@ private:
     /// once, when the root makes the node, to reuse a node that already exists.
     WeakPtr<Node> resultNode_;
     WeakPtr<StaticModel> output_;
+    /// Collision shape on the result node. The type is Component, so the header does not need the physics headers.
+    WeakPtr<Component> collisionShape_;
+    /// Rigid body that the root made on the result node.
+    WeakPtr<Component> collisionBody_;
+    bool generateCollision_{};
+    bool collisionStaticBody_{true};
     WeakPtr<Node> tempNode_;
     WeakPtr<StaticModel> tempB_;
     WeakPtr<StaticModel> tempBase_;
