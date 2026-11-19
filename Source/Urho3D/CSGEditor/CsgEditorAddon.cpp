@@ -766,9 +766,12 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
             // The ID suffix keeps the label unique for nodes with the same name.
             const ea::string label = Format("{}. {}{}##{}", index, name.empty() ? "(no name)" : name.c_str(),
                 enabled ? "" : " (off)", brushNode->GetID());
-            ui::BeginDisabled(!enabled);
+            // A disabled brush has dim text. It stays selectable, so H can enable it again.
+            if (!enabled)
+                ui::PushStyleColor(ImGuiCol_Text, ui::GetStyle().Colors[ImGuiCol_TextDisabled]);
             const bool clicked = ui::Selectable(label.c_str(), brushNode == activeNode);
-            ui::EndDisabled();
+            if (!enabled)
+                ui::PopStyleColor();
             if (clicked)
             {
                 page.selection_.Clear();
