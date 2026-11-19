@@ -10,6 +10,7 @@
 #include <Editor/Core/CommonEditorActions.h>
 #include <Editor/Core/HotkeyManager.h>
 #include <Editor/Core/IniHelpers.h>
+#include <Editor/Foundation/SceneViewTab/SceneSelectionRenderer.h>
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
@@ -69,8 +70,9 @@ const auto Hotkey_AddSubtract = EditorHotkey{"Csg.AddSubtract"}.Shift().Press(KE
 const auto Hotkey_SetUnion = EditorHotkey{"Csg.SetUnion"}.Press(KEY_1);
 const auto Hotkey_SetDifference = EditorHotkey{"Csg.SetDifference"}.Press(KEY_2);
 const auto Hotkey_SetIntersection = EditorHotkey{"Csg.SetIntersection"}.Press(KEY_3);
-const auto Hotkey_MoveEarlier = EditorHotkey{"Csg.MoveEarlier"}.Press(KEY_LEFTBRACKET);
-const auto Hotkey_MoveLater = EditorHotkey{"Csg.MoveLater"}.Press(KEY_RIGHTBRACKET);
+// Some keyboard layouts need AltGr for [ and ]. On Windows, AltGr is Ctrl+Alt. The bindings accept Ctrl and Alt.
+const auto Hotkey_MoveEarlier = EditorHotkey{"Csg.MoveEarlier"}.MaybeCtrl().MaybeAlt().Press(KEY_LEFTBRACKET);
+const auto Hotkey_MoveLater = EditorHotkey{"Csg.MoveLater"}.MaybeCtrl().MaybeAlt().Press(KEY_RIGHTBRACKET);
 const auto Hotkey_ToggleBrush = EditorHotkey{"Csg.ToggleBrush"}.Press(KEY_H);
 
 const StringHash RootType("CsgRoot");
@@ -80,6 +82,27 @@ const StringHash RebuildEvent("CsgRequestRebuild");
 /// The width of the operand overlay in pixels and its distance from the view corner.
 const float OverlayWidth = 260.0f;
 const float OverlayMargin = 8.0f;
+/// The maximum height of the operand overlay as a fraction of the view height. A longer list scrolls.
+const float OverlayMaxHeightFraction = 0.4f;
+/// The maximum number of debug shapes that the addon draws in one frame. The other operands are skipped.
+const unsigned MaxDebugShapesPerFrame = 64;
+/// The editor settings key of the "Draw Debug Geometry" option of the selection renderer.
+const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeometry";
+
+/// Return true if the selection renderer draws the debug shape of the brush.
+/// It draws a selected component, and all components of a selected node and of its children.
+bool IsDrawnBySelectionRenderer(const SceneSelection& selection, Node* brushNode, Component* brush)
+{
+    if (selection.IsSelected(brush))
+        return true;
+    // The selection renderer does not draw the children of a selected scene.
+    for (Node* node = brushNode; node && node->GetParent(); node = node->GetParent())
+    {
+        if (selection.IsSelected(node))
+            return true;
+    }
+    return false;
+}
 
 /// Return the read-only build status of the root, or an empty string.
 ea::string GetBuildStatus(Node* rootNode)
@@ -716,17 +739,47 @@ void CsgEditorAddon::Render(SceneViewPage& page)
         return;
 
     // The tab creates the DebugRenderer of the scene before the addons render.
-    if (auto debug = page.scene_->GetComponent<DebugRenderer>())
+    // The selection renderer draws the selected brushes. The addon adds only the other operands.
+    auto debug = page.scene_->GetComponent<DebugRenderer>();
+    if (debug && IsSelectionDebugGeometryEnabled())
     {
-        // DrawDebugGeometry is a Component virtual. The brush uses the color of its operation.
+        unsigned numDrawn = 0;
         for (Node* brushNode : GetOperands(rootNode))
         {
-            if (Component* brush = brushNode->GetComponent(BrushType))
-                brush->DrawDebugGeometry(debug, !page.selection_.IsSelected(brushNode));
+            Component* brush = brushNode->GetComponent(BrushType);
+            if (!brush || IsDrawnBySelectionRenderer(page.selection_, brushNode, brush))
+                continue;
+            if (numDrawn++ >= MaxDebugShapesPerFrame)
+                break;
+            // DrawDebugGeometry is a Component virtual. The brush uses the color of its operation.
+            brush->DrawDebugGeometry(debug, true);
         }
     }
 
     RenderOperandOverlay(page, rootNode);
+}
+
+bool CsgEditorAddon::IsSelectionDebugGeometryEnabled() const
+{
+    // The option is private in the selection renderer. Its editor settings output gives the value.
+    auto selectionRenderer = owner_->GetAddon<SceneSelectionRenderer>();
+    if (!selectionRenderer)
+        return true;
+
+    ImGuiTextBuffer buffer;
+    selectionRenderer->WriteIniSettings(buffer);
+    const ea::string_view text{buffer.c_str(), static_cast<eastl_size_t>(buffer.size())};
+    eastl_size_t start = 0;
+    while (start < text.size())
+    {
+        eastl_size_t end = text.find('\n', start);
+        if (end == ea::string_view::npos)
+            end = text.size();
+        if (const auto value = ReadIntFromIni(text.substr(start, end - start), DrawDebugGeometryIniKey))
+            return *value != 0;
+        start = end + 1;
+    }
+    return true;
 }
 
 void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
@@ -746,8 +799,11 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
     // The overlay is in the top right corner. The debug HUD uses the top left corner.
     ui::SetCursorScreenPos(ImVec2{area.max_.x_ - OverlayWidth - OverlayMargin, area.min_.y_ + OverlayMargin});
     ui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.0f, 0.0f, 0.0f, 0.6f});
+    // The height follows the list up to the maximum. A longer list scrolls.
+    const float maxHeight = ea::max(ui::GetFrameHeight() * 3.0f, area.Size().y_ * OverlayMaxHeightFraction);
+    ui::SetNextWindowSizeConstraints(ImVec2{OverlayWidth, 0.0f}, ImVec2{OverlayWidth, maxHeight});
     const ImGuiChildFlags childFlags = ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY;
-    if (ui::BeginChild("##CsgOperands", ImVec2{OverlayWidth, 0.0f}, childFlags, ImGuiWindowFlags_NoScrollbar))
+    if (ui::BeginChild("##CsgOperands", ImVec2{OverlayWidth, 0.0f}, childFlags))
     {
         ui::TextUnformatted(Format("{} {}", ICON_FA_CUBES, rootNode->GetName()).c_str());
         ui::TextWrapped("%s", GetBuildStatus(rootNode).c_str());

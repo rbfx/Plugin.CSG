@@ -42,8 +42,16 @@ protected:
     virtual void OnMaterialsChanged() {}
 
 private:
+    /// Return the debug model of the name. The component keeps the model, so a frame does no cache lookup.
+    Model* GetCachedDebugModel(const ea::string& modelName) const;
+
     ResourceRef modelAttr_{Model::GetTypeStatic()};
     ResourceRefList materialsAttr_{Material::GetTypeStatic()};
+
+    /// The debug model cache. The model name is the key. A missing model is not looked up again for the same name.
+    mutable WeakPtr<Model> debugModel_;
+    mutable ea::string debugModelName_;
+    mutable bool debugModelMissing_{};
 };
 
 } // namespace Urho3D

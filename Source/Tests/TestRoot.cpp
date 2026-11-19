@@ -36,6 +36,7 @@
 #include <catch2/catch_amalgamated.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
 #include <cmath>
 #include <limits>
@@ -2609,6 +2610,34 @@ TEST_CASE("CsgBrush draws its debug shape with and without the depth test", "[ro
     CHECK(debug->HasContent());
 }
 
+TEST_CASE("CsgBrush looks up a missing debug model once for each model name", "[root][debug]")
+{
+    auto context = MakeCsgTestContext();
+    // The lookup of a missing file needs the file system.
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    auto* debug = scene->CreateComponent<DebugRenderer>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    auto* brush = root->GetNode()->CreateChild("Brush")->CreateComponent<CsgBrush>();
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Missing.mdl"));
+
+    // The model change logs one warning. The first draw logs one error for the lookup.
+    ErrorCounter errors(context);
+    brush->DrawDebugGeometry(debug, true);
+    const unsigned firstCount = errors.GetCount();
+    for (unsigned i = 0; i < 10; ++i)
+        brush->DrawDebugGeometry(debug, true);
+    CHECK(errors.GetCount() == firstCount);
+    CHECK(!debug->HasContent());
+
+    // A model that appears later is found after the next model change.
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+    brush->DrawDebugGeometry(debug, true);
+    CHECK(debug->HasContent());
+}
+
 namespace
 {
 
@@ -2629,6 +2658,18 @@ SharedPtr<Model> LoadCoreDataModel(Context* context, const ea::string& name)
     return model;
 }
 
+/// Return true if the preset test must find the CoreData models.
+/// The CMake option RBFX_CSG_REQUIRE_CORE_DATA or the environment variable CSG_REQUIRE_CORE_DATA sets it.
+bool IsCoreDataRequired()
+{
+#ifdef CSG_REQUIRE_CORE_DATA
+    return true;
+#else
+    const char* value = std::getenv("CSG_REQUIRE_CORE_DATA");
+    return value && *value && ea::string(value) != "0";
+#endif
+}
+
 } // namespace
 
 // The editor addon offers these models as brush presets. Each one must be a closed mesh that CSG accepts.
@@ -2646,6 +2687,9 @@ TEST_CASE("CSG accepts each CoreData brush preset model as a closed mesh", "[roo
             auto* workQueue = context->GetSubsystem<WorkQueue>();
             if (!LoadCoreDataModel(context, preset))
             {
+                // CI sets the requirement. Then a missing model is a failure and not a silent skip.
+                INFO("The model is missing in " << CSG_CORE_DATA_DIR << ": " << preset);
+                REQUIRE(!IsCoreDataRequired());
                 WARN("Test skipped. The model is missing in " << CSG_CORE_DATA_DIR << ": " << preset);
                 continue;
             }

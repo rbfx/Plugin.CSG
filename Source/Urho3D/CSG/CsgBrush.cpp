@@ -69,7 +69,7 @@ void CsgBrush::OnMaterialsChanged()
 
 void CsgBrush::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)
 {
-    // The alpha keeps the wireframe light. The editor draws a selected brush with no depth test.
+    // The alpha keeps the wireframe light.
     Color wireColor = GetOperationColor(static_cast<int>(operation_));
     wireColor.a_ = 0.4f;
     DrawDebugGeometryInternal(debug, depthTest, GetDebugModelAttr(), wireColor);

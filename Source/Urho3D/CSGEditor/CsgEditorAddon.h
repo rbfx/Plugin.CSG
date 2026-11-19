@@ -31,7 +31,8 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 /// - The active node is a brush: the drop sets the model of all selected brushes.
 ///
 /// If a root or a brush is active, the addon draws the debug shapes of all operands of the root.
-/// Each shape has the color of its operation. A selected brush draws with no depth test.
+/// Each shape has the color of its operation. The selection renderer of the editor draws the selected brushes.
+/// The addon draws the other operands, at most 64 in a frame.
 /// An overlay in the view corner lists the brushes of the root and the build status.
 /// A click on a list item selects the brush. The hotkeys `[` and `]` move the active brush in the list.
 /// The hotkey `H` toggles the selected brushes. A disabled brush is not an operand.
@@ -79,6 +80,8 @@ private:
     };
 
     bool IsAvailable() const;
+    /// Return the "Draw Debug Geometry" option of the selection renderer. The addon follows it.
+    bool IsSelectionDebugGeometryEnabled() const;
     /// Render the toolbar combo of the brush presets.
     void RenderPresetCombo();
     /// Render the operand list of the root in the corner of the view.

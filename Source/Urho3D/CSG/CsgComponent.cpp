@@ -63,12 +63,7 @@ void CsgComponent::DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTes
     if (!debug || !node_)
         return;
 
-    const ea::string& modelName = modelAttr.name_;
-    if (modelName.empty())
-        return;
-
-    auto* cache = GetSubsystem<ResourceCache>();
-    Model* model = cache->GetResource<Model>(modelName);
+    Model* model = GetCachedDebugModel(modelAttr.name_);
     if (!model)
         return;
 
@@ -97,8 +92,29 @@ void CsgComponent::DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTes
     }
 }
 
+Model* CsgComponent::GetCachedDebugModel(const ea::string& modelName) const
+{
+    if (modelName.empty())
+        return nullptr;
+
+    // A new name or a released model gives one lookup. A missing model gives no lookup until the name changes.
+    if (modelName != debugModelName_ || (!debugModel_ && !debugModelMissing_))
+    {
+        auto* cache = GetSubsystem<ResourceCache>();
+        debugModel_ = cache->GetResource<Model>(modelName);
+        debugModelName_ = modelName;
+        debugModelMissing_ = !debugModel_;
+    }
+    return debugModel_;
+}
+
 void CsgComponent::OnModelChanged()
 {
+    // A model change resets the debug model cache. A reload of a missing model can then find it.
+    debugModel_ = nullptr;
+    debugModelName_.clear();
+    debugModelMissing_ = false;
+
     unsigned numGeometries = 0;
 
     const ea::string& modelName = modelAttr_.name_;

@@ -131,15 +131,21 @@ The toolbar has the add and operation commands. The toolbar "add" buttons put th
 
 ### Brush presets
 
-The toolbar combo in front of the "add" buttons selects the model of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are the CoreData models `Box`, `Sphere`, `Cylinder`, `Cone`, `Pyramid` and `Torus`. The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. Tests.CSG builds a root with one union brush for each preset model. Each build succeeds and gives a closed and valid mesh with a positive volume.
+The toolbar combo in front of the "add" buttons selects the model of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are the CoreData models `Box`, `Sphere`, `Cylinder`, `Cone`, `Pyramid` and `Torus`. The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. Tests.CSG builds a root with one union brush for each preset model. Each build succeeds and gives a closed and valid mesh with a positive volume. If a model file is missing, the test shows a warning and skips the model. To make a missing model a failure, set the CMake option `RBFX_CSG_REQUIRE_CORE_DATA=ON` or the environment variable `CSG_REQUIRE_CORE_DATA=1`.
 
 ### Operation colors and operand overlay
 
 - The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
-- If a root or a brush is active, the addon draws the debug shapes of all operands of the root. A selected brush draws with no depth test.
+- The selection renderer of the editor draws the debug shape of a selected brush, and of all brushes of a selected root. If a brush is active, the addon adds the debug shapes of the other operands of its root. Each shape is drawn one time.
+- The addon follows the "Draw Debug Geometry" option of the tab context menu. If the option is off, the addon draws no debug shapes.
+- The addon draws at most 64 operand shapes in a frame. It skips the other operands.
+- A brush keeps its debug model. A frame does no resource lookup. A missing model is looked up again only after a model change.
 - An overlay in the top right corner of the view lists the brushes of the active root in operand order. Each line has the index, a color mark for the operation and the node name. A disabled brush shows "(off)". The build status of the root is at the top.
 - A click on a line selects the brush. The line of the active brush is highlighted.
+- The overlay height is at most 40 percent of the view height. A longer list scrolls.
 - A move with [ or ] is one undo step. The move skips the children that are not brushes. Undo and redo make the root rebuild.
+- A held [ or ] repeats. Each repeat is one move and one undo step.
+- The [ and ] bindings accept Ctrl and Alt. Some keyboard layouts need AltGr for these keys, and on Windows AltGr is Ctrl+Alt.
 - A toggle with H is one undo step. A disabled brush is not an operand. The root rebuilds.
 
 ### Workflow
@@ -187,11 +193,13 @@ The editor has no test harness for addons. Do these checks by hand:
 18. Select a root with the scale (72, 1, 82). Push B. The new brush has about the size of the box model, not 72 units.
 19. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
 20. Select "Sphere" in the preset combo. Push B. The new brush is a sphere. Restart the editor. The combo shows "Sphere".
-21. Select a brush of a root with two brushes. The overlay shows the root name, the build status and two lines. The union brush has a green mark and a green wireframe. The subtract brush has red.
+21. Select a brush of a root with two brushes. The overlay shows the root name, the build status and two lines. The union brush has a green mark and a green wireframe. The subtract brush has red. Each wireframe has one color layer, not two.
 22. Push [ on the second brush. It moves to line 0 and the build status changes. Push Ctrl+Z. The old order comes back and the root rebuilds. Push Ctrl+Y. The move comes back.
 23. Push H. The line shows "(off)" and the result loses the brush. Push Ctrl+Z. The brush comes back.
 24. Click a line of the overlay. The brush of the line is selected. The node under the overlay is not selected.
 25. Hover a CSG toolbar button. The tooltip shows the build status of the active root.
+26. Turn off "Draw Debug Geometry" in the tab context menu. No brush wireframes show.
+27. Add more brushes than the overlay can show. The overlay stops at 40 percent of the view height and scrolls.
 
 ## How to try the sample scene
 

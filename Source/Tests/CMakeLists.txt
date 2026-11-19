@@ -60,6 +60,11 @@ target_compile_definitions (${TARGET_NAME} PRIVATE CSG_DIAGNOSTICS=1)
 target_compile_definitions (${TARGET_NAME} PRIVATE CSG_SAMPLE_DATA_DIR="${RbfxCsg_SOURCE_DIR}/SampleData")
 # The preset test loads the brush preset models from the CoreData of the engine package.
 target_compile_definitions (${TARGET_NAME} PRIVATE CSG_CORE_DATA_DIR="${Urho3D_PACKAGE_ROOT}/bin/CoreData")
+# CI sets this option. Then a missing preset model fails the test. The variable CSG_REQUIRE_CORE_DATA does the same at run time.
+option (RBFX_CSG_REQUIRE_CORE_DATA "Fail the preset test if a CoreData model is missing" OFF)
+if (RBFX_CSG_REQUIRE_CORE_DATA)
+    target_compile_definitions (${TARGET_NAME} PRIVATE CSG_REQUIRE_CORE_DATA=1)
+endif ()
 target_compile_options (${TARGET_NAME} PRIVATE ${CSG_STRICT_FP_OPTIONS})
 if (CSG_EXACT_USE_DOUBLE)
     target_compile_definitions (${TARGET_NAME} PRIVATE CSG_EXACT_USE_DOUBLE=1)
