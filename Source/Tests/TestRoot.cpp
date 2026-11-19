@@ -2529,3 +2529,43 @@ TEST_CASE("CsgShowcase scene builds all roots without errors", "[root][scene]")
     }
     CHECK(errors.GetCount() == 0);
 }
+
+TEST_CASE("CsgRoot rebuilds on the CsgRequestRebuild event after a reorder", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The union adds [0, 2] on x. The difference then removes [1, 3], so the result ends at x = 1.
+    CsgRoot* root = MakeBoxRoot(scene, "Ordered");
+    AddBoxBrush(root, "Grow", Vector3(1.0f, 0.0f, 0.0f), CsgOperation::Union);
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(2.0f, 0.0f, 0.0f), CsgOperation::DifferenceAB);
+    cut->GetNode()->SetScale(Vector3(1.0f, 2.0f, 2.0f));
+    BuildFully(root, workQueue);
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.x_ == Catch::Approx(1.0f).margin(1e-3f));
+
+    SECTION("The event requests a rebuild")
+    {
+        const unsigned revision = root->GetRebuildRevision();
+        root->SendEvent(StringHash("CsgRequestRebuild"));
+        CHECK(root->GetRebuildRevision() != revision);
+    }
+
+    SECTION("The output follows the new order")
+    {
+        // ReorderChild sends no event. The root does not know about the change.
+        root->GetNode()->ReorderChild(cut->GetNode(), 0);
+        const unsigned revision = root->GetRebuildRevision();
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetRebuildRevision() == revision);
+
+        root->SendEvent(StringHash("CsgRequestRebuild"));
+        RunFrames(root, workQueue, 60);
+        CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.x_ == Catch::Approx(2.0f).margin(1e-3f));
+    }
+}

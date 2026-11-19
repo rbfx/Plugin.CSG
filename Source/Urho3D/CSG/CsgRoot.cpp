@@ -533,6 +533,7 @@ void CsgRoot::UpdateSubscriptions()
     listenedNodes_.clear();
     UnsubscribeFromEvent(E_NODEADDED);
     UnsubscribeFromEvent(E_NODEREMOVED);
+    UnsubscribeFromEvent(this, StringHash("CsgRequestRebuild"));
 
     if (!isActive)
     {
@@ -542,6 +543,8 @@ void CsgRoot::UpdateSubscriptions()
     // A reparent of a child does not call OnNodeSet. The scene events report it.
     SubscribeToEvent(scene, E_NODEADDED, URHO3D_HANDLER(CsgRoot, HandleNodeAdded));
     SubscribeToEvent(scene, E_NODEREMOVED, URHO3D_HANDLER(CsgRoot, HandleNodeRemoved));
+    // The editor sends this event after a change that no other event reports, for example a child reorder.
+    SubscribeToEvent(this, StringHash("CsgRequestRebuild"), URHO3D_HANDLER(CsgRoot, HandleRequestRebuild));
 
     PruneBrushes();
 
@@ -626,6 +629,11 @@ void CsgRoot::UpdateWatchedModels(const BuildJob* job)
         watchedModels_.push_back(WeakPtr<Model>(model));
         SubscribeToEvent(model, E_RELOADFINISHED, URHO3D_HANDLER(CsgRoot, HandleModelReloaded));
     }
+}
+
+void CsgRoot::HandleRequestRebuild(StringHash /*eventType*/, VariantMap& /*eventData*/)
+{
+    RequestRebuild();
 }
 
 void CsgRoot::HandleModelReloaded(StringHash /*eventType*/, VariantMap& /*eventData*/)

@@ -271,6 +271,7 @@ private:
     /// Listen for a reload of each model of the cache and of the build job. Stop to listen for other models.
     void UpdateWatchedModels(const BuildJob* job);
     void HandleModelReloaded(StringHash eventType, VariantMap& eventData);
+    void HandleRequestRebuild(StringHash eventType, VariantMap& eventData);
     void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
     void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
 
