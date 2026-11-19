@@ -220,11 +220,14 @@ private:
         CsgUvMode uvMode_{};
         float uvScale_{1.0f};
         Vector2 uvOffset_{Vector2::ZERO};
+        /// Node ID of the brush. The cached solids carry it as the polygon source, so a new ID invalidates them.
+        unsigned sourceId_{};
 
         bool operator==(const BrushFingerprint& rhs) const
         {
             return brush_ == rhs.brush_ && model_ == rhs.model_ && transform_ == rhs.transform_ && meshId_ == rhs.meshId_
-                && op_ == rhs.op_ && uvMode_ == rhs.uvMode_ && uvScale_ == rhs.uvScale_ && uvOffset_ == rhs.uvOffset_;
+                && op_ == rhs.op_ && uvMode_ == rhs.uvMode_ && uvScale_ == rhs.uvScale_ && uvOffset_ == rhs.uvOffset_
+                && sourceId_ == rhs.sourceId_;
         }
         bool operator!=(const BrushFingerprint& rhs) const { return !(*this == rhs); }
     };

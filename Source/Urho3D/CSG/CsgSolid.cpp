@@ -516,7 +516,7 @@ void PresnappedFaces(const ea::vector<CsgSharedPolygon>& faces, float epsilon, e
         for (unsigned i = 0; i < vertices.size(); ++i)
             vertices[i].SetPosition(idPositions[ids[start + i]]);
         // The constructor computes the plane again from the snapped positions.
-        snapped.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), face->shared_));
+        snapped.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), face->shared_, face->source_));
     }
 }
 
@@ -2318,7 +2318,7 @@ bool CsgSolid::SnappedFaces(ea::vector<CsgSharedPolygon>& faces, ea::vector<CsgG
             vertices[i].SetPosition(snap(positions[id], exact.grid_[id]));
         }
         // The constructor computes the plane again from the snapped positions.
-        faces.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), source.shared_));
+        faces.push_back(ea::make_shared<CsgPolygon>(ea::move(vertices), source.shared_, source.source_));
     }
     return true;
 }
@@ -2584,7 +2584,7 @@ ea::vector<CsgSharedPolygon> CsgSolid::WatertightFaces(ea::vector<CsgGridPoint>&
             result.push_back(faces_[face]);
             continue;
         }
-        auto polygon = ea::make_shared<CsgPolygon>(ea::move(buffer), source.shared_);
+        auto polygon = ea::make_shared<CsgPolygon>(ea::move(buffer), source.shared_, source.source_);
         polygon->plane_ = source.plane_;
         result.push_back(ea::move(polygon));
     }

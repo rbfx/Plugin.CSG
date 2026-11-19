@@ -26,9 +26,10 @@ void FlipModelVertex(ModelVertex& v)
 
 CsgPolygon::CsgPolygon() = default;
 
-CsgPolygon::CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey)
+CsgPolygon::CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey, unsigned source)
     : vertices_(ea::move(verts))
     , shared_(sharedKey)
+    , source_(source)
 {
     if (vertices_.size() >= 3)
         plane_ = Plane(vertices_[0].GetPosition(), vertices_[1].GetPosition(), vertices_[2].GetPosition());

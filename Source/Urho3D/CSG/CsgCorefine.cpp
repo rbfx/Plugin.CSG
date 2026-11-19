@@ -2577,7 +2577,7 @@ bool RegionPolygon(const Corefinement& core, const Mesh& mesh, int face, const i
         vertex.SetPosition(id < core.CrossingBase() ? PointPosition(core, id) : crossing.position_);
         vertices.push_back(vertex);
     }
-    output = CsgPolygon(ea::move(vertices), source.shared_);
+    output = CsgPolygon(ea::move(vertices), source.shared_, source.source_);
     output.plane_ = source.plane_;
     return true;
 }

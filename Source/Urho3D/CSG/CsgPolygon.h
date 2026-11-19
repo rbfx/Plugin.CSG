@@ -17,10 +17,17 @@ struct PLUGIN_RBFXCSG_API CsgPolygon
 {
     ea::vector<ModelVertex> vertices_;
     unsigned shared_{};  // Canonical representative of a compatible (sourceMeshId << 16) | sourceGeometryIndex group.
+    /// Node ID of the brush that made the polygon. 0 is the base model or an unknown source.
+    unsigned source_{};
     Plane plane_;
 
     CsgPolygon();
-    CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey);
+    CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey, unsigned source);
+    /// Make a polygon with source 0. The core code always gives the source explicitly.
+    CsgPolygon(ea::vector<ModelVertex>&& verts, unsigned sharedKey)
+        : CsgPolygon(ea::move(verts), sharedKey, 0u)
+    {
+    }
 
     CsgPolygon(CsgPolygon&&);
     CsgPolygon& operator=(CsgPolygon&&);

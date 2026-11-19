@@ -301,7 +301,7 @@ ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(const Model* model, const Matri
                 verts.push_back(v);
             }
 
-            polygons.emplace_back(ea::move(verts), PackSharedKey(meshId, i));
+            polygons.emplace_back(ea::move(verts), PackSharedKey(meshId, i), 0u);
         }
     }
 

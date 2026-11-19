@@ -602,7 +602,7 @@ void AppendOperand(const Corefinement& core, const Mesh& mesh, const CsgSegmentL
                     corners.push_back(corner);
                     o.elementIds_.push_back(cornerId);
                 }
-                auto polygon = ea::make_shared<CsgPolygon>(ea::move(corners), source.shared_);
+                auto polygon = ea::make_shared<CsgPolygon>(ea::move(corners), source.shared_, source.source_);
                 polygon->plane_ = source.plane_;
                 element.polygon_ = ea::move(polygon);
             }
@@ -1348,7 +1348,7 @@ void Emit(const Corefinement& core, const ea::vector<CsgKeptFace>& kept, const C
             vertex.SetPosition(position);
             vertices.push_back(vertex);
         }
-        auto copy = ea::make_shared<CsgPolygon>(ea::move(vertices), polygon.shared_);
+        auto copy = ea::make_shared<CsgPolygon>(ea::move(vertices), polygon.shared_, polygon.source_);
         copy->plane_ = polygon.plane_;
         faces.push_back(ea::move(copy));
         vertices = {};

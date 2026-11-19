@@ -45,6 +45,8 @@ struct CsgRoot::BrushStep
     float uvScale_{1.0f};
     Vector2 uvOffset_{Vector2::ZERO};
     WeakPtr<CsgBrush> brush_;
+    /// Node ID of the brush. Each operand polygon carries it as its source.
+    unsigned sourceId_{};
     /// Brush to root frame transform.
     Matrix3x4 transform_{Matrix3x4::IDENTITY};
 };
@@ -903,7 +905,7 @@ ea::vector<CsgPolygon> RescalePolygons(const CsgSolid& solid, const Vector3& fac
             if (vertex.HasNormal())
                 vertex.SetNormal((vertex.GetNormal() * normalFactor).NormalizedOrDefault(vertex.GetNormal()));
         }
-        result.emplace_back(ea::move(vertices), face.shared_);
+        result.emplace_back(ea::move(vertices), face.shared_, face.source_);
     }
     return result;
 }
@@ -1487,6 +1489,7 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
         step.uvMode_ = brush->GetUvMode();
         step.uvScale_ = brush->GetUvScale();
         step.uvOffset_ = brush->GetUvOffset();
+        step.sourceId_ = child->GetID();
 
         // Store source metadata for final model build on the main thread.
         sourceModels.push_back(step.model_);
@@ -1496,6 +1499,8 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
         step.transform_ = rootFrame * child->GetWorldTransform();
         step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
         CsgProjectPolygonUvs(step.polygons_, step.uvMode_, step.uvScale_, step.uvOffset_);
+        for (CsgPolygon& polygon : step.polygons_)
+            polygon.source_ = step.sourceId_;
     }
 
     return !operands.empty();
@@ -1519,7 +1524,7 @@ bool CsgRoot::TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vecto
             return false;
         }
         output.push_back({operand.brush_, operand.model_, operand.transform_, operand.meshId_, operand.op_, operand.uvMode_,
-            operand.uvScale_, operand.uvOffset_});
+            operand.uvScale_, operand.uvOffset_, operand.sourceId_});
     }
     return true;
 }
