@@ -78,7 +78,6 @@ bool IsSupportedCsgVertexElement(const VertexElement& element)
 
 ea::vector<VertexElement> GetSupportedVertexElements(const Geometry* sourceGeometry)
 {
-    assert(sourceGeometry);
     ea::vector<VertexElement> elements;
 
     if (sourceGeometry)

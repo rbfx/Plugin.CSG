@@ -3369,3 +3369,163 @@ TEST_CASE("CsgRoot shows the newest state after a stale result", "[root]")
     BuildFully(fresh, workQueue);
     CheckSameOutput(root, fresh);
 }
+
+namespace
+{
+
+/// Run frames until the counter sees one more output model or the frames end.
+void StepUntilNewOutput(CsgRoot* root, WorkQueue* workQueue, OutputCounter& counter, unsigned frames)
+{
+    const unsigned start = counter.GetCount();
+    for (unsigned i = 0; i < frames && counter.GetCount() == start; ++i)
+    {
+        StepFrame(root, workQueue);
+        counter.Update();
+    }
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot drops a stale result after a model reloads in place during a build", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    // Model::Load looks for a metadata file. The file system has no mount points, so the search finds nothing.
+    context->RegisterSubsystem<VirtualFileSystem>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    SharedPtr<Model> small = AddBoxModel(context, "Csg/Small.mdl", Vector3(0.5f, 0.5f, 0.5f));
+
+    // A model with two geometries. The second geometry is a smaller box.
+    SharedPtr<Model> single = MakeTestBoxModel(context, Vector3::ONE);
+    ModelView view(context);
+    REQUIRE(view.ImportModel(single));
+    ea::vector<GeometryView> geometries = view.GetGeometries();
+    geometries.push_back(geometries[0]);
+    view.SetGeometries(geometries);
+    SharedPtr<Model> twoGeometries = view.ExportModel();
+    twoGeometries->SetName("Csg/Two.mdl");
+    context->GetSubsystem<ResourceCache>()->AddManualResource(twoGeometries);
+    REQUIRE(twoGeometries->GetNumGeometries() == 2);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Reload");
+    Node* brushNode = root->GetNode()->CreateChild("Cut");
+    brushNode->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+    auto* brush = brushNode->CreateComponent<CsgBrush>();
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Two.mdl"));
+    brush->SetOperation(CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+
+    // The build is in flight. The model loses its second geometry.
+    root->Rebuild();
+    ReloadModel(twoGeometries, small);
+    REQUIRE(twoGeometries->GetNumGeometries() == 1);
+    RunFrames(root, workQueue, 60);
+    CHECK(!root->GetLastBuildFailed());
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    Node* freshNode = fresh->GetNode()->CreateChild("Cut");
+    freshNode->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+    auto* freshBrush = freshNode->CreateComponent<CsgBrush>();
+    freshBrush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Small.mdl"));
+    freshBrush->SetOperation(CsgOperation::DifferenceAB);
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+}
+
+TEST_CASE("CsgRoot keeps the cache and the dirty flags for a stale result", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Cache");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    OutputCounter counter(root);
+    counter.Update();
+
+    // A long wait keeps the newer rebuild pending. The job starts with the first position.
+    root->SetDeferredDelaySec(100.0f);
+    brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+    root->Rebuild();
+    const Vector3 finalPosition(1.5f, 0.5f, 0.0f);
+    brushes[2]->GetNode()->SetPosition(finalPosition);
+    // An attribute change marks the brush dirty. A transform change does not.
+    brushes[2]->SetOperation(CsgOperation::DifferenceAB);
+    StepUntilNewOutput(root, workQueue, counter, 60);
+    REQUIRE(counter.GetCount() == 2);
+
+    // The stale result shows. It leaves the dirty flag and the cache of the first build.
+    CHECK(brushes[2]->IsDirty());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(!brushes[2]->IsDirty());
+    // The cache of the first build still has the first two operands.
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[2]->GetNode()->SetPosition(finalPosition);
+    expected[2]->SetOperation(CsgOperation::DifferenceAB);
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+}
+
+TEST_CASE("CsgRoot drops a stale result in queued mode and after a failed job", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    TestBuildHookGuard guard;
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Drop");
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    OutputCounter counter(root);
+    counter.Update();
+
+    SECTION("Queued mode")
+    {
+        root->SetAutoApplyResults(false);
+        root->Rebuild();
+        brush->GetNode()->SetPosition(Vector3(1.2f, 1.0f, 1.0f));
+        RunFrames(root, workQueue, 60);
+        // Only the newest build gives a queued result.
+        REQUIRE(root->HasPendingResult());
+        CHECK(root->GetPendingResultRevision() == root->GetRebuildRevision());
+        CHECK(root->ApplyPendingResult());
+        CHECK(!root->HasPendingResult());
+    }
+
+    SECTION("Failed job")
+    {
+        CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
+        root->Rebuild();
+        brush->GetNode()->SetPosition(Vector3(1.2f, 1.0f, 1.0f));
+        for (unsigned i = 0; i < 60; ++i)
+        {
+            StepFrame(root, workQueue);
+            counter.Update();
+        }
+        // The failed stale result does not show. The newer build works.
+        CHECK(counter.GetCount() == 2);
+        CHECK(!root->GetLastBuildFailed());
+    }
+}

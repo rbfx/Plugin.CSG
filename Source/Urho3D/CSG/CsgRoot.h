@@ -82,7 +82,7 @@ struct CsgBuildStats
 ///   A change during a build starts a new wait. Setting delay to 0 triggers immediate rebuild.
 /// - One build runs at a time. A change during a build leaves the root dirty. If the build result is
 ///   older than the change, the root still shows it and starts a new wait for the newer state.
-///   The root drops a stale result of a failed build, of a root that is not active, or when auto-apply is off.
+///   The root drops a stale result of a failed build, of a job with a model that reloaded, of a root that is not active, or when auto-apply is off.
 ///
 /// Root frame and coordinates:
 /// - The build runs in the root frame. The root frame carries the world scale of the root, but not
@@ -300,6 +300,8 @@ private:
     unsigned rebuildRequestId_{1};
     unsigned rebuildInFlightId_{};
     bool rebuildInFlight_{};
+    /// A model reloaded while a job ran. The stale result of that job is dropped.
+    bool modelReloadedDuringJob_{};
     /// True while Bake removes the brush nodes. Then a rebuild request only sets the dirty flag.
     bool baking_{};
     bool autoApplyResults_{true};

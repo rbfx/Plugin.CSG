@@ -642,6 +642,9 @@ void CsgRoot::HandleRequestRebuild(StringHash /*eventType*/, VariantMap& /*event
 void CsgRoot::HandleModelReloaded(StringHash /*eventType*/, VariantMap& /*eventData*/)
 {
     // An inactive root does not start a build here. ScheduleDeferredRebuild checks the state.
+    // A model can change in place during a job. The result of that job reads the model, so it is dropped.
+    if (rebuildInFlight_)
+        modelReloadedDuringJob_ = true;
     reloadingModel_ = static_cast<Model*>(GetEventSender());
     ClearBuildCache();
     RequestRebuild();
@@ -1058,6 +1061,7 @@ void CsgRoot::Rebuild()
 
     WorkQueue* workQueue = GetSubsystem<WorkQueue>();
     rebuildInFlight_ = true;
+    modelReloadedDuringJob_ = false;
     rebuildInFlightId_ = job->buildId_;
     rebuildDirty_ = false;
 
@@ -1161,12 +1165,14 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         return;
 
     root->rebuildInFlight_ = false;
+    const bool reloaded = root->modelReloadedDuringJob_;
+    root->modelReloadedDuringJob_ = false;
 
     // A result is stale if a change came after the job started. A stale result still shows if a newer
     // rebuild is pending, because that rebuild replaces it. This gives live updates during a drag.
-    // The root drops a stale result of a failed job, of a root that is not active, or when auto-apply is off.
+    // The root drops a stale result of a failed job, of a job with a model that reloaded, of a root that is not active, or when auto-apply is off.
     const bool stale = root->rebuildRequestId_ != job->buildId_;
-    if (stale && (job->failed_ || !root->autoApplyResults_ || !root->rebuildDirty_ || !root->IsEnabledEffective() || !root->node_))
+    if (stale && (job->failed_ || reloaded || !root->autoApplyResults_ || !root->rebuildDirty_ || !root->IsEnabledEffective() || !root->node_))
     {
         root->UpdateWatchedModels(nullptr);
         if (root->rebuildDirty_)
