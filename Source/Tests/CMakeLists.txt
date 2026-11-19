@@ -41,6 +41,7 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgCylinderBrush.cpp
     ${CSG_DIR}/CsgRingBrush.cpp
     ${CSG_DIR}/CsgWedgeBrush.cpp
+    ${CSG_DIR}/CsgStairsBrush.cpp
     ${CSG_DIR}/CsgBrush.cpp
     ${CSG_DIR}/CsgComponent.cpp
     ${CSG_DIR}/CsgProceduralBrush.cpp

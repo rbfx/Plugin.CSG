@@ -17,6 +17,7 @@
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
+#include "Urho3D/CSG/CsgStairsBrush.h"
 #include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "TestGeneratedBrush.h"
 
@@ -5926,9 +5927,9 @@ void CheckSlotMaterials(Scene* scene, WorkQueue* workQueue, const P& params, con
     CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
     CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{names[0]});
 
-    // Slot 0 and the tested slot: the material of the slot reaches only the triangles of its face group.
-    ea::vector<ea::string> two(numSlots);
-    two[0] = names[0];
+    // The tested slot has its material and all other slots have one other material.
+    // The material of the slot reaches only the triangles of its face group.
+    ea::vector<ea::string> two(numSlots, names[(slot + 1) % numSlots]);
     two[slot] = names[slot];
     brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), two));
     BuildFully(root, workQueue);
@@ -6135,4 +6136,172 @@ TEST_CASE("CsgWedgeBrush generates the model fast", "[root][procedural]")
     const double defaultMs = MeasureShapeBuild(context, CsgWedgeParams{}, generate);
     WARN("Wedge generation and model build: " << defaultMs << " ms");
     CHECK(defaultMs < 15.0 * ShapeSlowFactor);
+}
+
+TEST_CASE("CsgStairsBrush is an operand with the stairs volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("Stairs alone give sx * sy * sz * (n + 1) / (2 n)")
+    {
+        for (const int steps : {1, 5, 64})
+        {
+            CsgRoot* root = MakeEmptyBaseRoot(scene, Format("Alone{}", steps));
+            CsgStairsParams params;
+            params.size_ = Vector3(2.0f, 1.0f, 1.5f);
+            params.center_ = Vector3(0.5f, 0.25f, -1.0f);
+            params.steps_ = steps;
+            CsgStairsBrush* brush = AddProceduralShape<CsgStairsBrush>(root, "Stairs", params, CsgOperation::Union);
+            CHECK(brush->IsShapeValid());
+            BuildFully(root, workQueue);
+            CHECK(!root->GetLastBuildFailed());
+            CHECK(root->GetLastBuildStats().closed_);
+            CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(3.0 * (steps + 1) / (2.0 * steps)).epsilon(1e-6));
+        }
+    }
+
+    SECTION("A stair-shaped cut from a box is closed and gives the same output as a model brush")
+    {
+        CsgStairsParams params;
+        params.size_ = Vector3(1.5f, 1.5f, 1.5f);
+        params.center_ = Vector3(0.5f, 0.5f, 0.5f);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateStairs(params, mesh));
+        CheckCutSameAsModel<CsgStairsBrush>(context, scene, workQueue, "Stairs", params, mesh, Vector3(-0.1f, 0.0f, 0.0f));
+        CsgRoot* root = scene->GetChild("StairsProcedural")->GetComponent<CsgRoot>();
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.1);
+    }
+
+    SECTION("Stairs with 64 steps cut a box")
+    {
+        CsgStairsParams params;
+        params.size_ = Vector3(3.0f, 1.5f, 3.0f);
+        params.center_ = Vector3(0.0f, 0.5f, 0.0f);
+        params.steps_ = 64;
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateStairs(params, mesh));
+        CheckCutSameAsModel<CsgStairsBrush>(context, scene, workQueue, "Stairs64", params, mesh, Vector3(0.05f, 0.0f, 0.1f));
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgStairsBrush* brush = AddProceduralShape<CsgStairsBrush>(root, "Stairs", CsgStairsParams{}, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgStairsBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgStairsBrush* third = AddProceduralShape<CsgStairsBrush>(
+        root, "Third", CsgStairsParams{}, CsgOperation::Union, Vector3(1.2f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    double volume = root->GetLastBuildStats().volume_;
+
+    Component* component = third;
+    CHECK(component->SetAttribute("Size", Vector3(1.0f, 1.0f, 2.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSize() == Vector3(1.0f, 1.0f, 2.0f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.01);
+    volume = root->GetLastBuildStats().volume_;
+
+    CHECK(component->SetAttribute("Steps", 2));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSteps() == 2);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().volume_ > volume);
+
+    CHECK(component->SetAttribute("Center", Vector3(0.5f, 0.0f, 0.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetCenter() == Vector3(0.5f, 0.0f, 0.0f));
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Steps", 1000));
+    CHECK(component->SetAttribute("Size", Vector3(-1.0f, 1e9f, 1.0f)));
+    component->ApplyAttributes();
+    CHECK(third->GetSteps() == 64);
+    CHECK(component->GetAttribute("Steps").GetInt() == 64);
+    CHECK(third->GetSize() == Vector3(CsgStairsParams::MinSize, CsgStairsParams::MaxSize, 1.0f));
+    CHECK(component->SetAttribute("Steps", -3));
+    component->ApplyAttributes();
+    CHECK(third->GetSteps() == 1);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgStairsBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgStairsParams params;
+    params.size_ = Vector3(1.5f, 0.75f, 2.5f);
+    params.center_ = Vector3(0.25f, 0.5f, -0.125f);
+    params.steps_ = 7;
+    AddProceduralShape<CsgStairsBrush>(root, "Stairs", params, CsgOperation::DifferenceAB, Vector3(0.0f, 0.1f, 0.0f));
+    CheckSaveLoadRoundTrip<CsgStairsBrush>(scene, root, workQueue, "Stairs");
+    CHECK(root->GetLastBuildStats().volume_ < 8.0);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgStairsBrush has five material slots and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    const ea::vector<ea::string> names = AddSlotMaterials(context, 5);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // Slot 0: the treads face up.
+    CheckSlotMaterials<CsgStairsBrush>(scene, workQueue, CsgStairsParams{}, names, 0,
+        [&](const Vector3& normal, const Vector3&) { return normal.Equals(Vector3::UP, 1e-3f); });
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgStairsBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto generate = [](const CsgStairsParams& p, CsgShapeMesh& mesh) { return CsgGenerateStairs(p, mesh); };
+    const double defaultMs = MeasureShapeBuild(context, CsgStairsParams{}, generate);
+    CsgStairsParams fine;
+    fine.steps_ = 64;
+    const double fineMs = MeasureShapeBuild(context, fine, generate);
+    WARN("Stairs generation and model build: default " << defaultMs << " ms, 64 steps " << fineMs << " ms");
+    CHECK(defaultMs < 15.0 * ShapeSlowFactor);
+    CHECK(fineMs < 150.0 * ShapeSlowFactor);
 }

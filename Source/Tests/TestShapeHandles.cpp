@@ -12,6 +12,7 @@
 #include "Urho3D/CSG/CsgShapeProtocol.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
+#include "Urho3D/CSG/CsgStairsBrush.h"
 #include "Urho3D/CSG/CsgWedgeBrush.h"
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 #include "TestGeneratedBrush.h"
@@ -1143,4 +1144,33 @@ TEST_CASE("Wedge recenter keeps the world positions", "[shapes][handles][recente
 {
     HandleFixture<CsgWedgeBrush> f;
     CheckCenterRecenter(f);
+}
+
+TEST_CASE("The stairs brush has 6 resize handles that keep the opposite face", "[shapes][handles]")
+{
+    for (const int steps : {1, 4, 64})
+    {
+        INFO("Steps " << steps);
+        HandleFixture<CsgStairsBrush> f;
+        CsgStairsParams params;
+        params.size_ = Vector3(2.0f, 1.0f, 3.0f);
+        params.center_ = Vector3(0.5f, -0.25f, 1.0f);
+        params.steps_ = steps;
+        f.brush->SetParams(params);
+        const auto handles = f.Handles();
+        REQUIRE(handles.size() == 6);
+        CHECK(IsNear(handles[0].position_, Vector3(-0.5f, -0.25f, 1.0f), 1e-5f));
+        CHECK(IsNear(handles[2].position_, Vector3(0.5f, -0.75f + 0.5f / steps, -0.5f), 1e-5f));
+        CHECK(IsNear(handles[4].position_, Vector3(0.5f, 0.25f, 2.5f - 1.5f / steps), 1e-5f));
+        CheckBoxResizeHandles(
+            f, [](const CsgStairsParams& p, CsgShapeMesh& mesh) { return CsgGenerateStairs(p, mesh); });
+        CHECK(f.brush->GetSteps() == steps);
+    }
+}
+
+TEST_CASE("Stairs recenter keeps the world positions", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgStairsBrush> f;
+    CheckCenterRecenter(f);
+    CHECK(f.brush->GetSteps() == 5);
 }
