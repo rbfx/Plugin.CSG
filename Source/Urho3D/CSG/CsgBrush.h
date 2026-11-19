@@ -22,7 +22,8 @@ class CsgRoot;
 /// - The boolean operation to apply against the accumulated result is controlled by `op_`.
 ///
 /// Root association:
-/// - A brush registers itself with the nearest containing `CsgRoot` (walking up parent nodes).
+/// - A brush registers itself with the `CsgRoot` of its parent node. Only a direct child of a root is an operand.
+/// - A brush on a node that has its own `CsgRoot` is not an operand.
 /// - The association is updated when the brush is moved between nodes/scenes or enabled/disabled.
 ///
 /// Dirty semantics:
@@ -60,6 +61,8 @@ protected:
     void OnMaterialsChanged() override;
 
 private:
+    friend class CsgRoot;
+
     void MarkDirty();
     CsgRoot* FindContainingRoot() const;
     void UpdateRootRegistration();

@@ -21,6 +21,7 @@
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
+#include <Urho3D/Scene/SceneEvents.h>
 
 #include <cmath>
 #include <exception>
@@ -42,7 +43,6 @@ struct CsgRoot::BrushStep
     WeakPtr<CsgBrush> brush_;
     /// Brush to root frame transform.
     Matrix3x4 transform_{Matrix3x4::IDENTITY};
-    ea::vector<BrushStep> children_;
 };
 
 struct CsgRoot::BuildJob
@@ -59,17 +59,20 @@ struct CsgRoot::BuildJob
 
     SharedPtr<Model> baseModel_;
     ResourceRefList baseMaterials_;
-    BrushStep rootStep_;
+    /// Polygons of the base operand in the root frame.
+    ea::vector<CsgPolygon> basePolygons_;
+    /// Operands in operation order.
+    ea::vector<BrushStep> operands_;
 
     ea::vector<SharedPtr<Model>> sourceModels_;
     ea::vector<ResourceRefList> sourceMaterials_;
 
     /// Solid of the earlier build. If set, the job evaluates only the new brushes on it.
     SharedPtr<const CsgSolid> cachedSolid_;
-    /// Number of root children that the cached solid already contains.
-    unsigned reusedRootChildren_{};
-    /// Fingerprints of the root children. Empty if the tree is not flat.
-    ea::vector<BrushFingerprint> flatBrushes_;
+    /// Number of operands that the cached solid already contains.
+    unsigned reusedOperands_{};
+    /// Fingerprints of the operands. Empty if a brush is dead.
+    ea::vector<BrushFingerprint> capturedBrushes_;
     /// Final solid of the job. The worker thread sets it.
     SharedPtr<const CsgSolid> resultSolid_;
     /// Statistics of the job. The worker thread fills it before it posts the main thread task.
@@ -394,53 +397,6 @@ StaticModel* CsgRoot::GetOrCreateOutputStaticModel()
     return output_;
 }
 
-void CsgRoot::CollectBrushesAndNestedRoots(
-    Node* rootNode, ea::vector<CsgBrush*>& outBrushes, ea::vector<Node*>& outNestedRootNodes) const
-{
-    outBrushes.clear();
-    outNestedRootNodes.clear();
-
-    if (!rootNode)
-        return;
-
-    ea::vector<Node*> stack;
-    stack.push_back(rootNode);
-
-    while (!stack.empty())
-    {
-        Node* node = stack.back();
-        stack.pop_back();
-
-        if (node != rootNode)
-        {
-            if (CsgRoot* nestedRoot = node->GetComponent<CsgRoot>())
-            {
-                if (nestedRoot != this)
-                {
-                    outNestedRootNodes.push_back(node);
-                    continue;
-                }
-            }
-        }
-
-        if (CsgBrush* brush = node->GetComponent<CsgBrush>())
-        {
-            if (brush->IsEnabledEffective())
-                outBrushes.push_back(brush);
-        }
-
-        const unsigned numChildren = node->GetNumChildren();
-        // Preserve child order deterministically for stable operand ordering.
-        for (unsigned i = numChildren; i-- > 0;)
-        {
-            Node* child = node->GetChild(i);
-            // A child without a parent is in removal.
-            if (child && child->IsEnabled() && child->GetParent())
-                stack.push_back(child);
-        }
-    }
-}
-
 void CsgRoot::ApplyResultToOutput(Model* model, const ResourceRefList& materials)
 {
     StaticModel* output = GetOrCreateOutputStaticModel();
@@ -465,11 +421,17 @@ void CsgRoot::UpdateSubscriptions()
             oldNode->RemoveListener(this);
     }
     listenedNodes_.clear();
+    UnsubscribeFromEvent(E_NODEADDED);
+    UnsubscribeFromEvent(E_NODEREMOVED);
 
     if (!isActive)
     {
         return;
     }
+
+    // A reparent of a child does not call OnNodeSet. The scene events report it.
+    SubscribeToEvent(scene, E_NODEADDED, URHO3D_HANDLER(CsgRoot, HandleNodeAdded));
+    SubscribeToEvent(scene, E_NODEREMOVED, URHO3D_HANDLER(CsgRoot, HandleNodeRemoved));
 
     PruneBrushes();
 
@@ -507,6 +469,36 @@ void CsgRoot::UpdateSubscriptions()
         if (!alreadyTracked)
             listenedNodes_.push_back(WeakPtr<Node>(brushNode));
     }
+}
+
+void CsgRoot::HandleNodeAdded(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace NodeAdded;
+    if (eventData[P_PARENT].GetPtr() != node_)
+        return;
+
+    // The brush leaves its old root and registers with this root. Both roots request a rebuild.
+    auto* child = static_cast<Node*>(eventData[P_NODE].GetPtr());
+    if (CsgBrush* brush = child ? child->GetComponent<CsgBrush>() : nullptr)
+        brush->UpdateRootRegistration();
+}
+
+void CsgRoot::HandleNodeRemoved(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace NodeRemoved;
+    if (eventData[P_PARENT].GetPtr() != node_)
+        return;
+
+    // The node still has this parent during the event, so the brush cannot find its new root yet.
+    // The root releases the brush now. The new root registers it when it receives the node.
+    auto* child = static_cast<Node*>(eventData[P_NODE].GetPtr());
+    CsgBrush* brush = child ? child->GetComponent<CsgBrush>() : nullptr;
+    if (!brush)
+        return;
+
+    if (brush->root_ == this)
+        brush->root_ = nullptr;
+    UnregisterBrushInternal(brush);
 }
 
 void CsgRoot::RegisterBrushInternal(CsgBrush* brush, bool requestRebuild)
@@ -803,14 +795,9 @@ void CsgRoot::Rebuild()
     }
 
     // The base polygons are extracted only if the cached solid cannot be reused.
-    job->rootStep_.model_ = job->baseModel_;
-    job->rootStep_.materials_ = job->baseMaterials_;
-    job->rootStep_.meshId_ = 0;
-
-    // Build operation tree recursively starting from root node.
     const Matrix3x4 rootFrame = Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_) *
         node_->GetWorldTransform().Inverse();
-    if (!BuildOperationTree(job->rootStep_, node_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
+    if (!BuildOperands(job->operands_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
     {
         cachedBrushes_.clear();
         rebuildDirty_ = false;
@@ -836,17 +823,17 @@ void CsgRoot::Rebuild()
         return;
     }
 
-    // Reuse only for an append to a flat tree. A same-length rebuild may reflect an in-place
+    // Reuse only for an append. A same-length rebuild may reflect an in-place
     // model edit even if the resource object and the brush references are the same.
-    if (TryCaptureFlatBrushes(job->rootStep_, job->flatBrushes_) && cachedSolid_ && job->baseModel_ == cachedBaseModel_
+    if (TryCaptureBrushes(job->operands_, job->capturedBrushes_) && cachedSolid_ && job->baseModel_ == cachedBaseModel_
         && job->epsilon_ == cachedEpsilon_ && job->metricScale_ == cachedMetricScale_
-        && cachedBrushes_.size() < job->flatBrushes_.size())
+        && cachedBrushes_.size() < job->capturedBrushes_.size())
     {
         bool prefixUnchanged = true;
         for (unsigned i = 0; i < cachedBrushes_.size(); ++i)
         {
-            const CsgBrush* brush = job->flatBrushes_[i].brush_;
-            if (cachedBrushes_[i] != job->flatBrushes_[i] || !brush || brush->IsDirty())
+            const CsgBrush* brush = job->capturedBrushes_[i].brush_;
+            if (cachedBrushes_[i] != job->capturedBrushes_[i] || !brush || brush->IsDirty())
             {
                 prefixUnchanged = false;
                 break;
@@ -855,7 +842,7 @@ void CsgRoot::Rebuild()
         if (prefixUnchanged)
         {
             job->cachedSolid_ = cachedSolid_;
-            job->reusedRootChildren_ = cachedBrushes_.size();
+            job->reusedOperands_ = cachedBrushes_.size();
         }
     }
     if (!job->cachedSolid_)
@@ -868,12 +855,12 @@ void CsgRoot::Rebuild()
             // The baked polygons have float positions, and FromOperand snaps them to the grid again.
             // In float mode, and in double mode below 256 units, each float is its grid point, so nothing moves.
             // Above 256 units in double mode, a vertex can move by one grid step in this round trip.
-            job->rootStep_.polygons_ = CsgInternal::RescalePolygons(*baked_->solid_, factor);
+            job->basePolygons_ = CsgInternal::RescalePolygons(*baked_->solid_, factor);
         }
         else
         {
             // The root frame has the world scale of the root but not its rotation or position.
-            job->rootStep_.polygons_ = CsgBuildPolygonsFromModel(
+            job->basePolygons_ = CsgBuildPolygonsFromModel(
                 job->baseModel_.Get(), Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_), 0);
         }
     }
@@ -882,13 +869,9 @@ void CsgRoot::Rebuild()
     // joins an older group or opens a new group, and the representative of a group is its first member.
     const ea::hash_map<unsigned, unsigned> canonicalSharedKeys =
         BuildCanonicalSharedKeyMap(job->sourceModels_, job->sourceMaterials_);
-    const auto canonicalizeStep = [&](auto&& self, BrushStep& step) -> void
-    {
-        CanonicalizeSharedKeys(step.polygons_, canonicalSharedKeys);
-        for (BrushStep& child : step.children_)
-            self(self, child);
-    };
-    canonicalizeStep(canonicalizeStep, job->rootStep_);
+    CanonicalizeSharedKeys(job->basePolygons_, canonicalSharedKeys);
+    for (BrushStep& operand : job->operands_)
+        CanonicalizeSharedKeys(operand.polygons_, canonicalSharedKeys);
 
     WorkQueue* workQueue = GetSubsystem<WorkQueue>();
     rebuildInFlight_ = true;
@@ -918,8 +901,8 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         HiresTimer timer;
         SharedPtr<const CsgSolid> solid = job->cachedSolid_;
         if (!solid)
-            solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->rootStep_.polygons_), job->epsilon_);
-        EvaluateOperationTree(job->rootStep_, solid, job->epsilon_, job->reusedRootChildren_);
+            solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->basePolygons_), job->epsilon_);
+        EvaluateOperands(job->operands_, solid, job->epsilon_, job->reusedOperands_);
         unsigned droppedComponents = 0;
         if (solid)
             solid = CsgSolid::DropSmallComponents(solid, job->minComponentVolumeFraction_, &droppedComponents);
@@ -1046,11 +1029,11 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     job->stats_.buildModelMs_ = static_cast<float>(buildModelTimer.GetUSec(false)) * 0.001f;
 
     // Acknowledge changes.
-    root->AcknowledgeBrushes(job->rootStep_);
+    root->AcknowledgeBrushes(job->operands_);
 
-    // Keep the solid as a base for an append only if the tree is flat.
+    // Keep the solid as a base for an append only if all brushes are alive.
     // An invalid result is never cached: the next rebuild starts from the brushes again.
-    root->cachedSolid_ = job->stats_.valid_ && job->flatBrushes_.size() == job->rootStep_.children_.size()
+    root->cachedSolid_ = job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size()
         ? job->resultSolid_
         : nullptr;
     root->cachedBaseModel_ = job->baseModel_;
@@ -1060,7 +1043,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     root->cachedSourceMaterials_ = job->sourceMaterials_;
     root->cachedBrushes_.clear();
     if (root->cachedSolid_)
-        root->cachedBrushes_ = job->flatBrushes_;
+        root->cachedBrushes_ = job->capturedBrushes_;
 
     if (root->autoApplyResults_)
     {
@@ -1129,15 +1112,10 @@ bool CsgRoot::Bake()
     const ea::vector<BrushFingerprint> brushes = cachedBrushes_;
     cachedBrushes_.clear();
     ea::vector<WeakPtr<Node>> brushNodes;
-    ea::vector<WeakPtr<CsgBrush>> rootBrushes;
     for (const BrushFingerprint& fingerprint : brushes)
     {
         CsgBrush* brush = fingerprint.brush_;
-        if (!brush || !brush->GetNode())
-            continue;
-        if (brush->GetNode() == node_)
-            rootBrushes.push_back(fingerprint.brush_);
-        else
+        if (brush && brush->GetNode())
             brushNodes.push_back(WeakPtr<Node>(brush->GetNode()));
     }
     // Each removal requests a rebuild. The rebuild waits until the last removal, so it never sees a node in removal.
@@ -1145,12 +1123,6 @@ bool CsgRoot::Bake()
     for (const WeakPtr<Node>& brushNode : brushNodes)
     {
         if (Node* removed = brushNode)
-            removed->Remove();
-    }
-    // A brush on the node of the root cannot remove its node. The root removes the component.
-    for (const WeakPtr<CsgBrush>& brush : rootBrushes)
-    {
-        if (CsgBrush* removed = brush)
             removed->Remove();
     }
     baking_ = false;
@@ -1218,110 +1190,91 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
     return SetupOperandStaticModel(staticModel, brush->GetModelAttr(), brush->GetMaterialsAttr());
 }
 
-bool CsgRoot::BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& rootFrame, StaticModel* tempModel,
+bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& rootFrame, StaticModel* tempModel,
     ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials)
 {
-
-    if (!node)
+    operands.clear();
+    if (!node_)
         return false;
 
-    const unsigned numChildren = node->GetNumChildren();
-    for (unsigned i = 0; i < numChildren; ++i)
+    // Only the direct children are operands. The child order is the operation order.
+    for (Node* child : node_->GetChildren())
     {
-        Node* child = node->GetChild(i);
-        if (!child || !child->IsEnabled())
-            continue;
-
         // A child without a parent is in removal.
-        if (!child->GetParent())
+        if (!child || !child->IsEnabled() || !child->GetParent())
             continue;
 
-        // Ignore nested CsgRoots (except this one).
-        if (CsgRoot* nestedRoot = child->GetComponent<CsgRoot>())
-        {
-            if (nestedRoot != this)
-                continue;
-        }
+        // A child with its own root builds on its own.
+        if (child->GetComponent<CsgRoot>())
+            continue;
 
-        if (CsgBrush* brush = child->GetComponent<CsgBrush>())
-        {
-            if (!brush->IsEnabledEffective())
-                continue;
+        CsgBrush* brush = child->GetComponent<CsgBrush>();
+        if (!brush || !brush->IsEnabledEffective())
+            continue;
 
-            // Ensure we listen to this brush even if it wasn't explicitly registered yet.
-            RegisterBrushInternal(brush, false);
+        // Listen to the brush even if it did not register yet.
+        RegisterBrushInternal(brush, false);
+        if (!brush->root_)
+            brush->root_ = this;
 
-            if (!SetupOperandStaticModel(tempModel, brush))
-                continue;
+        if (!SetupOperandStaticModel(tempModel, brush))
+            continue;
 
-            BrushStep step;
-            step.model_ = tempModel->GetModel();
+        BrushStep& step = operands.emplace_back();
+        step.model_ = tempModel->GetModel();
+        step.materials_ = tempModel->GetMaterialsAttr();
+        step.meshId_ = sourceModels.size();
+        step.op_ = brush->GetOperation();
+        step.brush_ = brush;
 
-            step.materials_ = tempModel->GetMaterialsAttr();
-            step.meshId_ = sourceModels.size();
-            step.op_ = brush->GetOperation();
-            step.brush_ = brush;
+        // Store source metadata for final model build on the main thread.
+        sourceModels.push_back(step.model_);
+        sourceMaterials.push_back(step.materials_);
 
-            // Store source metadata for final model build on the main thread.
-            sourceModels.push_back(step.model_);
-            sourceMaterials.push_back(step.materials_);
-
-            // Extract polygons in the root frame (main thread).
-            step.transform_ = rootFrame * child->GetWorldTransform();
-            step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
-
-            // Recurse into the brush subtree.
-            BuildOperationTree(step, child, rootFrame, tempModel, sourceModels, sourceMaterials);
-            rootStep.children_.push_back(ea::move(step));
-        }
-        else
-        {
-            // Recurse into nodes without brushes.
-            BuildOperationTree(rootStep, child, rootFrame, tempModel, sourceModels, sourceMaterials);
-        }
+        // Extract polygons in the root frame (main thread).
+        step.transform_ = rootFrame * child->GetWorldTransform();
+        step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
     }
 
-    return !rootStep.children_.empty();
+    return !operands.empty();
 }
 
-bool CsgRoot::TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushFingerprint>& output)
+bool CsgRoot::TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vector<BrushFingerprint>& output)
 {
-    for (const BrushStep& child : rootStep.children_)
+    for (const BrushStep& operand : operands)
     {
-        if (!child.children_.empty() || !child.brush_)
+        if (!operand.brush_)
         {
             output.clear();
             return false;
         }
-        output.push_back({child.brush_, child.model_, child.transform_, child.meshId_, child.op_});
+        output.push_back({operand.brush_, operand.model_, operand.transform_, operand.meshId_, operand.op_});
     }
     return true;
 }
 
-void CsgRoot::EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
-    unsigned startChild)
+void CsgRoot::EvaluateOperands(const ea::vector<BrushStep>& operands, SharedPtr<const CsgSolid>& currentSolid,
+    float epsilon, unsigned startIndex)
 {
-    for (unsigned childIndex = startChild; childIndex < step.children_.size(); ++childIndex)
+    for (unsigned i = startIndex; i < operands.size(); ++i)
     {
-        const BrushStep& child = step.children_[childIndex];
-        SharedPtr<const CsgSolid> childSolid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(child.polygons_), epsilon);
-        if (!child.children_.empty())
-            EvaluateOperationTree(child, childSolid, epsilon);
+        const BrushStep& operand = operands[i];
+        SharedPtr<const CsgSolid> operandSolid =
+            CsgSolid::FromOperand(ea::vector<CsgPolygon>(operand.polygons_), epsilon);
 
         // A null result is an empty solid.
-        SharedPtr<const CsgSolid> result = CsgBooleanOperation(currentSolid.Get(), childSolid.Get(), child.op_, epsilon);
+        SharedPtr<const CsgSolid> result =
+            CsgBooleanOperation(currentSolid.Get(), operandSolid.Get(), operand.op_, epsilon);
         currentSolid = result ? result : SharedPtr<const CsgSolid>(CsgSolid::FromOperand({}, epsilon));
     }
 }
 
-void CsgRoot::AcknowledgeBrushes(const BrushStep& step)
+void CsgRoot::AcknowledgeBrushes(const ea::vector<BrushStep>& operands)
 {
-    for (const BrushStep& child : step.children_)
+    for (const BrushStep& operand : operands)
     {
-        if (CsgBrush* brush = child.brush_)
+        if (CsgBrush* brush = operand.brush_)
             brush->ClearDirty();
-
-        AcknowledgeBrushes(child);
     }
 }
 

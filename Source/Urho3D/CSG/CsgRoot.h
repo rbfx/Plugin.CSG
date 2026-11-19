@@ -67,9 +67,10 @@ struct CsgBuildStats
 /// Root (builder) component for component-based CSG workflow.
 ///
 /// High-level behavior:
-/// - Produces a combined mesh by evaluating CSG operations of all enabled `CsgBrush` components
-///   under this node's subtree.
-/// - Ignores nested `CsgRoot` subtrees: traversal stops at the first nested root encountered.
+/// - Produces a combined mesh from the base model and the operands of the root.
+/// - An operand is a direct child node with an enabled `CsgBrush`. The child order is the operation order.
+/// - A brush deeper in the tree is not an operand and has no effect.
+/// - A direct child with its own `CsgRoot` is not an operand. It builds its own result.
 ///
 /// Rebuild policy and threading:
 /// - Rebuilds are async: the heavy work runs on `WorkQueue` worker thread(s) and the resulting
@@ -171,9 +172,6 @@ public:
 protected:
     void ApplyAttributes() override;
     void RequestRebuild();
-    void CollectBrushesAndNestedRoots(Node* rootNode,
-        ea::vector<CsgBrush*>& outBrushes,
-        ea::vector<Node*>& outNestedRootNodes) const;
     void ApplyResultToOutput(Model* model, const ResourceRefList& materials);
     void RegisterBrush(CsgBrush* brush);
     void UnregisterBrush(CsgBrush* brush);
@@ -245,16 +243,20 @@ private:
     StaticModel* GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache);
     bool SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* brush) const;
     bool SetupOperandStaticModel(StaticModel* staticModel, const ResourceRef& modelAttr, const ResourceRefList& materialsAttr) const;
-    bool BuildOperationTree(BrushStep& rootStep, Node* node, const Matrix3x4& rootFrame, StaticModel* tempModel,
+    /// Collect the operands from the direct children of the node. Return false if there are no operands.
+    bool BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& rootFrame, StaticModel* tempModel,
         ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials);
+    void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
+    void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
 
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
-    static void EvaluateOperationTree(const BrushStep& step, SharedPtr<const CsgSolid>& currentSolid, float epsilon,
-        unsigned startChild = 0);
-    /// Copy the fingerprints of the brushes. Return false if the tree is not flat or a brush is dead.
-    static bool TryCaptureFlatBrushes(const BrushStep& rootStep, ea::vector<BrushFingerprint>& output);
-    static void AcknowledgeBrushes(const BrushStep& step);
+    /// Apply the operands in order to the current solid. Skip the operands before `startIndex`.
+    static void EvaluateOperands(const ea::vector<BrushStep>& operands, SharedPtr<const CsgSolid>& currentSolid,
+        float epsilon, unsigned startIndex);
+    /// Copy the fingerprints of the operands. Return false if a brush is dead.
+    static bool TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vector<BrushFingerprint>& output);
+    static void AcknowledgeBrushes(const ea::vector<BrushStep>& operands);
 
     float deferredDelaySec_{0.1f};
     float epsilon_{1e-4f};

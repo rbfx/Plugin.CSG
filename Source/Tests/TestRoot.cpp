@@ -1129,3 +1129,132 @@ TEST_CASE("CsgRoot reports the component of each geometry", "[root]")
         CHECK(counts[1] == 2);
     }
 }
+
+TEST_CASE("CsgRoot ignores a brush below a direct child", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A brush below a group node has no effect")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Grouped");
+        Node* group = root->GetNode()->CreateChild("Group");
+        Node* brushNode = group->CreateChild("Cut");
+        brushNode->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+        auto* brush = brushNode->CreateComponent<CsgBrush>();
+        brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+        brush->SetOperation(CsgOperation::DifferenceAB);
+
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+        RunFrames(root, workQueue, 60);
+        CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+    }
+
+    SECTION("A brush below a brush has no effect")
+    {
+        // The grandchild removes the whole child box. If the root used it, the cut would not occur.
+        CsgRoot* root = MakeBoxRoot(scene, "Stacked");
+        CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        auto* inner = cut->GetNode()->CreateChild("Inner")->CreateComponent<CsgBrush>();
+        inner->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+        inner->SetOperation(CsgOperation::DifferenceAB);
+
+        root->Rebuild();
+        REQUIRE(RunUntilOutput(root, workQueue, 1000));
+        RunFrames(root, workQueue, 60);
+        const unsigned cutIndices = CountIndices(GetOutput(root)->GetModel());
+        CHECK(cutIndices > 36);
+
+        // The same cut without the grandchild gives the same output.
+        CsgRoot* plain = MakeBoxRoot(scene, "Plain");
+        AddBoxBrush(plain, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        plain->Rebuild();
+        REQUIRE(RunUntilOutput(plain, workQueue, 1000));
+        RunFrames(plain, workQueue, 60);
+        CHECK(CountIndices(GetOutput(plain)->GetModel()) == cutIndices);
+    }
+}
+
+TEST_CASE("CsgRoot applies the sibling brushes in child order", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The union adds [0, 2] on x. The difference then removes [1, 3], so the result ends at x = 1.
+    // The cut is larger on y and z, so it has no face on the sides of the union.
+    CsgRoot* root = MakeBoxRoot(scene, "Ordered");
+    CsgBrush* grow = AddBoxBrush(root, "Grow", Vector3(1.0f, 0.0f, 0.0f), CsgOperation::Union);
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(2.0f, 0.0f, 0.0f), CsgOperation::DifferenceAB);
+    cut->GetNode()->SetScale(Vector3(1.0f, 2.0f, 2.0f));
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 60);
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.x_ == Catch::Approx(1.0f).margin(1e-3f));
+
+    // Move the union to the end. The difference comes first, so the union reaches x = 2.
+    Node* growNode = grow->GetNode();
+    growNode->SetParent(scene);
+    growNode->SetParent(root->GetNode());
+    REQUIRE(root->GetNode()->GetChildren().back() == growNode);
+    RunFrames(root, workQueue, 60);
+    CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.x_ == Catch::Approx(2.0f).margin(1e-3f));
+}
+
+TEST_CASE("CsgRoot rebuilds when a brush leaves the root", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Source");
+    CsgRoot* target = MakeBoxRoot(scene, "Target");
+    CsgBrush* cut = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    root->Rebuild();
+    target->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 60);
+    REQUIRE(RunUntilOutput(target, workQueue, 1000));
+    RunFrames(target, workQueue, 60);
+    CHECK(CountIndices(GetOutput(root)->GetModel()) > 36);
+    CHECK(CountIndices(GetOutput(target)->GetModel()) == 36);
+
+    SECTION("A move to a plain node rebuilds the old root")
+    {
+        cut->GetNode()->SetParent(scene);
+        RunFrames(root, workQueue, 60);
+        CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+    }
+
+    SECTION("A move to another root rebuilds both roots")
+    {
+        cut->GetNode()->SetParent(target->GetNode());
+        RunFrames(root, workQueue, 60);
+        CHECK(CountIndices(GetOutput(root)->GetModel()) == 36);
+        CHECK(CountIndices(GetOutput(target)->GetModel()) > 36);
+
+        // The old root no longer reacts to the brush.
+        const unsigned revision = root->GetRebuildRevision();
+        cut->SetOperation(CsgOperation::Union);
+        cut->GetNode()->SetPosition(Vector3(0.5f, 0.5f, 0.5f));
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetRebuildRevision() == revision);
+    }
+}

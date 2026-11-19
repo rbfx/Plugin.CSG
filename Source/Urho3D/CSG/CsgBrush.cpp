@@ -86,14 +86,13 @@ void CsgBrush::MarkDirty()
 
 CsgRoot* CsgBrush::FindContainingRoot() const
 {
-    Node* current = node_;
-    while (current)
-    {
-        if (auto* root = current->GetComponent<CsgRoot>())
-            return root;
-        current = current->GetParent();
-    }
-    return nullptr;
+    // A brush on a node with its own root is not an operand.
+    if (!node_ || node_->GetComponent<CsgRoot>())
+        return nullptr;
+
+    // Only the root of the parent node uses the brush.
+    Node* parent = node_->GetParent();
+    return parent ? parent->GetComponent<CsgRoot>() : nullptr;
 }
 
 void CsgBrush::UpdateRootRegistration()
