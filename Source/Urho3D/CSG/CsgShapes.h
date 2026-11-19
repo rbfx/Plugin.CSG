@@ -282,4 +282,39 @@ PLUGIN_RBFXCSG_API void CsgSanitizeRingParams(CsgRingParams& params);
 /// positive or the float positions merge in a triangle (a very small tube far from the origin).
 PLUGIN_RBFXCSG_API bool CsgGenerateRing(const CsgRingParams& params, CsgShapeMesh& mesh);
 
+/// The limits of the "Center" parameter of the wedge, the stairs and the arch.
+/// The center is the offset of the shape from the origin of the brush. Each vertex is generated around it.
+inline constexpr float CsgMaxShapeCenter = 16384.0f;
+
+/// The parameters of a procedural wedge (a right-angle ramp).
+///
+/// The wedge fills half of the local box [-sx/2, sx/2] x [-sy/2, sy/2] x [-sz/2, sz/2] around the center.
+/// The slope rises from the front bottom edge (z = -sz/2, y = -sy/2) to the back top edge (z = sz/2, y = sy/2).
+struct CsgWedgeParams
+{
+    static constexpr float MinSize = 0.001f;
+    static constexpr float MaxSize = 16384.0f;
+
+    /// The size of the bounding box.
+    Vector3 size_{Vector3::ONE};
+    /// The center of the bounding box in the local space of the brush.
+    Vector3 center_{Vector3::ZERO};
+};
+
+/// Clamp each size component to [0.001, 16384] and each center component to [-16384, 16384].
+/// A component that is not finite gets its default value.
+PLUGIN_RBFXCSG_API void CsgSanitizeWedgeParams(CsgWedgeParams& params);
+
+/// Generate a wedge with 6 positions and 8 triangles.
+///
+/// Face groups, in this order and with these slots (the order is a file contract):
+/// 0 the bottom (-Y), 1 the back (+Z), 2 the slope, 3 the left triangle (-X), 4 the right triangle (+X).
+/// Each triangle has a flat normal. UV 0 is a planar projection of each face in shape units, relative to the center.
+/// UV 1 is equal to UV 0.
+///
+/// The function uses a sanitized copy of the parameters. See `CsgSanitizeWedgeParams`.
+/// Return false if the shape is not valid. Then `mesh` is empty. A shape is not valid if the volume is not
+/// positive or the float positions merge in a triangle (a very small wedge far from the origin).
+PLUGIN_RBFXCSG_API bool CsgGenerateWedge(const CsgWedgeParams& params, CsgShapeMesh& mesh);
+
 } // namespace Urho3D

@@ -20,11 +20,14 @@
 #include <Urho3D/IO/VirtualFileSystem.h>
 #include <Urho3D/Resource/ResourceCache.h>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <set>
 
 #include <catch2/catch_amalgamated.hpp>
 
@@ -1983,4 +1986,286 @@ TEST_CASE("CsgGenerateCylinder has outward normals for swapped and tilted center
             }
         }
     }
+}
+
+namespace
+{
+
+/// Return true if the mesh is closed with exact vertex sharing: the positions merge only if their bits are equal,
+/// and each directed edge has exactly one reverse edge. So the mesh has no T-junction and no open edge.
+bool IsExactlyClosed(const CsgShapeMesh& mesh)
+{
+    std::map<std::array<uint32_t, 3>, unsigned> ids;
+    const auto getId = [&](const Vector3& p)
+    {
+        std::array<uint32_t, 3> key;
+        std::memcpy(key.data(), p.Data(), sizeof(key));
+        return ids.emplace(key, static_cast<unsigned>(ids.size())).first->second;
+    };
+    std::map<std::pair<unsigned, unsigned>, int> edges;
+    for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+    {
+        unsigned v[3];
+        for (unsigned k = 0; k < 3; ++k)
+            v[k] = getId(mesh.vertices_[mesh.indices_[i + k]].GetPosition());
+        for (unsigned k = 0; k < 3; ++k)
+            ++edges[{v[k], v[(k + 1) % 3]}];
+    }
+    for (const auto& [edge, count] : edges)
+    {
+        if (count != 1)
+            return false;
+        const auto reverse = edges.find({edge.second, edge.first});
+        if (reverse == edges.end() || reverse->second != 1)
+            return false;
+    }
+    return !edges.empty();
+}
+
+/// Return the signed volume of the mesh in doubles, with the positions relative to the reference point.
+/// It is independent of the generator and keeps the precision for a small shape far from the origin.
+double VolumeAround(const CsgShapeMesh& mesh, const Vector3& reference)
+{
+    double volume = 0.0;
+    for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+    {
+        double p[3][3];
+        for (unsigned k = 0; k < 3; ++k)
+        {
+            const Vector3 v = mesh.vertices_[mesh.indices_[i + k]].GetPosition();
+            p[k][0] = static_cast<double>(v.x_) - reference.x_;
+            p[k][1] = static_cast<double>(v.y_) - reference.y_;
+            p[k][2] = static_cast<double>(v.z_) - reference.z_;
+        }
+        volume += (p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1]) - p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0])
+                      + p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]))
+            / 6.0;
+    }
+    return volume;
+}
+
+/// Return the number of distinct position bit patterns in the mesh.
+unsigned CountDistinctPositionBits(const CsgShapeMesh& mesh)
+{
+    std::set<std::array<uint32_t, 3>> keys;
+    for (const ModelVertex& vertex : mesh.vertices_)
+    {
+        std::array<uint32_t, 3> key;
+        const Vector3 position = vertex.GetPosition();
+        std::memcpy(key.data(), position.Data(), sizeof(key));
+        keys.insert(key);
+    }
+    return keys.size();
+}
+
+/// Return the geometric unit normals of the triangles of the group with the slot.
+ea::vector<Vector3> GroupTriangleNormals(const CsgShapeMesh& mesh, unsigned slot)
+{
+    ea::vector<Vector3> normals;
+    for (const CsgShapeGroup& group : mesh.groups_)
+    {
+        if (group.slot_ != slot)
+            continue;
+        for (unsigned i = group.indexStart_; i + 2 < group.indexStart_ + group.indexCount_; i += 3)
+        {
+            const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+            const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+            const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+            normals.push_back((p1 - p0).CrossProduct(p2 - p0).Normalized());
+        }
+    }
+    return normals;
+}
+
+/// Return the slots of the groups in their order.
+ea::vector<unsigned> GroupSlots(const CsgShapeMesh& mesh)
+{
+    ea::vector<unsigned> slots;
+    for (const CsgShapeGroup& group : mesh.groups_)
+        slots.push_back(group.slot_);
+    return slots;
+}
+
+/// Check that the groups follow each other and cover the index list.
+void CheckGroupsCoverIndices(const CsgShapeMesh& mesh)
+{
+    unsigned next = 0;
+    for (const CsgShapeGroup& group : mesh.groups_)
+    {
+        CHECK(group.indexStart_ == next);
+        CHECK(group.indexCount_ > 0);
+        CHECK(group.indexCount_ % 3 == 0);
+        next += group.indexCount_;
+    }
+    CHECK(next == mesh.indices_.size());
+}
+
+/// Check the common mesh rules of a generated shape.
+void CheckShapeMeshRules(const CsgShapeMesh& mesh, bool checkSolid = true)
+{
+    const Vector3 reference = mesh.vertices_.empty() ? Vector3::ZERO : mesh.vertices_[0].GetPosition();
+    CHECK(VolumeAround(mesh, reference) > 0.0);
+    CHECK(mesh.vertices_.size() == mesh.indices_.size());
+    CHECK(HasNoDegenerateTriangle(mesh));
+    CHECK(IsExactlyClosed(mesh));
+    CheckGroupsCoverIndices(mesh);
+    if (checkSolid)
+        CHECK(SolidVolume(mesh) > 0.0);
+    unsigned wrongTangent = 0;
+    unsigned wrongBitangent = 0;
+    CHECK(CountWrongTangentFrames(mesh, wrongTangent, wrongBitangent) > 0);
+    CHECK(wrongTangent == 0);
+    CHECK(wrongBitangent == 0);
+    // The normal attribute of a flat face is its geometric normal: it never points inward.
+    for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+    {
+        const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+        const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+        const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+        const Vector3 n = (p1 - p0).CrossProduct(p2 - p0).Normalized();
+        for (unsigned k = 0; k < 3; ++k)
+            CHECK(mesh.vertices_[mesh.indices_[i + k]].GetNormal().DotProduct(n) > 0.0f);
+    }
+}
+
+/// Check that the model of the mesh has the vertex layout of Box.mdl.
+void CheckShapeModelLayout(const CsgShapeMesh& mesh, unsigned numGeometries)
+{
+    auto context = MakeShared<Context>();
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == numGeometries);
+    const Geometry* geometry = model->GetGeometry(0, 0);
+    REQUIRE(geometry);
+    REQUIRE(geometry->GetVertexBuffer(0));
+    const ea::vector<VertexElement>& shapeElements = CsgGetShapeVertexElements();
+    const ea::vector<VertexElement>& elements = geometry->GetVertexBuffer(0)->GetElements();
+    REQUIRE(elements.size() == shapeElements.size());
+    for (unsigned i = 0; i < elements.size(); ++i)
+    {
+        CHECK(elements[i].type_ == shapeElements[i].type_);
+        CHECK(elements[i].semantic_ == shapeElements[i].semantic_);
+        CHECK(elements[i].index_ == shapeElements[i].index_);
+        CHECK(elements[i].offset_ == shapeElements[i].offset_);
+    }
+}
+
+ea::vector<CsgWedgeParams> MakeWedgeVariants()
+{
+    ea::vector<CsgWedgeParams> result;
+    for (const Vector3& size : {Vector3::ONE, Vector3(0.001f, 0.001f, 0.001f), Vector3(16384.0f, 16384.0f, 16384.0f),
+             Vector3(0.001f, 16384.0f, 1.0f), Vector3(3.0f, 0.5f, 2.0f)})
+    {
+        for (const Vector3& center : {Vector3::ZERO, Vector3(5.0f, -3.0f, 2.0f), Vector3(-0.25f, 0.0f, 0.125f)})
+        {
+            CsgWedgeParams params;
+            params.size_ = size;
+            params.center_ = center;
+            result.push_back(params);
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("CsgGenerateWedge gives a closed mesh with 8 triangles and the wedge volume", "[shapes][procedural]")
+{
+    for (const CsgWedgeParams& params : MakeWedgeVariants())
+    {
+        INFO("Size " << params.size_.ToString().c_str() << " center " << params.center_.ToString().c_str());
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateWedge(params, mesh));
+        CHECK(mesh.indices_.size() == 24);
+        CHECK(CountDistinctPositionBits(mesh) == 6);
+        const bool small = params.size_.x_ < 0.01f || params.size_.y_ < 0.01f || params.size_.z_ < 0.01f;
+        CheckShapeMeshRules(mesh, !small);
+        // The analytic volume of the wedge is sx * sy * sz / 2.
+        const double expected = 0.5 * params.size_.x_ * params.size_.y_ * params.size_.z_;
+        CHECK(VolumeAround(mesh, params.center_) == Catch::Approx(expected).epsilon(1e-3));
+        CHECK(GroupSlots(mesh) == ea::vector<unsigned>{0, 1, 2, 3, 4});
+    }
+}
+
+TEST_CASE("CsgGenerateWedge faces point outward and the vertices are around the center", "[shapes][procedural]")
+{
+    CsgWedgeParams params;
+    params.size_ = Vector3(2.0f, 1.0f, 4.0f);
+    params.center_ = Vector3(1.0f, 2.0f, 3.0f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateWedge(params, mesh));
+
+    const auto all = [&](unsigned slot, const Vector3& expected)
+    {
+        const ea::vector<Vector3> normals = GroupTriangleNormals(mesh, slot);
+        CHECK(!normals.empty());
+        for (const Vector3& n : normals)
+            CHECK(n.Equals(expected, 1e-5f));
+        return normals.size();
+    };
+    CHECK(all(0, Vector3::DOWN) == 2);
+    CHECK(all(1, Vector3::FORWARD) == 2);
+    CHECK(all(2, Vector3(0.0f, 4.0f, -1.0f).Normalized()) == 2);
+    CHECK(all(3, Vector3::LEFT) == 1);
+    CHECK(all(4, Vector3::RIGHT) == 1);
+
+    BoundingBox box;
+    for (const ModelVertex& vertex : mesh.vertices_)
+        box.Merge(vertex.GetPosition());
+    CHECK(box.min_.Equals(Vector3(0.0f, 1.5f, 1.0f)));
+    CHECK(box.max_.Equals(Vector3(2.0f, 2.5f, 5.0f)));
+
+    // UV 0 is planar in shape units and relative to the center: it does not change with the center.
+    CsgWedgeParams moved = params;
+    moved.center_ = Vector3::ZERO;
+    CsgShapeMesh movedMesh;
+    REQUIRE(CsgGenerateWedge(moved, movedMesh));
+    REQUIRE(movedMesh.vertices_.size() == mesh.vertices_.size());
+    for (unsigned i = 0; i < mesh.vertices_.size(); ++i)
+    {
+        CHECK(mesh.vertices_[i].uv_[0].Equals(movedMesh.vertices_[i].uv_[0], 1e-5f));
+        CHECK(mesh.vertices_[i].uv_[1] == mesh.vertices_[i].uv_[0]);
+    }
+    // The bottom face is 2 x 4 in UV.
+    float minU = 1e9f, maxU = -1e9f, minV = 1e9f, maxV = -1e9f;
+    for (unsigned i = 0; i < 6; ++i)
+    {
+        const Vector4& uv = mesh.vertices_[i].uv_[0];
+        minU = ea::min(minU, uv.x_);
+        maxU = ea::max(maxU, uv.x_);
+        minV = ea::min(minV, uv.y_);
+        maxV = ea::max(maxV, uv.y_);
+    }
+    CHECK(maxU - minU == Catch::Approx(2.0f));
+    CHECK(maxV - minV == Catch::Approx(4.0f));
+    CheckShapeModelLayout(mesh, 5);
+}
+
+TEST_CASE("CsgSanitizeWedgeParams clamps the range and the extreme wedge stays valid", "[shapes][procedural]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    CsgWedgeParams params;
+    params.size_ = Vector3(nan, -1.0f, 1e9f);
+    params.center_ = Vector3(inf, -1e9f, nan);
+    CsgSanitizeWedgeParams(params);
+    CHECK(params.size_ == Vector3(1.0f, CsgWedgeParams::MinSize, CsgWedgeParams::MaxSize));
+    CHECK(params.center_ == Vector3(0.0f, -CsgMaxShapeCenter, 0.0f));
+
+    // The smallest wedge at the largest center keeps distinct float positions: half of 0.001 is more than
+    // half of the float step at 16384. So the sanitized values always give a valid wedge.
+    CsgWedgeParams far;
+    far.size_ = Vector3(0.001f, 0.001f, 0.001f);
+    far.center_ = Vector3(16384.0f, -16384.0f, 16384.0f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateWedge(far, mesh));
+    CHECK(IsExactlyClosed(mesh));
+    CHECK(HasNoDegenerateTriangle(mesh));
+    CHECK(CountDistinctPositionBits(mesh) == 6);
+
+    // A value that is not finite gives the default wedge.
+    CsgWedgeParams bad;
+    bad.size_ = Vector3(nan, nan, nan);
+    REQUIRE(CsgGenerateWedge(bad, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(0.5));
 }

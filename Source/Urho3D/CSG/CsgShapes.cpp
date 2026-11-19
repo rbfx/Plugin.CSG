@@ -948,4 +948,216 @@ bool CsgGenerateRing(const CsgRingParams& params, CsgShapeMesh& mesh)
     return true;
 }
 
+namespace
+{
+
+/// The UV frame of a face. u x v is the outward normal of the face.
+/// UV 0 is (p.u, -p.v) with p relative to the shape center, as for the box.
+struct FaceFrame
+{
+    Vector3 u_;
+    Vector3 v_;
+};
+
+/// Make the frame of a flat face from its unit normal and a wanted U direction in the plane.
+FaceFrame MakeFaceFrame(const Vector3& normal, const Vector3& wantedU)
+{
+    const Vector3 u = (wantedU - normal * normal.DotProduct(wantedU)).NormalizedOrDefault(wantedU);
+    return FaceFrame{u, normal.CrossProduct(u)};
+}
+
+/// One corner of a triangle: the index in the position table and the attributes except the flat normal.
+struct ShapeCorner
+{
+    unsigned index_{};
+    Vector2 uv_;
+    /// The direction of the U axis in space.
+    Vector3 tangentDir_;
+    /// The direction of the V axis in space.
+    Vector3 vDir_;
+    /// The smooth normal. Zero gives the flat normal of the triangle.
+    Vector3 normal_;
+};
+
+/// Write the triangles of a shape with one position table. Each vertex copies its position from the table.
+/// The writer adds the face groups, sums the signed volume and detects degenerate triangles.
+class ShapeMeshWriter
+{
+public:
+    ShapeMeshWriter(CsgShapeMesh& mesh, const ea::vector<Vector3>& positions, const Vector3& center)
+        : mesh_(mesh)
+        , positions_(positions)
+        , center_(center)
+    {
+        mesh_.vertices_.clear();
+        mesh_.indices_.clear();
+        mesh_.groups_.clear();
+    }
+
+    /// Return the position relative to the shape center.
+    Vector3 Local(unsigned index) const { return positions_[index] - center_; }
+
+    /// Return a flat corner with the UV of the frame.
+    ShapeCorner FlatCorner(unsigned index, const FaceFrame& frame) const
+    {
+        const Vector3 local = Local(index);
+        ShapeCorner corner;
+        corner.index_ = index;
+        corner.uv_ = Vector2(local.DotProduct(frame.u_), -local.DotProduct(frame.v_));
+        corner.tangentDir_ = frame.u_;
+        corner.vDir_ = -frame.v_;
+        return corner;
+    }
+
+    void BeginGroup() { groupStart_ = mesh_.indices_.size(); }
+
+    /// Close the group. A group without triangles is not added: its slot stays free.
+    void EndGroup(unsigned slot)
+    {
+        const unsigned count = static_cast<unsigned>(mesh_.indices_.size()) - groupStart_;
+        if (count)
+            mesh_.groups_.push_back(CsgShapeGroup{groupStart_, count, slot});
+    }
+
+    /// Write a flat triangle of a planar face.
+    void FlatTriangle(unsigned a, unsigned b, unsigned c, const FaceFrame& frame)
+    {
+        Triangle(FlatCorner(a, frame), FlatCorner(b, frame), FlatCorner(c, frame));
+    }
+
+    /// Write a flat quad (a, b, c, d) as the triangles (a, b, c) and (a, c, d).
+    void FlatQuad(unsigned a, unsigned b, unsigned c, unsigned d, const FaceFrame& frame)
+    {
+        FlatTriangle(a, b, c, frame);
+        FlatTriangle(a, c, d, frame);
+    }
+
+    void Triangle(const ShapeCorner& c0, const ShapeCorner& c1, const ShapeCorner& c2)
+    {
+        const ShapeCorner* corners[3] = {&c0, &c1, &c2};
+        const Vector3& p0 = positions_[c0.index_];
+        const Vector3& p1 = positions_[c1.index_];
+        const Vector3& p2 = positions_[c2.index_];
+        // The flat normal uses doubles, so a tiny triangle still gets a unit normal.
+        const double e1x = p1.x_ - p0.x_, e1y = p1.y_ - p0.y_, e1z = p1.z_ - p0.z_;
+        const double e2x = p2.x_ - p0.x_, e2y = p2.y_ - p0.y_, e2z = p2.z_ - p0.z_;
+        const double nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+        const double length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (p0 == p1 || p1 == p2 || p2 == p0 || !(length > 0.0))
+            degenerate_ = true;
+        const Vector3 flatNormal = length > 0.0
+            ? Vector3(static_cast<float>(nx / length), static_cast<float>(ny / length), static_cast<float>(nz / length))
+            : Vector3::UP;
+        // The volume uses the positions relative to the center, so a far center does not lose the precision.
+        volume_ += TripleProduct(Local(c0.index_), Local(c1.index_), Local(c2.index_)) / 6.0;
+
+        for (const ShapeCorner* corner : corners)
+        {
+            const Vector3 normal = corner->normal_ == Vector3::ZERO ? flatNormal : corner->normal_;
+            // The shader bitangent is cross(tangent, normal) * w. It must point along the V axis.
+            const Vector3 tangent = (corner->tangentDir_ - normal * normal.DotProduct(corner->tangentDir_))
+                                        .NormalizedOrDefault(corner->tangentDir_);
+            const float handedness = tangent.CrossProduct(normal).DotProduct(corner->vDir_) >= 0.0f ? 1.0f : -1.0f;
+
+            ModelVertex vertex{};
+            vertex.SetPosition(positions_[corner->index_]);
+            vertex.SetNormal(normal);
+            vertex.tangent_ = Vector4(tangent, handedness);
+            vertex.uv_[0] = Vector4(corner->uv_.x_, corner->uv_.y_, 0.0f, 0.0f);
+            vertex.uv_[1] = vertex.uv_[0];
+            vertex.color_[0] = Color::WHITE.ToVector4();
+
+            mesh_.indices_.push_back(mesh_.vertices_.size());
+            mesh_.vertices_.push_back(vertex);
+        }
+    }
+
+    /// Mark the shape as not valid.
+    void Fail() { degenerate_ = true; }
+
+    /// Return true if the mesh is valid. Otherwise clear the mesh and return false.
+    bool Finish()
+    {
+        if (degenerate_ || !(volume_ > 0.0))
+        {
+            mesh_.vertices_.clear();
+            mesh_.indices_.clear();
+            mesh_.groups_.clear();
+            return false;
+        }
+        return true;
+    }
+
+private:
+    CsgShapeMesh& mesh_;
+    const ea::vector<Vector3>& positions_;
+    Vector3 center_;
+    unsigned groupStart_{};
+    double volume_{};
+    bool degenerate_{};
+};
+
+/// The frames of the axis-aligned faces. They are the frames of the box faces.
+const FaceFrame FrameLeft{Vector3::FORWARD, Vector3::UP};
+const FaceFrame FrameRight{Vector3::UP, Vector3::FORWARD};
+const FaceFrame FrameDown{Vector3::RIGHT, Vector3::FORWARD};
+const FaceFrame FrameUp{Vector3::FORWARD, Vector3::RIGHT};
+const FaceFrame FrameBack{Vector3::UP, Vector3::RIGHT};
+const FaceFrame FrameForward{Vector3::RIGHT, Vector3::UP};
+
+Vector3 SanitizeCenter(const Vector3& center)
+{
+    return SanitizeVector(center, -CsgMaxShapeCenter, CsgMaxShapeCenter, Vector3::ZERO);
+}
+
+} // namespace
+
+void CsgSanitizeWedgeParams(CsgWedgeParams& params)
+{
+    params.size_ = SanitizeVector(params.size_, CsgWedgeParams::MinSize, CsgWedgeParams::MaxSize, Vector3::ONE);
+    params.center_ = SanitizeCenter(params.center_);
+}
+
+bool CsgGenerateWedge(const CsgWedgeParams& params, CsgShapeMesh& mesh)
+{
+    CsgWedgeParams sanitized = params;
+    CsgSanitizeWedgeParams(sanitized);
+    const Vector3 half = sanitized.size_ * 0.5f;
+    const Vector3& c = sanitized.center_;
+
+    // Each vertex copies its position from this table, so the shared corners are bit-identical.
+    // 0, 1: the front bottom edge (-X, +X). 2, 3: the back bottom edge. 4, 5: the back top edge.
+    const ea::vector<Vector3> positions{
+        c + Vector3(-half.x_, -half.y_, -half.z_),
+        c + Vector3(half.x_, -half.y_, -half.z_),
+        c + Vector3(-half.x_, -half.y_, half.z_),
+        c + Vector3(half.x_, -half.y_, half.z_),
+        c + Vector3(-half.x_, half.y_, half.z_),
+        c + Vector3(half.x_, half.y_, half.z_),
+    };
+    // The slope normal is (0, sz, -sy) normalized. Its V axis goes up the slope.
+    const Vector3 slopeNormal = Vector3(0.0f, sanitized.size_.z_, -sanitized.size_.y_).Normalized();
+    const FaceFrame slopeFrame = MakeFaceFrame(slopeNormal, Vector3::LEFT);
+
+    ShapeMeshWriter writer(mesh, positions, c);
+    mesh.vertices_.reserve(24);
+    mesh.indices_.reserve(24);
+    writer.BeginGroup();
+    writer.FlatQuad(0, 1, 3, 2, FrameDown);
+    writer.EndGroup(0);
+    writer.BeginGroup();
+    writer.FlatQuad(2, 3, 5, 4, FrameForward);
+    writer.EndGroup(1);
+    writer.BeginGroup();
+    writer.FlatQuad(0, 4, 5, 1, slopeFrame);
+    writer.EndGroup(2);
+    writer.BeginGroup();
+    writer.FlatTriangle(0, 2, 4, FrameLeft);
+    writer.EndGroup(3);
+    writer.BeginGroup();
+    writer.FlatTriangle(1, 5, 3, FrameRight);
+    writer.EndGroup(4);
+    return writer.Finish();
+}
+
 } // namespace Urho3D
