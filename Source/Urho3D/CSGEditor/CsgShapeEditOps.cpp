@@ -7,6 +7,7 @@
 #include "Urho3D/CSG/CsgRootProtocol.h"
 
 #include <Urho3D/Core/Attribute.h>
+#include <Urho3D/Core/Format.h>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
 
@@ -358,6 +359,53 @@ ea::optional<unsigned> ChooseFaceHandleForWorldHit(
         return ea::nullopt;
     localNormal.Normalize();
     return ChooseFaceHandle(handles, localPoint, localNormal);
+}
+
+bool QueryRootStats(Component* root, RootStats& stats)
+{
+    if (!root)
+        return false;
+
+    using namespace CsgRootQueryStats;
+    VariantMap& eventData = root->GetEventDataMap();
+    eventData[P_VERSION] = 0;
+    root->SendEvent(E_CSGROOTQUERYSTATS, eventData);
+    // A component that does not answer keeps version 0.
+    if (eventData[P_VERSION].GetInt() == 0)
+        return false;
+
+    stats.valid_ = eventData[P_VALID].GetBool();
+    stats.brushCount_ = eventData[P_BRUSHCOUNT].GetUInt();
+    stats.triangles_ = eventData[P_TRIANGLES].GetUInt();
+    stats.vertices_ = eventData[P_VERTICES].GetUInt();
+    stats.rebuildMs_ = eventData[P_REBUILDMS].GetFloat();
+    stats.reusedOperands_ = eventData[P_REUSEDOPERANDS].GetUInt();
+    stats.building_ = eventData[P_BUILDING].GetBool();
+    stats.error_ = eventData[P_ERROR].GetString();
+    return true;
+}
+
+ea::string FormatRootStatsLine(const RootStats& stats)
+{
+    return Format("Brushes {}, tris {}, last build {:.1f} ms, reused {}/{}", stats.brushCount_, stats.triangles_,
+        stats.rebuildMs_, stats.reusedOperands_, stats.brushCount_);
+}
+
+bool ComputeShapeWorldSize(Component* brush, Vector3& size)
+{
+    if (!brush || !brush->GetNode())
+        return false;
+
+    using namespace CsgShapeQueryBounds;
+    VariantMap& eventData = brush->GetEventDataMap();
+    eventData[P_VALID] = false;
+    brush->SendEvent(E_CSGSHAPEQUERYBOUNDS, eventData);
+    if (!eventData[P_VALID].GetBool())
+        return false;
+
+    const Vector3 localSize = eventData[P_MAX].GetVector3() - eventData[P_MIN].GetVector3();
+    size = localSize * brush->GetNode()->GetWorldScale().Abs();
+    return true;
 }
 
 } // namespace Urho3D

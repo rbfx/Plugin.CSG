@@ -1641,3 +1641,88 @@ TEST_CASE("SaveBakedModel writes the result and CreateBakedNode uses it", "[edit
         CHECK(errors.GetCount() > 0);
     }
 }
+
+TEST_CASE("ComputeShapeWorldSize scales the mesh bounds by the node scale", "[editorops][dimensions]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    const Vector3 scale(1.0f, 2.0f, 3.0f);
+
+    for (const char* typeName : {"CsgBoxBrush", "CsgWedgeBrush", "CsgStairsBrush"})
+    {
+        CAPTURE(typeName);
+        Node* node = AddBrushNodeOfType(rootNode, typeName, 0, Vector3::ZERO);
+        REQUIRE(node);
+        auto* brush = static_cast<CsgBrush*>(FindBrushComponent(node));
+        REQUIRE(brush);
+
+        // The expected size comes from the generated model of the brush.
+        SharedPtr<Model> model;
+        REQUIRE(brush->GetGeneratedModel(model));
+        REQUIRE(model);
+        const Vector3 meshSize = model->GetBoundingBox().Size();
+        REQUIRE(meshSize.x_ > 0.0f);
+
+        // The root has the world scale 1, so the node has the local scale 1.
+        node->SetScale(Vector3::ONE);
+        Vector3 size;
+        REQUIRE(ComputeShapeWorldSize(brush, size));
+        CHECK(size.Equals(meshSize));
+
+        node->SetScale(scale);
+        REQUIRE(ComputeShapeWorldSize(brush, size));
+        CHECK(size.Equals(meshSize * scale));
+
+        // A mirrored node gives the same positive size.
+        node->SetScale(Vector3(-1.0f, 2.0f, 3.0f));
+        REQUIRE(ComputeShapeWorldSize(brush, size));
+        CHECK(size.Equals(meshSize * scale));
+    }
+
+    SECTION("A box has the size of its parameter")
+    {
+        Node* node = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO);
+        REQUIRE(node);
+        auto* box = node->GetComponent<CsgBoxBrush>();
+        REQUIRE(box);
+        box->SetSize(Vector3(2.0f, 1.0f, 4.0f));
+        node->SetScale(scale);
+        Vector3 size;
+        REQUIRE(ComputeShapeWorldSize(box, size));
+        CHECK(size.Equals(Vector3(2.0f, 2.0f, 12.0f)));
+    }
+
+    SECTION("A component that is not a procedural brush gives no size")
+    {
+        Node* node = AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3::ZERO);
+        REQUIRE(node);
+        Vector3 size(7.0f, 7.0f, 7.0f);
+        CHECK(!ComputeShapeWorldSize(FindBrushComponent(node), size));
+        CHECK(!ComputeShapeWorldSize(nullptr, size));
+        CHECK(size == Vector3(7.0f, 7.0f, 7.0f));
+    }
+}
+
+TEST_CASE("QueryRootStats reads the root and formats the overlay line", "[editorops][stats]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    f.AddGrowAndCut(rootNode);
+    f.MaxX(rootNode);
+
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    RootStats stats;
+    REQUIRE(QueryRootStats(root, stats));
+    CHECK(stats.valid_);
+    CHECK(stats.brushCount_ == 2);
+    CHECK(stats.triangles_ == root->GetLastBuildStats().triangleCount_);
+    CHECK(stats.error_.empty());
+    CHECK(!stats.building_);
+    const ea::string line = FormatRootStatsLine(stats);
+    CHECK(line.starts_with("Brushes 2, tris "));
+    CHECK(line.contains(" ms, reused 0/2"));
+
+    CHECK(!QueryRootStats(nullptr, stats));
+    Node* brushNode = GetOperands(rootNode)[0];
+    CHECK(!QueryRootStats(FindBrushComponent(brushNode), stats));
+}

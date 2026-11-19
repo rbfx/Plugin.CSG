@@ -156,6 +156,7 @@ private:
     /// Select the brush that made the clicked face of the result. Run on a left release without a drag.
     void ProcessResultPick(SceneViewPage& page, bool& mouseConsumed, bool viewHovered);
     /// Render the "Shape" section of the operand overlay.
+    void RenderStatsSection(Node* rootNode);
     void RenderShapeSection();
     /// Render the settings of the shape handles.
     void RenderShapeSettings();

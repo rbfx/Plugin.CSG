@@ -22,6 +22,7 @@ CsgProceduralBrush::CsgProceduralBrush(Context* context)
     SubscribeToEvent(this, E_CSGSHAPEQUERYHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleQueryHandles));
     SubscribeToEvent(this, E_CSGSHAPEMOVEHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleMoveHandles));
     SubscribeToEvent(this, E_CSGSHAPERECENTER, URHO3D_HANDLER(CsgProceduralBrush, HandleRecenter));
+    SubscribeToEvent(this, E_CSGSHAPEQUERYBOUNDS, URHO3D_HANDLER(CsgProceduralBrush, HandleQueryBounds));
 }
 
 CsgProceduralBrush::~CsgProceduralBrush() = default;
@@ -66,6 +67,16 @@ bool CsgProceduralBrush::GetGeneratedModel(SharedPtr<Model>& model) const
 {
     model = GetShapeModel();
     return true;
+}
+
+void CsgProceduralBrush::HandleQueryBounds(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace CsgShapeQueryBounds;
+    const Model* model = GetShapeModel();
+    const BoundingBox box = model ? model->GetBoundingBox() : BoundingBox();
+    eventData[P_VALID] = model != nullptr;
+    eventData[P_MIN] = model ? box.min_ : Vector3::ZERO;
+    eventData[P_MAX] = model ? box.max_ : Vector3::ZERO;
 }
 
 void CsgProceduralBrush::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)

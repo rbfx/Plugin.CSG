@@ -97,4 +97,14 @@ URHO3D_EVENT(E_CSGSHAPERECENTER, CsgShapeRecenter)
     URHO3D_PARAM(P_OFFSET, Offset); // Vector3
 }
 
+/// Query the local bounding box of the generated mesh of a shape. The event does not change the protocol version.
+/// Out: P_VALID (bool), P_MIN (Vector3) and P_MAX (Vector3). The box is in the local space of the brush, before the
+/// node scale. P_VALID is false if the shape is not valid. Then P_MIN and P_MAX are zero.
+URHO3D_EVENT(E_CSGSHAPEQUERYBOUNDS, CsgShapeQueryBounds)
+{
+    URHO3D_PARAM(P_VALID, Valid); // bool
+    URHO3D_PARAM(P_MIN, Min); // Vector3
+    URHO3D_PARAM(P_MAX, Max); // Vector3
+}
+
 } // namespace Urho3D

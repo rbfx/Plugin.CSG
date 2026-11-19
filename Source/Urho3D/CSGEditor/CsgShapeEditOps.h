@@ -11,6 +11,8 @@
 #include <Urho3D/Math/Vector2.h>
 #include <Urho3D/Math/Vector3.h>
 
+#include <Urho3D/Container/Str.h>
+
 #include <EASTL/optional.h>
 #include <EASTL/utility.h>
 #include <EASTL/vector.h>
@@ -147,5 +149,31 @@ Vector3 ProjectDeltaOnAxis(const Vector3& delta, const Vector3& axis);
 /// A zero axis snaps each component. A non-zero axis snaps only the coordinate along the axis.
 /// Then the result is along the axis. A step of 0 or less returns the delta.
 Vector3 SnapHandleDelta(const Vector3& start, const Vector3& delta, const Vector3& axis, float step);
+
+/// The diagnostics of a root. See `E_CSGROOTQUERYSTATS`.
+struct RootStats
+{
+    bool valid_{};
+    unsigned brushCount_{};
+    unsigned triangles_{};
+    unsigned vertices_{};
+    float rebuildMs_{};
+    unsigned reusedOperands_{};
+    bool building_{};
+    /// The reason of an invalid result. Empty for a valid result.
+    ea::string error_;
+};
+
+/// Read the diagnostics of the root component with the event E_CSGROOTQUERYSTATS.
+/// Return false for a null component or a component that does not answer.
+bool QueryRootStats(Component* root, RootStats& stats);
+
+/// Return the line of the overlay: "Brushes N, tris N, last build X ms, reused K/N".
+ea::string FormatRootStatsLine(const RootStats& stats);
+
+/// Compute the size of the generated mesh of a procedural brush: the local axis aligned bounds of the mesh
+/// scaled by the world scale of the node. The size is not negative. It uses the event E_CSGSHAPEQUERYBOUNDS.
+/// Return false for a null component, a component that does not answer or a shape that is not valid.
+bool ComputeShapeWorldSize(Component* brush, Vector3& size);
 
 } // namespace Urho3D

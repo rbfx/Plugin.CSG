@@ -1188,6 +1188,7 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
     {
         ui::TextUnformatted(Format("{} {}", ICON_FA_CUBES, rootNode->GetName()).c_str());
         ui::TextWrapped("%s", GetBuildStatus(rootNode).c_str());
+        RenderStatsSection(rootNode);
         if (ui::SmallButton("Bake to Asset"))
             BakeToAsset();
         if (ui::IsItemHovered())
@@ -1637,6 +1638,22 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     finish();
 }
 
+void CsgEditorAddon::RenderStatsSection(Node* rootNode)
+{
+    RootStats stats;
+    if (!QueryRootStats(rootNode->GetComponent(RootType), stats))
+        return;
+
+    if (ui::CollapsingHeader("CSG stats", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ui::TextWrapped("%s", FormatRootStatsLine(stats).c_str());
+        ui::Text("Vertices %u%s", stats.vertices_, stats.building_ ? ", building..." : "");
+    }
+    // The reason shows also when the header is closed. The root does not know the brush that caused it.
+    if (!stats.valid_ && !stats.error_.empty())
+        ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: %s", stats.error_.c_str());
+}
+
 void CsgEditorAddon::RenderShapeSection()
 {
     Component* brush = handleBrush_;
@@ -1649,6 +1666,19 @@ void CsgEditorAddon::RenderShapeSection()
         ui::TextUnformatted("Valid");
     else
         ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: parameters are not valid");
+
+    Vector3 size;
+    if (ComputeShapeWorldSize(brush, size))
+    {
+        ui::Text("Size %.3f x %.3f x %.3f", size.x_, size.y_, size.z_);
+        ui::SameLine();
+        ui::TextDisabled("(?)");
+        if (ui::IsItemHovered())
+            ui::SetTooltip("Local size (scaled): the local bounds of the generated mesh times the node world scale.");
+    }
+    // The drag keeps the total delta in the local space of the brush.
+    if (dragState_ == HandleDragState::Active && dragTriedDelta_)
+        ui::Text("Delta: %.3f %.3f %.3f", dragTriedDelta_->x_, dragTriedDelta_->y_, dragTriedDelta_->z_);
 
     ui::Text("Selected handles: %u", static_cast<unsigned>(selectedHandles_.size()));
     if (!selectedHandles_.empty())

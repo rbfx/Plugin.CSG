@@ -105,6 +105,7 @@ private:
     void HandleMoveHandles(StringHash eventType, VariantMap& eventData);
     /// Answer `E_CSGSHAPERECENTER`. The data map gets the result.
     void HandleRecenter(StringHash eventType, VariantMap& eventData);
+    void HandleQueryBounds(StringHash eventType, VariantMap& eventData);
 
     /// Resize the "Materials" attribute to the number of material slots. The existing names stay.
     void UpdateMaterialSlots();
