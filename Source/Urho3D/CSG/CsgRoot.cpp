@@ -76,7 +76,8 @@ struct CsgRoot::BuildJob
     unsigned reusedOperands_{};
     /// Fingerprints of the operands. Empty if a brush is dead.
     ea::vector<BrushFingerprint> capturedBrushes_;
-    /// Final solid of the job. The worker thread sets it.
+    /// Final solid of the job after the shell filter. The worker thread sets it.
+    /// It is null if no shell dropped. Then the last fold state is the final solid.
     SharedPtr<const CsgSolid> resultSolid_;
     /// Statistics of the job. The worker thread fills it before it posts the main thread task.
     /// The main thread task adds the model build time. The posted task orders the two writes, so there is no data race.
@@ -851,6 +852,8 @@ void CsgRoot::Rebuild()
             job->reusedOperands_ = firstChanged;
         }
     }
+    // The worker thread must not move the reused states, so the vector gets its full size here.
+    job->stepSolids_.reserve(job->operands_.size());
     if (!job->baseSolid_)
     {
         if (baked_)
@@ -910,11 +913,13 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         EvaluateOperands(job->operands_, job->baseSolid_, job->stepSolids_, job->epsilon_);
         job->stats_.foldSteps_ = job->operands_.size() - job->reusedOperands_;
         // The shell filter applies to the final solid only. The fold states keep all shells.
-        SharedPtr<const CsgSolid> solid = job->stepSolids_.back();
+        // A reused fold state is also in the cache of the root, so the worker uses a raw pointer to it.
+        const CsgSolid* solid = job->stepSolids_.back().Get();
         unsigned droppedComponents = 0;
-        if (solid)
-            solid = CsgSolid::DropSmallComponents(solid, job->minComponentVolumeFraction_, &droppedComponents);
-        job->resultSolid_ = solid;
+        job->resultSolid_ =
+            CsgSolid::DropSmallComponentsOrNull(*solid, job->minComponentVolumeFraction_, &droppedComponents);
+        if (job->resultSolid_)
+            solid = job->resultSolid_.Get();
         const long long booleanUSec = timer.GetUSec(true);
 
         CsgModelCheck check;
@@ -1044,7 +1049,8 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     root->ClearBuildCache();
     if (job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size())
     {
-        root->cachedSolid_ = job->resultSolid_;
+        // A null result solid means that no shell dropped. Then the final solid is the last fold state.
+        root->cachedSolid_ = job->resultSolid_ ? job->resultSolid_ : job->stepSolids_.back();
         root->cachedBaseSolid_ = job->baseSolid_;
         root->cachedStepSolids_ = job->stepSolids_;
         root->cachedBrushes_ = job->capturedBrushes_;
@@ -1121,7 +1127,10 @@ bool CsgRoot::Bake()
 
     // Removal of a node calls UnregisterBrush, so the loop uses copies.
     const ea::vector<BrushFingerprint> brushes = cachedBrushes_;
-    cachedBrushes_.clear();
+    // The fold states contain the unbaked base. The baked solid is the new base.
+    ClearBuildCache();
+    cachedSolid_ = baked_->solid_;
+    cachedBaseSolid_ = baked_->solid_;
     ea::vector<WeakPtr<Node>> brushNodes;
     for (const BrushFingerprint& fingerprint : brushes)
     {

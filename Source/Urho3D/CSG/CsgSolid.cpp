@@ -2403,25 +2403,25 @@ SharedPtr<CsgSolid> CsgSolid::FromComponents(const CsgSolid& source, ea::span<co
     return builder.Finish();
 }
 
-SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
-    const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount)
+SharedPtr<const CsgSolid> CsgSolid::DropSmallComponentsOrNull(
+    const CsgSolid& solid, double minVolumeFraction, unsigned* droppedCount)
 {
     if (droppedCount)
         *droppedCount = 0;
-    if (!solid || minVolumeFraction <= 0.0 || !solid->IsClosed() || solid->ComponentCount() <= 1)
-        return solid;
+    if (minVolumeFraction <= 0.0 || !solid.IsClosed() || solid.ComponentCount() <= 1)
+        return nullptr;
 
-    const unsigned count = solid->ComponentCount();
+    const unsigned count = solid.ComponentCount();
     ea::vector<double> volumes(count);
     double largest = 0.0;
     for (unsigned c = 0; c < count; ++c)
     {
-        volumes[c] = solid->ComponentVolume(c);
+        volumes[c] = solid.ComponentVolume(c);
         largest = ea::max(largest, volumes[c]);
     }
     // Without a shell, nothing can tell the small parts from the large ones.
     if (largest <= 0.0)
-        return solid;
+        return nullptr;
 
     ea::vector<unsigned> shellList;
     unsigned positiveCount = 0;
@@ -2436,7 +2436,7 @@ SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
     }
     // If no shell drops, all cavities stay. A component with a zero volume stays too.
     if (shellList.size() == positiveCount)
-        return solid;
+        return nullptr;
 
     // The shells in the order of the volume, the smallest first. A cavity belongs to the first shell that has it.
     ea::vector<unsigned> byVolume;
@@ -2466,18 +2466,18 @@ SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
             // a vertex, and the centroid is not at a vertex. The function does not move the point. ContainsPoint
             // gives a fixed answer for a point on the surface of a shell. The limit: a cavity that has its first
             // triangle on the surface of its shell can get a wrong answer.
-            const unsigned face = solid->componentFaces_[solid->componentStart_[c]];
-            Vector3 point = solid->faces_[face]->vertices_[0].GetPosition();
-            if (solid->triangleStart_[face] < solid->triangleStart_[face + 1])
+            const unsigned face = solid.componentFaces_[solid.componentStart_[c]];
+            Vector3 point = solid.faces_[face]->vertices_[0].GetPosition();
+            if (solid.triangleStart_[face] < solid.triangleStart_[face + 1])
             {
-                const unsigned t = solid->triangleStart_[face] * 3;
-                point = (solid->trianglePositions_[t] + solid->trianglePositions_[t + 1]
-                            + solid->trianglePositions_[t + 2]) / 3.0f;
+                const unsigned t = solid.triangleStart_[face] * 3;
+                point = (solid.trianglePositions_[t] + solid.trianglePositions_[t + 1]
+                            + solid.trianglePositions_[t + 2]) / 3.0f;
             }
             for (const unsigned shell : byVolume)
             {
                 if (!single[shell])
-                    single[shell] = FromComponents(*solid, {&shell, 1});
+                    single[shell] = FromComponents(solid, {&shell, 1});
                 if (!single[shell]->ContainsPoint(point))
                     continue;
                 // The innermost shell that has the cavity decides.
@@ -2488,10 +2488,21 @@ SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
         }
     }
     if (keptList.size() == count)
-        return solid;
+        return nullptr;
     if (droppedCount)
         *droppedCount = count - keptList.size();
-    return FromComponents(*solid, {keptList.data(), keptList.size()});
+    return FromComponents(solid, {keptList.data(), keptList.size()});
+}
+
+SharedPtr<const CsgSolid> CsgSolid::DropSmallComponents(
+    const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount)
+{
+    if (droppedCount)
+        *droppedCount = 0;
+    if (!solid)
+        return solid;
+    SharedPtr<const CsgSolid> result = DropSmallComponentsOrNull(*solid, minVolumeFraction, droppedCount);
+    return result ? result : solid;
 }
 
 float CsgSolid::OpenEdgeLength() const

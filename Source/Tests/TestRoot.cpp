@@ -1391,3 +1391,65 @@ TEST_CASE("CsgRoot evaluates only the fold steps from the first changed operand"
         CHECK(root->GetLastBuildStats().foldSteps_ == 3);
     }
 }
+
+TEST_CASE("CsgRoot uses the baked base for a brush that comes before the next rebuild", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Baked");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+
+    // A long delay keeps the rebuild that Bake requests in the queue.
+    root->SetDeferredDelaySec(100.0f);
+    REQUIRE(root->Bake());
+    AddBoxBrush(root, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    AddBoxBrush(fresh, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    AddBoxBrush(fresh, "Extension", Vector3(3.0f, 0.0f, 0.0f), CsgOperation::Union);
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+}
+
+TEST_CASE("CsgRoot reuses the fold states when the last operand goes", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Shrunk");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    brushes[2]->GetNode()->Remove();
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 0);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[2]->GetNode()->Remove();
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+
+    // The next change of the last operand evaluates one step on the reused states.
+    brushes[1]->GetNode()->SetPosition(Vector3(-1.0f, -1.0f, 1.0f));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+}

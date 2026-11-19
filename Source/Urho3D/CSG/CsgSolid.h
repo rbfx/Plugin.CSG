@@ -241,6 +241,10 @@ public:
     /// The count of the dropped components goes to droppedCount if it is not null.
     static SharedPtr<const CsgSolid> DropSmallComponents(
         const SharedPtr<const CsgSolid>& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);
+    /// Same as DropSmallComponents, but return null if no component drops.
+    /// The function does not make a reference to the input solid, so a worker thread can use a shared solid.
+    static SharedPtr<const CsgSolid> DropSmallComponentsOrNull(
+        const CsgSolid& solid, double minVolumeFraction, unsigned* droppedCount = nullptr);
 
     /// Return a copy of the face with the winding, the normals and the plane reversed.
     static CsgSharedPolygon Flipped(const CsgPolygon& face);
