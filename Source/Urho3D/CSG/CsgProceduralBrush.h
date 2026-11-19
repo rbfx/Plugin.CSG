@@ -33,7 +33,8 @@ public:
     explicit CsgProceduralBrush(Context* context);
     ~CsgProceduralBrush() override;
 
-    /// Register the common attributes: "Is Enabled", "Operation" and "Materials". There is no "Model".
+    /// Register the common attributes: "Is Enabled", "Operation", "Materials", "UV Mode", "UV Scale" and "UV Offset".
+    /// There is no "Model". The default "UV Mode" is Root.
     /// @nobind
     static void RegisterObject(Context* context);
 

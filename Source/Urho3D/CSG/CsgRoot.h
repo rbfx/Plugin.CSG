@@ -217,11 +217,14 @@ private:
         Matrix3x4 transform_{Matrix3x4::IDENTITY};
         unsigned meshId_{};
         CsgOperation op_{};
+        CsgUvMode uvMode_{};
+        float uvScale_{1.0f};
+        Vector2 uvOffset_{Vector2::ZERO};
 
         bool operator==(const BrushFingerprint& rhs) const
         {
             return brush_ == rhs.brush_ && model_ == rhs.model_ && transform_ == rhs.transform_ && meshId_ == rhs.meshId_
-                && op_ == rhs.op_;
+                && op_ == rhs.op_ && uvMode_ == rhs.uvMode_ && uvScale_ == rhs.uvScale_ && uvOffset_ == rhs.uvOffset_;
         }
         bool operator!=(const BrushFingerprint& rhs) const { return !(*this == rhs); }
     };

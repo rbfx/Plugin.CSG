@@ -308,6 +308,54 @@ ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(const Model* model, const Matri
     return polygons;
 }
 
+void CsgProjectPolygonUvs(ea::vector<CsgPolygon>& polygons, CsgUvMode mode, float scale, const Vector2& offset)
+{
+    if (mode == CsgUvMode::Local)
+    {
+        if (scale == 1.0f && offset == Vector2::ZERO)
+            return;
+        for (CsgPolygon& polygon : polygons)
+        {
+            for (ModelVertex& vertex : polygon.vertices_)
+            {
+                vertex.uv_[0].x_ = vertex.uv_[0].x_ * scale + offset.x_;
+                vertex.uv_[0].y_ = vertex.uv_[0].y_ * scale + offset.y_;
+            }
+        }
+        return;
+    }
+
+    for (CsgPolygon& polygon : polygons)
+    {
+        const Vector3& planeNormal = polygon.plane_.normal_;
+        const float ax = Abs(planeNormal.x_);
+        const float ay = Abs(planeNormal.y_);
+        const float az = Abs(planeNormal.z_);
+        const unsigned axis = ax >= ay && ax >= az ? 0 : (ay >= az ? 1 : 2);
+        const float s = planeNormal.Data()[axis] >= 0.0f ? 1.0f : -1.0f;
+
+        // The axes of the coordinates: first is U, second is up.
+        const unsigned firstAxis = axis == 0 ? 2 : 0;
+        const unsigned secondAxis = axis == 1 ? 2 : 1;
+        const float uSign = axis == 2 ? s : -s;
+        Vector3 uDir = Vector3::ZERO;
+        uDir.MutableData()[firstAxis] = uSign;
+        Vector3 upDir = Vector3::ZERO;
+        upDir.MutableData()[secondAxis] = 1.0f;
+
+        for (ModelVertex& vertex : polygon.vertices_)
+        {
+            const Vector3 position = vertex.GetPosition();
+            vertex.uv_[0].x_ = uSign * position.Data()[firstAxis] * scale + offset.x_;
+            vertex.uv_[0].y_ = -position.Data()[secondAxis] * scale + offset.y_;
+
+            const Vector3 normal = vertex.GetNormal();
+            const Vector3 tangent = (uDir - normal * normal.DotProduct(uDir)).NormalizedOrDefault(uDir);
+            vertex.tangent_ = Vector4(tangent, tangent.CrossProduct(normal).DotProduct(upDir) >= 0.0f ? 1.0f : -1.0f);
+        }
+    }
+}
+
 SharedPtr<CsgSolid> CsgBuildSolidFromModel(
     const Model* model, const Matrix3x4& worldTransform, unsigned meshId, float epsilon)
 {

@@ -29,6 +29,10 @@ void CsgBrush::RegisterObject(Context* context)
 
     URHO3D_ENUM_ATTRIBUTE("Operation", operation_, CsgOperationNames, CsgOperation::Union, AM_DEFAULT);
     URHO3D_COPY_BASE_ATTRIBUTES(CsgComponent);
+    URHO3D_ENUM_ACCESSOR_ATTRIBUTE(
+        "UV Mode", GetUvMode, SetUvMode, CsgUvMode, CsgUvModeNames, CsgUvMode::Local, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("UV Scale", GetUvScale, SetUvScale, float, 1.0f, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("UV Offset", GetUvOffset, SetUvOffset, Vector2, Vector2::ZERO, AM_DEFAULT);
 }
 
 void CsgBrush::ApplyAttributes()
@@ -81,6 +85,33 @@ void CsgBrush::SetOperation(CsgOperation op)
         return;
 
     operation_ = op;
+    MarkDirty();
+}
+
+void CsgBrush::SetUvMode(CsgUvMode mode)
+{
+    if (uvMode_ == mode)
+        return;
+
+    uvMode_ = mode;
+    MarkDirty();
+}
+
+void CsgBrush::SetUvScale(float scale)
+{
+    if (uvScale_ == scale)
+        return;
+
+    uvScale_ = scale;
+    MarkDirty();
+}
+
+void CsgBrush::SetUvOffset(const Vector2& offset)
+{
+    if (uvOffset_ == offset)
+        return;
+
+    uvOffset_ = offset;
     MarkDirty();
 }
 

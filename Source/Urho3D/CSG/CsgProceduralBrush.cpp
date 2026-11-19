@@ -14,6 +14,7 @@ namespace Urho3D
 CsgProceduralBrush::CsgProceduralBrush(Context* context)
     : CsgBrush(context)
 {
+    uvMode_ = CsgUvMode::Root;
 }
 
 CsgProceduralBrush::~CsgProceduralBrush() = default;
@@ -27,6 +28,10 @@ void CsgProceduralBrush::RegisterObject(Context* context)
         "Operation", GetOperation, SetOperation, CsgOperation, CsgOperationNames, CsgOperation::Union, AM_DEFAULT);
     URHO3D_ACCESSOR_ATTRIBUTE("Materials", GetMaterialsAttr, SetMaterials, ResourceRefList,
         ResourceRefList(Material::GetTypeStatic()), AM_DEFAULT);
+    URHO3D_ENUM_ACCESSOR_ATTRIBUTE(
+        "UV Mode", GetUvMode, SetUvMode, CsgUvMode, CsgUvModeNames, CsgUvMode::Root, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("UV Scale", GetUvScale, SetUvScale, float, 1.0f, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("UV Offset", GetUvOffset, SetUvOffset, Vector2, Vector2::ZERO, AM_DEFAULT);
 }
 
 Model* CsgProceduralBrush::GetShapeModel() const

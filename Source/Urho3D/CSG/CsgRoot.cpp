@@ -41,6 +41,9 @@ struct CsgRoot::BrushStep
     ResourceRefList materials_;
     unsigned meshId_{};
     CsgOperation op_{};
+    CsgUvMode uvMode_{};
+    float uvScale_{1.0f};
+    Vector2 uvOffset_{Vector2::ZERO};
     WeakPtr<CsgBrush> brush_;
     /// Brush to root frame transform.
     Matrix3x4 transform_{Matrix3x4::IDENTITY};
@@ -1481,6 +1484,9 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
         step.meshId_ = sourceModels.size();
         step.op_ = brush->GetOperation();
         step.brush_ = brush;
+        step.uvMode_ = brush->GetUvMode();
+        step.uvScale_ = brush->GetUvScale();
+        step.uvOffset_ = brush->GetUvOffset();
 
         // Store source metadata for final model build on the main thread.
         sourceModels.push_back(step.model_);
@@ -1489,6 +1495,7 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
         // Extract polygons in the root frame (main thread).
         step.transform_ = rootFrame * child->GetWorldTransform();
         step.polygons_ = CsgBuildPolygonsFromModel(step.model_.Get(), step.transform_, step.meshId_);
+        CsgProjectPolygonUvs(step.polygons_, step.uvMode_, step.uvScale_, step.uvOffset_);
     }
 
     return !operands.empty();
@@ -1511,7 +1518,8 @@ bool CsgRoot::TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vecto
             output.clear();
             return false;
         }
-        output.push_back({operand.brush_, operand.model_, operand.transform_, operand.meshId_, operand.op_});
+        output.push_back({operand.brush_, operand.model_, operand.transform_, operand.meshId_, operand.op_, operand.uvMode_,
+            operand.uvScale_, operand.uvOffset_});
     }
     return true;
 }

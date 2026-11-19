@@ -4759,3 +4759,415 @@ TEST_CASE("CsgRingBrush generates the model fast", "[root][procedural]")
     CHECK(defaultMs < 15.0 * slowFactor);
     CHECK(fineMs < 150.0 * slowFactor);
 }
+
+namespace
+{
+
+/// The expected Root UV 0 of a point on a face with an axis aligned normal. See `CsgProjectPolygonUvs`.
+Vector2 ExpectedRootUv(const Vector3& p, const Vector3& n, float scale, const Vector2& offset)
+{
+    const float ax = Abs(n.x_);
+    const float ay = Abs(n.y_);
+    const float az = Abs(n.z_);
+    Vector2 uv;
+    if (ax >= ay && ax >= az)
+        uv = Vector2((n.x_ > 0.0f ? -p.z_ : p.z_), -p.y_);
+    else if (ay >= az)
+        uv = Vector2((n.y_ > 0.0f ? -p.x_ : p.x_), -p.z_);
+    else
+        uv = Vector2((n.z_ > 0.0f ? p.x_ : -p.x_), -p.y_);
+    return uv * scale + offset;
+}
+
+ea::vector<CsgPolygon> GetOutputPolygons(CsgRoot* root)
+{
+    const StaticModel* output = GetOutput(root);
+    REQUIRE(output);
+    REQUIRE(output->GetModel());
+    return CsgBuildPolygonsFromModel(output->GetModel(), Matrix3x4::IDENTITY);
+}
+
+/// Check that each output vertex has the Root UV of its position. Return the number of vertices.
+unsigned CheckRootUvs(CsgRoot* root, float scale, const Vector2& offset)
+{
+    unsigned count = 0;
+    for (const CsgPolygon& polygon : GetOutputPolygons(root))
+    {
+        for (const ModelVertex& v : polygon.vertices_)
+        {
+            const Vector2 expected = ExpectedRootUv(v.GetPosition(), v.GetNormal(), scale, offset);
+            CHECK(v.uv_[0].x_ == Catch::Approx(expected.x_).margin(3e-3));
+            CHECK(v.uv_[0].y_ == Catch::Approx(expected.y_).margin(3e-3));
+            ++count;
+        }
+    }
+    return count;
+}
+
+float AverageU(CsgRoot* root, const Vector3& normal)
+{
+    float sum = 0.0f;
+    unsigned count = 0;
+    for (const CsgPolygon& polygon : GetOutputPolygons(root))
+    {
+        for (const ModelVertex& v : polygon.vertices_)
+        {
+            if (v.GetNormal().DotProduct(normal) > 0.99f)
+            {
+                sum += v.uv_[0].x_;
+                ++count;
+            }
+        }
+    }
+    REQUIRE(count > 0);
+    return sum / count;
+}
+
+} // namespace
+
+TEST_CASE("CsgBrush Root UV mode projects the box in the frame of the root", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    CsgBoxBrush* brush = AddProceduralBox(
+        root, "Box", Vector3(0.3f, 0.2f, -0.7f), Vector3(2.0f, 1.0f, 3.0f), CsgOperation::Union);
+    CHECK(brush->GetUvMode() == CsgUvMode::Root);
+
+    BuildFully(root, workQueue);
+    CHECK(CheckRootUvs(root, 1.0f, Vector2::ZERO) == 36);
+
+    SECTION("A move shifts U on the Y and Z faces")
+    {
+        const float uZ = AverageU(root, Vector3::FORWARD);
+        const float uY = AverageU(root, Vector3::UP);
+        const float uX = AverageU(root, Vector3::RIGHT);
+        brush->GetNode()->Translate(Vector3(0.5f, 0.0f, 0.0f), TS_PARENT);
+        BuildFully(root, workQueue);
+        CheckRootUvs(root, 1.0f, Vector2::ZERO);
+        CHECK(AverageU(root, Vector3::FORWARD) - uZ == Catch::Approx(0.5f).margin(1e-4));
+        CHECK(AverageU(root, Vector3::UP) - uY == Catch::Approx(-0.5f).margin(1e-4));
+        CHECK(AverageU(root, Vector3::RIGHT) - uX == Catch::Approx(0.0f).margin(1e-4));
+    }
+
+    SECTION("The scale multiplies and the offset adds")
+    {
+        brush->SetUvScale(2.0f);
+        BuildFully(root, workQueue);
+        CheckRootUvs(root, 2.0f, Vector2::ZERO);
+
+        brush->SetUvOffset(Vector2(0.25f, -0.5f));
+        BuildFully(root, workQueue);
+        CheckRootUvs(root, 2.0f, Vector2(0.25f, -0.5f));
+
+        const float uZ = AverageU(root, Vector3::FORWARD);
+        brush->GetNode()->Translate(Vector3(0.5f, 0.0f, 0.0f), TS_PARENT);
+        BuildFully(root, workQueue);
+        CHECK(AverageU(root, Vector3::FORWARD) - uZ == Catch::Approx(1.0f).margin(1e-4));
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBrush Root UV mode is continuous across adjacent boxes", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    AddProceduralBox(root, "A", Vector3::ZERO, Vector3(2.0f, 2.0f, 2.0f), CsgOperation::Union);
+    AddProceduralBox(root, "B", Vector3(1.5f, 0.25f, 0.0f), Vector3(1.0f, 1.0f, 2.0f), CsgOperation::Union);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+    CHECK(CheckRootUvs(root, 1.0f, Vector2::ZERO) > 0);
+
+    // The vertices on the plane x = 1 of the +Z face from both boxes have the same UV at the same point.
+    unsigned onJunction = 0;
+    for (const CsgPolygon& polygon : GetOutputPolygons(root))
+    {
+        for (const ModelVertex& v : polygon.vertices_)
+        {
+            if (v.GetNormal().z_ > 0.99f && Abs(v.GetPosition().x_ - 1.0f) < 1e-4f)
+            {
+                CHECK(v.uv_[0].x_ == Catch::Approx(v.GetPosition().x_).margin(1e-4));
+                ++onJunction;
+            }
+        }
+    }
+    CHECK(onJunction > 0);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgProjectPolygonUvs does not mirror the texture on any face", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    AddBoxModel(context, "Csg/UvBox.mdl", Vector3(0.5f, 1.0f, 1.5f));
+    auto* model = context->GetSubsystem<ResourceCache>()->GetResource<Model>("Csg/UvBox.mdl");
+    REQUIRE(model);
+
+    ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(
+        model, Matrix3x4(Vector3(0.4f, -0.3f, 2.0f), Quaternion::IDENTITY, 1.0f));
+    CsgProjectPolygonUvs(polygons, CsgUvMode::Root, 1.0f, Vector2::ZERO);
+
+    ea::hash_set<int> seenFaces;
+    for (const CsgPolygon& polygon : polygons)
+    {
+        for (const ModelVertex& v : polygon.vertices_)
+        {
+            const Vector3 n = v.GetNormal();
+            const Vector3 t = v.tangent_.ToVector3();
+            // The shader rule.
+            const Vector3 b = t.CrossProduct(n) * v.tangent_.w_;
+            const Vector3 up = Abs(n.y_) > 0.99f ? Vector3::FORWARD : Vector3::UP;
+            CHECK(b.DotProduct(up) > 0.99f);
+            // Seen from outside: tangent to the right, bitangent up, normal to the viewer.
+            CHECK(t.CrossProduct(b).DotProduct(n) > 0.99f);
+            seenFaces.insert(static_cast<int>(n.x_ * 1 + n.y_ * 2 + n.z_ * 3 + 10));
+        }
+        // U grows along the tangent and V grows against the bitangent.
+        const ModelVertex& v0 = polygon.vertices_[0];
+        const ModelVertex& v1 = polygon.vertices_[1];
+        const Vector3 delta = v1.GetPosition() - v0.GetPosition();
+        const Vector3 t = v0.tangent_.ToVector3();
+        const Vector3 b = t.CrossProduct(v0.GetNormal()) * v0.tangent_.w_;
+        CHECK(v1.uv_[0].x_ - v0.uv_[0].x_ == Catch::Approx(t.DotProduct(delta)).margin(1e-4));
+        CHECK(v1.uv_[0].y_ - v0.uv_[0].y_ == Catch::Approx(-b.DotProduct(delta)).margin(1e-4));
+    }
+    CHECK(seenFaces.size() == 6);
+}
+
+TEST_CASE("CsgProjectPolygonUvs picks the dominant axis for a tilted face", "[root][uv]")
+{
+    const auto makeQuad = [](const Vector3& normal)
+    {
+        // A quad in the plane of the normal.
+        const Vector3 a = normal.CrossProduct(Vector3::FORWARD).NormalizedOrDefault(Vector3::RIGHT);
+        const Vector3 b = normal.CrossProduct(a);
+        ea::vector<ModelVertex> verts;
+        for (const Vector3& p : {-a - b, a - b, a + b, -a + b})
+        {
+            ModelVertex v{};
+            v.SetPosition(p + Vector3(0.0f, 0.0f, 0.0f));
+            v.SetNormal(normal);
+            verts.push_back(v);
+        }
+        return CsgPolygon(ea::move(verts), 0);
+    };
+
+    ea::vector<CsgPolygon> polygons;
+    polygons.push_back(makeQuad(Vector3(0.6f, 0.8f, 0.0f).Normalized()));
+    polygons.push_back(makeQuad(Vector3(0.8f, 0.6f, 0.0f).Normalized()));
+    CsgProjectPolygonUvs(polygons, CsgUvMode::Root, 1.0f, Vector2::ZERO);
+
+    // The first polygon uses Y: (x, z). The second uses X: (z, y).
+    for (const ModelVertex& v : polygons[0].vertices_)
+    {
+        CHECK(v.uv_[0].x_ == Catch::Approx(-v.GetPosition().x_).margin(1e-5));
+        CHECK(v.uv_[0].y_ == Catch::Approx(-v.GetPosition().z_).margin(1e-5));
+    }
+    for (const ModelVertex& v : polygons[1].vertices_)
+    {
+        CHECK(v.uv_[0].x_ == Catch::Approx(-v.GetPosition().z_).margin(1e-5));
+        CHECK(v.uv_[0].y_ == Catch::Approx(-v.GetPosition().y_).margin(1e-5));
+    }
+}
+
+TEST_CASE("CsgBrush Local UV mode keeps the UV of the mesh with the defaults", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    CsgBoxParams boxParams;
+    boxParams.size_ = Vector3(2.0f, 1.0f, 3.0f);
+    AddGeneratedBoxModel(context, "Csg/BoxB.mdl", boxParams);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    Node* brushNode = root->GetNode()->CreateChild("Brush");
+    brushNode->SetPosition(Vector3(0.5f, 0.0f, 0.0f));
+    auto* brush = brushNode->CreateComponent<CsgBrush>();
+    brush->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxB.mdl"));
+    CHECK(brush->GetUvMode() == CsgUvMode::Local);
+    CHECK(brush->GetUvScale() == 1.0f);
+    CHECK(brush->GetUvOffset() == Vector2::ZERO);
+
+    const auto* source = context->GetSubsystem<ResourceCache>()->GetResource<Model>("Csg/BoxB.mdl");
+    const ea::vector<CsgPolygon> reference = CsgBuildPolygonsFromModel(
+        source, Matrix3x4(Vector3(0.5f, 0.0f, 0.0f), Quaternion::IDENTITY, 1.0f));
+
+    // Each output vertex has the UV of the source vertex at the same position and normal.
+    const auto check = [&](float scale, const Vector2& offset)
+    {
+        for (const CsgPolygon& polygon : GetOutputPolygons(root))
+        {
+            for (const ModelVertex& v : polygon.vertices_)
+            {
+                bool found = false;
+                for (const CsgPolygon& ref : reference)
+                {
+                    for (const ModelVertex& r : ref.vertices_)
+                    {
+                        if (r.GetPosition().Equals(v.GetPosition(), 1e-4f) && r.GetNormal().DotProduct(v.GetNormal()) > 0.99f)
+                        {
+                            found = true;
+                            CHECK(v.uv_[0].x_ == Catch::Approx(r.uv_[0].x_ * scale + offset.x_).margin(2e-3));
+                            CHECK(v.uv_[0].y_ == Catch::Approx(r.uv_[0].y_ * scale + offset.y_).margin(2e-3));
+                            CHECK(v.uv_[1].x_ == Catch::Approx(r.uv_[1].x_).margin(2e-3));
+                            CHECK(v.uv_[1].y_ == Catch::Approx(r.uv_[1].y_).margin(2e-3));
+                        }
+                    }
+                }
+                CHECK(found);
+            }
+        }
+    };
+
+    BuildFully(root, workQueue);
+    check(1.0f, Vector2::ZERO);
+
+    brush->SetUvScale(2.0f);
+    brush->SetUvOffset(Vector2(0.5f, 0.25f));
+    BuildFully(root, workQueue);
+    check(2.0f, Vector2(0.5f, 0.25f));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRoot folds again from the brush with a changed UV setting", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Folded");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    SECTION("The third brush")
+    {
+        brushes[2]->SetUvScale(2.0f);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+        brushes[2]->SetUvOffset(Vector2(0.5f, 0.0f));
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+        brushes[2]->SetUvMode(CsgUvMode::Root);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    }
+
+    SECTION("The first brush")
+    {
+        brushes[0]->SetUvScale(2.0f);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    }
+}
+
+TEST_CASE("CsgBrush UV attributes have the right defaults and survive a save and a load", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+
+    const auto checkAttributes = [](CsgBrush* brush, CsgUvMode mode)
+    {
+        const auto* attributes = brush->GetAttributes();
+        REQUIRE(attributes);
+        int modeIndex = -1;
+        int materialsIndex = -1;
+        for (unsigned i = 0; i < attributes->size(); ++i)
+        {
+            const ea::string& name = (*attributes)[i].name_;
+            if (name == "UV Mode")
+                modeIndex = i;
+            else if (name == "Materials")
+                materialsIndex = i;
+            else if (name == "UV Scale")
+                CHECK(i == modeIndex + 1);
+            else if (name == "UV Offset")
+                CHECK(i == modeIndex + 2);
+        }
+        CHECK(materialsIndex >= 0);
+        CHECK(modeIndex > materialsIndex);
+        CHECK(brush->GetUvMode() == mode);
+        CHECK(brush->GetUvScale() == 1.0f);
+        CHECK(brush->GetUvOffset() == Vector2::ZERO);
+    };
+
+    ea::vector<CsgBrush*> brushes;
+    const auto add = [&](CsgBrush* brush, CsgUvMode mode)
+    {
+        checkAttributes(brush, mode);
+        brush->SetUvMode(mode == CsgUvMode::Root ? CsgUvMode::Local : CsgUvMode::Root);
+        brush->SetUvScale(3.0f);
+        brush->SetUvOffset(Vector2(0.25f, 0.5f));
+        brushes.push_back(brush);
+    };
+    add(root->GetNode()->CreateChild("Model")->CreateComponent<CsgBrush>(), CsgUvMode::Local);
+    add(root->GetNode()->CreateChild("Box")->CreateComponent<CsgBoxBrush>(), CsgUvMode::Root);
+    add(root->GetNode()->CreateChild("Sphere")->CreateComponent<CsgSphereBrush>(), CsgUvMode::Root);
+    add(root->GetNode()->CreateChild("Cylinder")->CreateComponent<CsgCylinderBrush>(), CsgUvMode::Root);
+    add(root->GetNode()->CreateChild("Ring")->CreateComponent<CsgRingBrush>(), CsgUvMode::Root);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRoot = loaded->GetChild("Root");
+    REQUIRE(loadedRoot);
+    for (const char* name : {"Model", "Box", "Sphere", "Cylinder", "Ring"})
+    {
+        Node* node = loadedRoot->GetChild(name);
+        REQUIRE(node);
+        auto* brush = node->GetDerivedComponent<CsgBrush>();
+        REQUIRE(brush);
+        CHECK(brush->GetUvMode() == (ea::string(name) == "Model" ? CsgUvMode::Root : CsgUvMode::Local));
+        CHECK(brush->GetUvScale() == 3.0f);
+        CHECK(brush->GetUvOffset() == Vector2(0.25f, 0.5f));
+    }
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBrush Root UV mode survives the fold with a sphere and a rotated box", "[root][uv]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    AddProceduralBox(root, "Base", Vector3::ZERO, Vector3(3.0f, 3.0f, 3.0f), CsgOperation::Union);
+    AddProceduralSphere(root, "Sphere", Vector3(1.0f, 1.0f, 0.5f), Vector3(1.2f, 1.2f, 1.2f), CsgOperation::DifferenceAB);
+    CsgBoxBrush* tilted =
+        AddProceduralBox(root, "Tilted", Vector3(-0.5f, 0.0f, 0.5f), Vector3(1.0f, 4.0f, 1.0f), CsgOperation::DifferenceAB);
+    tilted->GetNode()->SetRotation(Quaternion(30.0f, Vector3(0.3f, 1.0f, 0.2f)));
+    BuildFully(root, workQueue);
+
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(!GetOutputPolygons(root).empty());
+    for (const CsgPolygon& polygon : GetOutputPolygons(root))
+    {
+        for (const ModelVertex& v : polygon.vertices_)
+        {
+            CHECK(std::isfinite(v.uv_[0].x_));
+            CHECK(std::isfinite(v.uv_[0].y_));
+        }
+    }
+    CHECK(errors.GetCount() == 0);
+}

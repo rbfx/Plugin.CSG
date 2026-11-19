@@ -46,6 +46,15 @@ public:
     CsgOperation GetOperation() const { return operation_; }
     /// Set boolean operation used when combining this brush with the current CSG result.
     void SetOperation(CsgOperation op);
+    /// Get the UV mode. Local keeps the UV of the mesh. Root projects the UV in the frame of the root.
+    CsgUvMode GetUvMode() const { return uvMode_; }
+    void SetUvMode(CsgUvMode mode);
+    /// Get the texture repeats for each unit.
+    float GetUvScale() const { return uvScale_; }
+    void SetUvScale(float scale);
+    /// Get the UV offset. It is added after the scale.
+    const Vector2& GetUvOffset() const { return uvOffset_; }
+    void SetUvOffset(const Vector2& offset);
     /// Whether brush state has changed since last acknowledged by a root.
     bool IsDirty() const { return dirty_; }
     /// Acknowledge brush state change.
@@ -74,6 +83,9 @@ protected:
     void OnModelChanged() override;
     void OnMaterialsChanged() override;
 
+    /// The default is Local. A procedural brush sets Root in its constructor.
+    CsgUvMode uvMode_{CsgUvMode::Local};
+
 private:
     friend class CsgRoot;
 
@@ -81,6 +93,8 @@ private:
     void UpdateRootRegistration();
 
     CsgOperation operation_{CsgOperation::Union};
+    float uvScale_{1.0f};
+    Vector2 uvOffset_{Vector2::ZERO};
     WeakPtr<CsgRoot> root_;
     bool dirty_{};
 };
