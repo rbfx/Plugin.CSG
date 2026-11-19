@@ -1873,3 +1873,33 @@ TEST_CASE("CsgRoot with an empty base model bakes and keeps building", "[root]")
     CHECK(!root->GetLastBuildFailed());
     CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
 }
+
+TEST_CASE("CsgRoot leaves out a removed brush at once with no delay", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Removed");
+    root->SetDeferredDelaySec(0.0f);
+    AddBoxBrush(root, "First", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    CsgBrush* second = AddBoxBrush(root, "Second", Vector3(-1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().foldSteps_ == 2);
+
+    second->GetNode()->Remove();
+    // The result of the build arrives in the first frame. The test runs only two frames.
+    RunFrames(root, workQueue, 2);
+    CHECK(root->GetLastBuildStats().foldSteps_ <= 1);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+
+    CsgRoot* expected = MakeBoxRoot(scene, "OneBrush");
+    AddBoxBrush(expected, "First", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(expected, workQueue);
+    CheckSameOutput(root, expected);
+}
