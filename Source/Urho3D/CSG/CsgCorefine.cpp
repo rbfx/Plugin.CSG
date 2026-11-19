@@ -3181,12 +3181,38 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
         const CsgGridPoint2 p2 = corner(2);
         const CsgGridPoint2 q = CsgExact::Project(candidate, view.dropAxis_, view.flip_);
         const int side = CsgExact::Orient2(p0, p1, p2);
-        // A position on the boundary counts as inside if strict is false.
+        // If strict is false, a position on the boundary counts as inside if the exact crossing is on that edge too.
         const int q0 = CsgExact::Orient2(p0, p1, q);
         const int q1 = CsgExact::Orient2(p1, p2, q);
         const int q2 = CsgExact::Orient2(p2, p0, q);
+        // A twin crossing: the triangle edge crosses a triangle of the crossing edge at the same exact point.
+        // The twin is a vertex of the chain of the triangle edge. If the twin has the candidate as grid point,
+        // the two crossings weld to one vertex on the boundary of the map. So the position is not a fold.
+        const auto onTwin = [&](int corner)
+        {
+            const int u = other.triangleIds_[key.triangle_ * 3 + corner];
+            const int v = other.triangleIds_[key.triangle_ * 3 + (corner + 1) % 3];
+            for (int i = 1; i < viewCount; ++i)
+            {
+                const int* id = crossingIds_.Find(
+                    CsgCrossingKey{ea::min(u, v), ea::max(u, v), views[i].triangle_, !key.edgeInSecond_});
+                if (id && *id >= CrossingBase() && crossings_[*id - CrossingBase()].grid_ == candidate)
+                    return true;
+            }
+            return false;
+        };
+        // A position on the line of a triangle edge is a fold if the exact crossing is not on that edge.
+        // The rounding then puts a point of the inside on the boundary, and a region of the map gets zero width.
+        const auto exactOnEdge = [&](int corner)
+        {
+            const int u = other.triangleIds_[key.triangle_ * 3 + corner];
+            const int v = other.triangleIds_[key.triangle_ * 3 + (corner + 1) % 3];
+            return VolumeSign(edges.grid_[key.low_], edges.grid_[key.high_], other.grid_[u], other.grid_[v]) == 0;
+        };
+        const auto outsideOf = [&](int orient, int corner)
+        { return orient == -side ? !onTwin(corner) : orient == 0 && !exactOnEdge(corner); };
         const bool outside = strict ? (q0 != side || q1 != side || q2 != side)
-                                    : (q0 == -side || q1 == -side || q2 == -side);
+                                    : (outsideOf(q0, 0) || outsideOf(q1, 1) || outsideOf(q2, 2));
         if (side == 0 || outside)
             rules |= CsgRuleInside;
     }

@@ -19,6 +19,7 @@ set (SOURCE_FILES
     TestCorefine.cpp
     TestSplit.cpp
     TestBoolean.cpp
+    TestBooleanSphereCorner.cpp
     TestTriangulation.cpp
     TestRoot.cpp
     TestEditorOps.cpp
