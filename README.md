@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`) generates its model from parameters. See "Procedural box" and "Procedural sphere".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere" and "Procedural cylinder".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -136,6 +136,7 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 
 - `Box`: a procedural `CsgBoxBrush`. It has no model file.
 - `Sphere`: a procedural `CsgSphereBrush`. It has no model file.
+- `Cylinder`: a procedural `CsgCylinderBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -167,6 +168,22 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - UV 0 is (longitude / 2pi, latitude / pi). UV 1 is equal to UV 0. The tangent follows the longitude direction.
 - The mesh is a polyhedron that is inscribed in the ellipsoid. Its volume is a little less than the ellipsoid volume.
 - A value that is not finite gets its default value. The parameters are always valid after clamping.
+
+### Procedural cylinder
+
+`CsgCylinderBrush` generates a cylinder, a cone or a frustum from parameters. It has no "Model" attribute. See `CsgGenerateCylinder`.
+
+- "Bottom Center" and "Top Center": the ends of the axis, in local space. Each component is in [-16384, 16384]. The defaults are (0, -0.5, 0) and (0, 0.5, 0). The axis can be sheared or tilted.
+- "Bottom Radius" and "Top Radius": the two radii of an end along the local X and Z axes. The end lies in the plane perpendicular to the Y axis, not to the tilted axis. Each component is in [0, 16384]. The default is (0.5, 0.5).
+- A pair with both components below 0.001 is (0, 0): the end is an apex. A cone has one apex position and no cap. A pair with only one zero component gets 0.001 for it.
+- "Segments": 3 to 128. The default is 24. "Height Segments": 1 to 64. The default is 1.
+- "Bulge": from -0.95 to 4. The default is 0. The radius at the height fraction t is lerp(bottom, top, t) * (1 + bulge * 4 * t * (1 - t)). The center line stays straight.
+- "Smooth Normals": the default is on. Off gives a flat normal for each triangle. A cap normal is always flat.
+- "Materials": three slots, in this order: 0 the side, 1 the top cap, 2 the bottom cap. An apex end has no cap, and its slot stays free. The other slots keep their numbers.
+- UV 0 of the side is (angle / 2pi, height fraction). UV 0 of a cap is the planar (x + 0.5, z + 0.5). UV 1 is equal to UV 0.
+- Validity: the centers must be at least 0.001 apart. Both ends must not be apexes. The volume must be positive. A shape that is not valid gives no operand and logs one warning.
+- If the top is below the bottom in Y, the generator flips the winding. The volume stays positive and the top cap stays at "Top Center".
+- A value that is not finite gets its default value.
 
 ### Operation colors and operand overlay
 
@@ -243,6 +260,10 @@ The editor has no test harness for addons. Do these checks by hand:
 33. Select "Sphere" in the preset combo. Push B. A `CsgSphereBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgSphereBrush".
 34. Change "Radius", "Segments", "Rings" and "Smooth Normals" in the inspector. The wireframe and the result change at once. A value outside the range is clamped.
 35. Set a material in the slot of the sphere. The whole sphere gets the material. Drop a model on the sphere. The sphere does not change.
+36. Select "Cylinder" in the preset combo. Push B. A `CsgCylinderBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgCylinderBrush".
+37. Set "Top Radius" to (0, 0). The brush is a cone and the top cap goes. Set a material in slot 1 and in slot 2. Only the bottom cap gets the slot 2 material.
+38. Move "Top Center" to (1, 1, 0). The axis tilts and the result stays closed. Swap the two centers in Y. The shape stays solid and is not inside out.
+39. Set "Bulge" to 2 and "Height Segments" to 4. The body bulges. Set both centers to the same point. The wireframe goes and the log shows one warning.
 
 ## How to try the sample scene
 

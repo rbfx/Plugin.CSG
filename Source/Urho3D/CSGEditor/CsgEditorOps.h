@@ -62,7 +62,7 @@ struct CsgBrushPreset
     const char* typeName_;
 };
 
-/// Return the brush presets. The first presets are the procedural box and the procedural sphere.
+/// Return the brush presets. The first presets are the procedural box, sphere and cylinder.
 ea::span<const CsgBrushPreset> GetBrushPresets();
 /// Return true if the editor can use the preset. A procedural preset needs its registered type.
 bool IsBrushPresetAvailable(Context* context, const CsgBrushPreset& preset);
