@@ -133,10 +133,11 @@ Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* mo
     return node;
 }
 
-/// The procedural box is first. The model presets use the CoreData models.
+/// The procedural box and sphere are first. The model presets use the CoreData models.
 /// Tests.CSG checks that CSG accepts each model as a closed mesh.
 const CsgBrushPreset BrushPresets[] = {
     {"Box", nullptr, "CsgBoxBrush"},
+    {"Sphere", nullptr, "CsgSphereBrush"},
     {"Box.mdl", "Models/Box.mdl", nullptr},
     {"Sphere.mdl", "Models/Sphere.mdl", nullptr},
     {"Cylinder.mdl", "Models/Cylinder.mdl", nullptr},

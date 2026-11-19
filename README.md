@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`) generates its model from parameters. See "Procedural box".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`) generates its model from parameters. See "Procedural box" and "Procedural sphere".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -135,6 +135,7 @@ The toolbar has the add and operation commands. The toolbar "add" buttons put th
 The toolbar combo in front of the "add" buttons selects the shape of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are:
 
 - `Box`: a procedural `CsgBoxBrush`. It has no model file.
+- `Sphere`: a procedural `CsgSphereBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -152,6 +153,20 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - UV 0 is a planar projection in local units, so the texel density does not change with the size. UV 1 puts each face in one cell of a 3x2 atlas.
 - Validity: at each corner, the three edges to the neighbor corners must give a positive triple product, and the volume must be positive. A corner that goes through the opposite face makes the box not valid. A box that is not valid gives no operand and logs one warning.
 - A value that is not finite gets its default value.
+
+### Procedural sphere
+
+`CsgSphereBrush` generates a UV sphere (an ellipsoid) from parameters. It has no "Model" attribute. See `CsgGenerateSphere`.
+
+- "Radius": the radius on each axis. Each component is in [0.001, 16384]. The default is (0.5, 0.5, 0.5).
+- "Segments": the number of longitude divisions, 3 to 128. The default is 24.
+- "Rings": the number of latitude bands from the top pole to the bottom pole, 2 to 64. The default is 12.
+- "Smooth Normals": the default is on. Smooth normals follow the ellipsoid. Off gives a flat normal for each triangle.
+- "Materials": one slot for the whole surface.
+- The poles are on the Y axis. A pole is one position with a fan of triangles. The seam duplicates vertices only for UV. The seam positions are bit-identical copies.
+- UV 0 is (longitude / 2pi, latitude / pi). UV 1 is equal to UV 0. The tangent follows the longitude direction.
+- The mesh is a polyhedron that is inscribed in the ellipsoid. Its volume is a little less than the ellipsoid volume.
+- A value that is not finite gets its default value. The parameters are always valid after clamping.
 
 ### Operation colors and operand overlay
 
@@ -225,6 +240,9 @@ The editor has no test harness for addons. Do these checks by hand:
 30. Move "Corner 7" to (-1, 0.5, 0.5). The box is not valid: the wireframe goes, the result loses the brush and the log shows one warning. Set the corner back. The brush comes back.
 31. Set a material in slot 3 (+Y) of the box. Only the top face of the box gets the material. Clear slot 3. The top face uses the material of slot 0.
 32. Select a box brush and drop a model on it. The box does not change.
+33. Select "Sphere" in the preset combo. Push B. A `CsgSphereBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgSphereBrush".
+34. Change "Radius", "Segments", "Rings" and "Smooth Normals" in the inspector. The wireframe and the result change at once. A value outside the range is clamped.
+35. Set a material in the slot of the sphere. The whole sphere gets the material. Drop a model on the sphere. The sphere does not change.
 
 ## How to try the sample scene
 

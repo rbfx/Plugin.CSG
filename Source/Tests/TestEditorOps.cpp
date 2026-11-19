@@ -6,6 +6,7 @@
 
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoxBrush.h"
+#include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 #include "TestGeneratedBrush.h"
@@ -608,14 +609,20 @@ TEST_CASE("The brush presets have the procedural box and the model presets", "[e
         CHECK(IsBrushPresetAvailable(f.context, preset));
     }
     CHECK(names == ea::vector<ea::string>{
-        "Box", "Box.mdl", "Sphere.mdl", "Cylinder.mdl", "Cone.mdl", "Pyramid.mdl", "Torus.mdl"});
+        "Box", "Sphere", "Box.mdl", "Sphere.mdl", "Cylinder.mdl", "Cone.mdl", "Pyramid.mdl", "Torus.mdl"});
     CHECK(ea::string(presets[0].typeName_) == "CsgBoxBrush");
 
     Node* rootNode = f.MakeRoot();
     Node* box = AddPresetBrushNode(rootNode, presets[0], 0, Vector3::ZERO);
     REQUIRE(box);
     CHECK(box->GetComponent<CsgBoxBrush>());
-    Node* model = AddPresetBrushNode(rootNode, presets[1], 0, Vector3::ZERO);
+    CHECK(ea::string(presets[1].name_) == "Sphere");
+    CHECK(ea::string(presets[1].typeName_) == "CsgSphereBrush");
+    Node* sphere = AddPresetBrushNode(rootNode, presets[1], 0, Vector3::ZERO);
+    REQUIRE(sphere);
+    CHECK(sphere->GetComponent<CsgSphereBrush>());
+    CHECK(DescribeRoot(rootNode).find("CsgSphereBrush") != ea::string::npos);
+    Node* model = AddPresetBrushNode(rootNode, presets[2], 0, Vector3::ZERO);
     REQUIRE(model);
     CHECK(model->GetComponent<CsgBrush>()->GetModelAttr().name_ == "Models/Box.mdl");
 }
