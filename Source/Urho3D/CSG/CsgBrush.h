@@ -50,6 +50,9 @@ public:
     /// Acknowledge brush state change.
     void ClearDirty() { dirty_ = false; }
 
+    /// Draw the model wireframe in the color of the operation. See `GetOperationColor`.
+    void DrawDebugGeometry(DebugRenderer* debug, bool depthTest) override;
+
 protected:
     const ResourceRef& GetDebugModelAttr() const override { return GetModelAttr(); }
 

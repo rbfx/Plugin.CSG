@@ -27,6 +27,7 @@ set (SOURCE_FILES
     CsgSolid.h
     CsgCommon.h
     CsgComponent.h
+    CsgOperationColor.h
     CsgCorefine.h
     CsgExact.h
     CsgFlatMap.h

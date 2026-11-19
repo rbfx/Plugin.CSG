@@ -7,12 +7,14 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
+#include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
 #include "Urho3D/CSG/CsgSolid.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
 #include <Urho3D/Core/WorkQueue.h>
+#include <Urho3D/Graphics/DebugRenderer.h>
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Graphics/Graphics.h>
 #include <Urho3D/Graphics/Light.h>
@@ -2568,4 +2570,41 @@ TEST_CASE("CsgRoot rebuilds on the CsgRequestRebuild event after a reorder", "[r
         RunFrames(root, workQueue, 60);
         CHECK(GetOutput(root)->GetModel()->GetBoundingBox().max_.x_ == Catch::Approx(2.0f).margin(1e-3f));
     }
+}
+
+TEST_CASE("GetOperationColor gives one distinct color for each operation", "[root][debug]")
+{
+    const Color unionColor = GetOperationColor(static_cast<int>(CsgOperation::Union));
+    const Color differenceColor = GetOperationColor(static_cast<int>(CsgOperation::DifferenceAB));
+    const Color intersectionColor = GetOperationColor(static_cast<int>(CsgOperation::Intersection));
+
+    // Union is green, DifferenceAB is red and Intersection is blue.
+    CHECK(unionColor.g_ > unionColor.r_);
+    CHECK(unionColor.g_ > unionColor.b_);
+    CHECK(differenceColor.r_ > differenceColor.g_);
+    CHECK(differenceColor.r_ > differenceColor.b_);
+    CHECK(intersectionColor.b_ > intersectionColor.r_);
+    CHECK(intersectionColor.b_ > intersectionColor.g_);
+    CHECK(unionColor.a_ == 1.0f);
+
+    // An index that is not an operation gives the fallback color.
+    CHECK(GetOperationColor(-1) == CsgUnknownOperationColor);
+    CHECK(GetOperationColor(3) == CsgUnknownOperationColor);
+}
+
+TEST_CASE("CsgBrush draws its debug shape with and without the depth test", "[root][debug]")
+{
+    auto context = MakeCsgTestContext();
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    auto* debug = scene->CreateComponent<DebugRenderer>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    CsgBrush* brush = AddBoxBrush(root, "Brush", Vector3::ZERO, CsgOperation::Intersection);
+
+    CHECK(!debug->HasContent());
+    // The editor calls the Component virtual. It has no link to the CSG library.
+    static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+    CHECK(debug->HasContent());
 }

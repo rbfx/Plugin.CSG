@@ -3,6 +3,7 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSG/CsgBrush.h"
+#include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Scene/Node.h>
@@ -64,6 +65,14 @@ void CsgBrush::OnMaterialsChanged()
 {
     BaseClassName::OnMaterialsChanged();
     MarkDirty();
+}
+
+void CsgBrush::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)
+{
+    // The alpha keeps the wireframe light. The editor draws a selected brush with no depth test.
+    Color wireColor = GetOperationColor(static_cast<int>(operation_));
+    wireColor.a_ = 0.4f;
+    DrawDebugGeometryInternal(debug, depthTest, GetDebugModelAttr(), wireColor);
 }
 
 void CsgBrush::SetOperation(CsgOperation op)

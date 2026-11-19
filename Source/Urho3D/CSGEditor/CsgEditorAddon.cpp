@@ -12,6 +12,7 @@
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
 #include <Urho3D/Graphics/Camera.h>
+#include <Urho3D/Graphics/DebugRenderer.h>
 #include <Urho3D/Graphics/Drawable.h>
 #include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
@@ -494,6 +495,27 @@ void CsgEditorAddon::ResetDrop()
     dropComponents_.clear();
     dropOldModels_.clear();
     dropNewModel_ = Variant::EMPTY;
+}
+
+void CsgEditorAddon::Render(SceneViewPage& page)
+{
+    if (!IsAvailable())
+        return;
+
+    Node* rootNode = FindActiveRoot(page.selection_.GetActiveNode());
+    if (!rootNode)
+        return;
+
+    // The tab creates the DebugRenderer of the scene before the addons render.
+    if (auto debug = page.scene_->GetComponent<DebugRenderer>())
+    {
+        // DrawDebugGeometry is a Component virtual. The brush uses the color of its operation.
+        for (Node* brushNode : GetOperands(rootNode))
+        {
+            if (Component* brush = brushNode->GetComponent(BrushType))
+                brush->DrawDebugGeometry(debug, !page.selection_.IsSelected(brushNode));
+        }
+    }
 }
 
 bool CsgEditorAddon::RenderTabContextMenu()

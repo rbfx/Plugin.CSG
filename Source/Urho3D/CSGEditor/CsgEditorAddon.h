@@ -28,6 +28,9 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 /// - The active node is a CSG root or its result node: the drop adds a brush with the model.
 ///   The brush is a Union brush. Shift at drop time makes it a subtract brush.
 /// - The active node is a brush: the drop sets the model of all selected brushes.
+///
+/// If a root or a brush is active, the addon draws the debug shapes of all operands of the root.
+/// Each shape has the color of its operation. A selected brush draws with no depth test.
 class CsgEditorAddon : public SceneViewAddon
 {
     URHO3D_OBJECT(CsgEditorAddon, SceneViewAddon);
@@ -41,6 +44,7 @@ public:
     int GetToolbarPriority() const override { return 50; }
     bool RenderToolbar() override;
     bool RenderTabContextMenu() override;
+    void Render(SceneViewPage& page) override;
     /// The priority is above 0. Then the addon gets a Model drop before SceneDragAndDropPrefab.
     int GetInputPriority() const override { return 10; }
     bool IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const override;
