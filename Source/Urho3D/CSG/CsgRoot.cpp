@@ -67,9 +67,12 @@ struct CsgRoot::BuildJob
     ea::vector<SharedPtr<Model>> sourceModels_;
     ea::vector<ResourceRefList> sourceMaterials_;
 
-    /// Solid of the earlier build. If set, the job evaluates only the new brushes on it.
-    SharedPtr<const CsgSolid> cachedSolid_;
-    /// Number of operands that the cached solid already contains.
+    /// Solid of the base operand. If null, the worker thread makes it from the base polygons.
+    SharedPtr<const CsgSolid> baseSolid_;
+    /// Fold state after each operand. The main thread puts the reused states here.
+    /// The worker thread appends the states of the other operands.
+    ea::vector<SharedPtr<const CsgSolid>> stepSolids_;
+    /// Number of operands with a reused fold state.
     unsigned reusedOperands_{};
     /// Fingerprints of the operands. Empty if a brush is dead.
     ea::vector<BrushFingerprint> capturedBrushes_;
@@ -332,8 +335,7 @@ void CsgRoot::OnMarkedDirty(Node* node)
 void CsgRoot::OnModelChanged()
 {
     BaseClassName::OnModelChanged();
-    cachedSolid_ = nullptr;
-    cachedBrushes_.clear();
+    ClearBuildCache();
     baked_.reset();
     RequestRebuild();
 }
@@ -342,8 +344,7 @@ void CsgRoot::OnMaterialsChanged()
 {
     BaseClassName::OnMaterialsChanged();
     // The canonical shared keys of the cached solid depend on the materials.
-    cachedSolid_ = nullptr;
-    cachedBrushes_.clear();
+    ClearBuildCache();
     RequestRebuild();
 }
 
@@ -799,22 +800,23 @@ void CsgRoot::Rebuild()
         node_->GetWorldTransform().Inverse();
     if (!BuildOperands(job->operands_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_))
     {
-        cachedBrushes_.clear();
+        ClearBuildCache();
         rebuildDirty_ = false;
         if (baked_)
         {
-            // No new operations after a bake: the baked result is the output and the base for appends.
+            // No new operations after a bake: the baked result is the output and the base for new brushes.
             cachedSolid_ = baked_->solid_;
+            cachedBaseSolid_ = baked_->solid_;
             cachedBaseModel_ = job->baseModel_;
             cachedEpsilon_ = baked_->epsilon_;
             cachedMetricScale_ = baked_->metricScale_;
+            cachedMinComponentVolumeFraction_ = minComponentVolumeFraction_;
             const ResourceRefList outputMaterials = baked_->outputMaterials_;
             ApplyResultToOutput(baked_->outputModel_, outputMaterials);
             lastGeometryComponents_.clear();
             lastBuildFailed_ = false;
             return;
         }
-        cachedSolid_ = nullptr;
         // No operations: return base model directly.
         const ResourceRefList baseMaterials = tempBase->GetMaterialsAttr();
         ApplyResultToOutput(tempBase->GetModel(), baseMaterials);
@@ -823,29 +825,33 @@ void CsgRoot::Rebuild()
         return;
     }
 
-    // Reuse only for an append. A same-length rebuild may reflect an in-place
-    // model edit even if the resource object and the brush references are the same.
-    if (TryCaptureBrushes(job->operands_, job->capturedBrushes_) && cachedSolid_ && job->baseModel_ == cachedBaseModel_
-        && job->epsilon_ == cachedEpsilon_ && job->metricScale_ == cachedMetricScale_
-        && cachedBrushes_.size() < job->capturedBrushes_.size())
+    // Reuse the fold states before the first changed operand. A change of the base, the epsilon,
+    // the scale or the shell filter discards all states.
+    const bool allCaptured = TryCaptureBrushes(job->operands_, job->capturedBrushes_);
+    if (allCaptured && cachedBaseSolid_ && job->baseModel_ == cachedBaseModel_ && job->epsilon_ == cachedEpsilon_
+        && job->metricScale_ == cachedMetricScale_
+        && job->minComponentVolumeFraction_ == cachedMinComponentVolumeFraction_)
     {
-        bool prefixUnchanged = true;
-        for (unsigned i = 0; i < cachedBrushes_.size(); ++i)
+        unsigned firstChanged = 0;
+        const unsigned count = ea::min(cachedBrushes_.size(), job->capturedBrushes_.size());
+        while (firstChanged < count)
         {
-            const CsgBrush* brush = job->capturedBrushes_[i].brush_;
-            if (cachedBrushes_[i] != job->capturedBrushes_[i] || !brush || brush->IsDirty())
-            {
-                prefixUnchanged = false;
+            const CsgBrush* brush = job->capturedBrushes_[firstChanged].brush_;
+            if (cachedBrushes_[firstChanged] != job->capturedBrushes_[firstChanged] || !brush || brush->IsDirty())
                 break;
-            }
+            ++firstChanged;
         }
-        if (prefixUnchanged)
+        // No visible change can mean an in-place model edit. Then the job evaluates all operands again.
+        const bool unchanged =
+            firstChanged == cachedBrushes_.size() && firstChanged == job->capturedBrushes_.size();
+        if (!unchanged)
         {
-            job->cachedSolid_ = cachedSolid_;
-            job->reusedOperands_ = cachedBrushes_.size();
+            job->baseSolid_ = cachedBaseSolid_;
+            job->stepSolids_.assign(cachedStepSolids_.begin(), cachedStepSolids_.begin() + firstChanged);
+            job->reusedOperands_ = firstChanged;
         }
     }
-    if (!job->cachedSolid_)
+    if (!job->baseSolid_)
     {
         if (baked_)
         {
@@ -899,10 +905,12 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
         if (const std::function<void()> hook = TakeTestBuildHook())
             hook();
         HiresTimer timer;
-        SharedPtr<const CsgSolid> solid = job->cachedSolid_;
-        if (!solid)
-            solid = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->basePolygons_), job->epsilon_);
-        EvaluateOperands(job->operands_, solid, job->epsilon_, job->reusedOperands_);
+        if (!job->baseSolid_)
+            job->baseSolid_ = CsgSolid::FromOperand(ea::vector<CsgPolygon>(job->basePolygons_), job->epsilon_);
+        EvaluateOperands(job->operands_, job->baseSolid_, job->stepSolids_, job->epsilon_);
+        job->stats_.foldSteps_ = job->operands_.size() - job->reusedOperands_;
+        // The shell filter applies to the final solid only. The fold states keep all shells.
+        SharedPtr<const CsgSolid> solid = job->stepSolids_.back();
         unsigned droppedComponents = 0;
         if (solid)
             solid = CsgSolid::DropSmallComponents(solid, job->minComponentVolumeFraction_, &droppedComponents);
@@ -1031,19 +1039,22 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     // Acknowledge changes.
     root->AcknowledgeBrushes(job->operands_);
 
-    // Keep the solid as a base for an append only if all brushes are alive.
+    // Keep the fold states only if all brushes are alive.
     // An invalid result is never cached: the next rebuild starts from the brushes again.
-    root->cachedSolid_ = job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size()
-        ? job->resultSolid_
-        : nullptr;
+    root->ClearBuildCache();
+    if (job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size())
+    {
+        root->cachedSolid_ = job->resultSolid_;
+        root->cachedBaseSolid_ = job->baseSolid_;
+        root->cachedStepSolids_ = job->stepSolids_;
+        root->cachedBrushes_ = job->capturedBrushes_;
+    }
     root->cachedBaseModel_ = job->baseModel_;
     root->cachedEpsilon_ = job->epsilon_;
     root->cachedMetricScale_ = job->metricScale_;
+    root->cachedMinComponentVolumeFraction_ = job->minComponentVolumeFraction_;
     root->cachedSourceModels_ = job->sourceModels_;
     root->cachedSourceMaterials_ = job->sourceMaterials_;
-    root->cachedBrushes_.clear();
-    if (root->cachedSolid_)
-        root->cachedBrushes_ = job->capturedBrushes_;
 
     if (root->autoApplyResults_)
     {
@@ -1239,6 +1250,14 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
     return !operands.empty();
 }
 
+void CsgRoot::ClearBuildCache()
+{
+    cachedSolid_ = nullptr;
+    cachedBaseSolid_ = nullptr;
+    cachedStepSolids_.clear();
+    cachedBrushes_.clear();
+}
+
 bool CsgRoot::TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vector<BrushFingerprint>& output)
 {
     for (const BrushStep& operand : operands)
@@ -1253,19 +1272,20 @@ bool CsgRoot::TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vecto
     return true;
 }
 
-void CsgRoot::EvaluateOperands(const ea::vector<BrushStep>& operands, SharedPtr<const CsgSolid>& currentSolid,
-    float epsilon, unsigned startIndex)
+void CsgRoot::EvaluateOperands(const ea::vector<BrushStep>& operands, const SharedPtr<const CsgSolid>& baseSolid,
+    ea::vector<SharedPtr<const CsgSolid>>& stepSolids, float epsilon)
 {
-    for (unsigned i = startIndex; i < operands.size(); ++i)
+    for (unsigned i = stepSolids.size(); i < operands.size(); ++i)
     {
         const BrushStep& operand = operands[i];
+        const CsgSolid* currentSolid = i > 0 ? stepSolids[i - 1].Get() : baseSolid.Get();
         SharedPtr<const CsgSolid> operandSolid =
             CsgSolid::FromOperand(ea::vector<CsgPolygon>(operand.polygons_), epsilon);
 
         // A null result is an empty solid.
         SharedPtr<const CsgSolid> result =
-            CsgBooleanOperation(currentSolid.Get(), operandSolid.Get(), operand.op_, epsilon);
-        currentSolid = result ? result : SharedPtr<const CsgSolid>(CsgSolid::FromOperand({}, epsilon));
+            CsgBooleanOperation(currentSolid, operandSolid.Get(), operand.op_, epsilon);
+        stepSolids.push_back(result ? result : SharedPtr<const CsgSolid>(CsgSolid::FromOperand({}, epsilon)));
     }
 }
 

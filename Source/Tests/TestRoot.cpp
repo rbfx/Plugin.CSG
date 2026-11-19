@@ -1258,3 +1258,136 @@ TEST_CASE("CsgRoot rebuilds when a brush leaves the root", "[root]")
         CHECK(root->GetRebuildRevision() == revision);
     }
 }
+
+namespace
+{
+
+/// Add three brushes that change the base box in different places.
+ea::vector<CsgBrush*> AddFoldBrushes(CsgRoot* root)
+{
+    ea::vector<CsgBrush*> brushes;
+    brushes.push_back(AddBoxBrush(root, "First", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB));
+    brushes.push_back(AddBoxBrush(root, "Second", Vector3(-1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB));
+    brushes.push_back(AddBoxBrush(root, "Third", Vector3(1.5f, 0.0f, 0.0f), CsgOperation::Union));
+    for (CsgBrush* brush : brushes)
+        brush->GetNode()->SetScale(Vector3(0.5f, 0.5f, 0.5f));
+    return brushes;
+}
+
+/// Build the root and wait until all requested builds are done.
+void BuildFully(CsgRoot* root, WorkQueue* workQueue)
+{
+    root->Rebuild();
+    REQUIRE(RunUntilOutput(root, workQueue, 1000));
+    RunFrames(root, workQueue, 60);
+}
+
+/// Check that two roots have the same output.
+void CheckSameOutput(CsgRoot* actual, CsgRoot* expected)
+{
+    const Model* a = GetOutput(actual)->GetModel();
+    const Model* b = GetOutput(expected)->GetModel();
+    REQUIRE(a);
+    REQUIRE(b);
+    CHECK(CountIndices(a) == CountIndices(b));
+    CHECK(a->GetNumGeometries() == b->GetNumGeometries());
+    CHECK(a->GetBoundingBox().min_.Equals(b->GetBoundingBox().min_, 1e-4f));
+    CHECK(a->GetBoundingBox().max_.Equals(b->GetBoundingBox().max_, 1e-4f));
+    CHECK(actual->GetLastBuildStats().volume_ == Catch::Approx(expected->GetLastBuildStats().volume_).epsilon(1e-9));
+    CHECK(actual->GetLastBuildStats().faceCount_ == expected->GetLastBuildStats().faceCount_);
+    CHECK(actual->GetLastBuildStats().valid_);
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot evaluates only the fold steps from the first changed operand", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Folded");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    // An explicit rebuild with no change evaluates all steps again.
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+    SECTION("A change of the last operand evaluates one step")
+    {
+        brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+        CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+        ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+        expected[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A change of the first operand evaluates all steps")
+    {
+        brushes[0]->SetOperation(CsgOperation::Union);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+        CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+        ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+        expected[0]->SetOperation(CsgOperation::Union);
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A change of the middle operand evaluates the steps from that operand")
+    {
+        brushes[1]->GetNode()->SetPosition(Vector3(-1.0f, -1.0f, 1.0f));
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+
+        CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+        ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+        expected[1]->GetNode()->SetPosition(Vector3(-1.0f, -1.0f, 1.0f));
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A reorder evaluates the steps from the first moved operand")
+    {
+        // The order changes from First, Second, Third to First, Third, Second.
+        Node* secondNode = brushes[1]->GetNode();
+        secondNode->SetParent(scene);
+        secondNode->SetParent(root->GetNode());
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+
+        CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+        ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+        Node* expectedSecond = expected[1]->GetNode();
+        expectedSecond->SetParent(scene);
+        expectedSecond->SetParent(fresh->GetNode());
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A disabled operand evaluates the steps from its index")
+    {
+        brushes[1]->SetEnabled(false);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    }
+
+    SECTION("A change of the shell filter evaluates all steps")
+    {
+        root->SetMinComponentVolumeFraction(0.01f);
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    }
+}

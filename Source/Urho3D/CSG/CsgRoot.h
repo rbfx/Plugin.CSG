@@ -46,6 +46,8 @@ struct CsgBuildStats
     unsigned componentCount_{};
     /// Number of components that the build removed because of `CsgRoot::GetMinComponentVolumeFraction`.
     unsigned droppedComponents_{};
+    /// Number of operands that the build evaluated. The build reuses the cached fold states of the other operands.
+    unsigned foldSteps_{};
     /// Number of triangles of the triangulated result.
     unsigned triangleCount_{};
     /// True if the result solid is closed. An empty solid is closed.
@@ -251,9 +253,12 @@ private:
 
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
-    /// Apply the operands in order to the current solid. Skip the operands before `startIndex`.
-    static void EvaluateOperands(const ea::vector<BrushStep>& operands, SharedPtr<const CsgSolid>& currentSolid,
-        float epsilon, unsigned startIndex);
+    /// Fold the operands in order onto the base solid. Append the fold state after each operand.
+    /// The operands that already have a state in `stepSolids` are skipped.
+    static void EvaluateOperands(const ea::vector<BrushStep>& operands, const SharedPtr<const CsgSolid>& baseSolid,
+        ea::vector<SharedPtr<const CsgSolid>>& stepSolids, float epsilon);
+    /// Discard the cached solids and the cached brushes.
+    void ClearBuildCache();
     /// Copy the fingerprints of the operands. Return false if a brush is dead.
     static bool TryCaptureBrushes(const ea::vector<BrushStep>& operands, ea::vector<BrushFingerprint>& output);
     static void AcknowledgeBrushes(const ea::vector<BrushStep>& operands);
@@ -276,8 +281,13 @@ private:
     ea::vector<unsigned> lastGeometryComponents_;
     bool lastBuildFailed_{};
 
-    /// Solid of the last applied build. It is the base for an append of brushes.
+    /// Final solid of the last applied build, after the shell filter. Bake uses it.
     SharedPtr<const CsgSolid> cachedSolid_;
+    /// Base solid of the last applied build.
+    SharedPtr<const CsgSolid> cachedBaseSolid_;
+    /// Fold state after each operand of the last applied build. Index i is the base with operands 0 to i.
+    ea::vector<SharedPtr<const CsgSolid>> cachedStepSolids_;
+    float cachedMinComponentVolumeFraction_{};
     SharedPtr<Model> cachedBaseModel_;
     float cachedEpsilon_{};
     Vector3 cachedMetricScale_{Vector3::ONE};
