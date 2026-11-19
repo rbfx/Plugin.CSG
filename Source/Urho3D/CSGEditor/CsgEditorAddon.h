@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "Urho3D/CSGEditor/CsgShapeEditOps.h"
+
 #include <Editor/Core/CommonEditorActionBuilders.h>
 #include <Editor/Foundation/SceneViewTab.h>
 
@@ -38,6 +40,9 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 /// An overlay in the view corner lists the brushes of the root and the build status.
 /// A click on a list item selects the brush. The hotkeys `[` and `]` move the active brush in the list.
 /// The hotkey `H` toggles the selected brushes. A disabled brush is not an operand.
+///
+/// Shape handles: if exactly one node is selected and it has a procedural brush, the addon draws its handles.
+/// A click selects a handle. A translate gizmo moves the selected handles. One undo step reverts a drag.
 class CsgEditorAddon : public SceneViewAddon
 {
     URHO3D_OBJECT(CsgEditorAddon, SceneViewAddon);
@@ -120,6 +125,35 @@ private:
     void MoveEarlier();
     void MoveLater();
 
+    /// The state of a handle drag.
+    enum class HandleDragState
+    {
+        None,
+        Active,
+        /// Escape cancelled the drag. The gizmo stays in use until the mouse button is released.
+        Cancelled,
+    };
+
+    /// Shape handles.
+    /// @{
+    /// Draw the handles of the active shape brush, pick them and run the gizmo.
+    void ProcessShapeHandles(SceneViewPage& page, bool& mouseConsumed);
+    /// Set the active shape brush. A new brush clears the handle selection and ends a drag.
+    void SetActiveShapeBrush(Component* brush);
+    /// Start a drag of the selected handles. Take the attribute snapshot.
+    void BeginHandleDrag();
+    /// Apply the total drag delta from the drag start to the brush.
+    void UpdateHandleDrag(Node* node, bool snap);
+    /// End the drag. A commit pushes one undo action. A cancel restores the snapshot.
+    void EndHandleDrag(bool commit);
+    /// Render the "Shape" section of the operand overlay.
+    void RenderShapeSection();
+    /// Render the settings of the shape handles.
+    void RenderShapeSettings();
+    /// Return true if the gizmo of the transform manipulator is in local space.
+    bool IsTransformGizmoLocal() const;
+    /// @}
+
     /// The index of the preset model for new brushes. The editor settings keep the preset name.
     unsigned presetIndex_{};
     /// The screen rectangle of the operand overlay in the last frame.
@@ -144,6 +178,26 @@ private:
     bool dropAllSlots_{};
     /// The material case: the preview material is set on the brushes.
     bool dropPreviewApplied_{};
+
+    /// The settings of the shape handles. A grid step of 0 turns off the Ctrl snap.
+    bool showHandles_{true};
+    float handleGridStep_{0.125f};
+    /// The active shape brush and its handles of this frame.
+    WeakPtr<Component> handleBrush_;
+    ShapeHandleSet handleSet_;
+    /// The selected handle ids. The first id is the primary handle of the Ctrl snap.
+    ea::vector<unsigned> selectedHandles_;
+    ea::optional<unsigned> hoveredHandle_;
+    /// A left click was consumed by the handles. The mouse stays consumed until the button is released.
+    bool handleClickPending_{};
+    HandleDragState dragState_{HandleDragState::None};
+    ShapeAttributeSnapshot dragSnapshot_;
+    ea::vector<ShapeHandle> dragStartHandles_;
+    /// The total world delta of the gizmo from the drag start.
+    Vector3 dragWorldDelta_;
+    /// The local delta of the last move call and of the last accepted move.
+    ea::optional<Vector3> dragTriedDelta_;
+    ea::optional<Vector3> dragAcceptedDelta_;
 };
 
 } // namespace Urho3D

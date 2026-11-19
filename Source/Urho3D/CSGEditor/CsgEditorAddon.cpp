@@ -11,6 +11,7 @@
 #include <Editor/Core/HotkeyManager.h>
 #include <Editor/Core/IniHelpers.h>
 #include <Editor/Foundation/SceneViewTab/SceneSelectionRenderer.h>
+#include <Editor/Foundation/SceneViewTab/TransformManipulator.h>
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
@@ -27,10 +28,12 @@
 #include <Urho3D/Scene/Scene.h>
 #include <Urho3D/SystemUI/DragDropPayload.h>
 #include <Urho3D/SystemUI/SystemUI.h>
+#include <Urho3D/SystemUI/TransformGizmo.h>
 #include <Urho3D/SystemUI/Widgets.h>
 #include <Urho3D/Utility/SceneRendererToTexture.h>
 
 #include <IconFontCppHeaders/IconsFontAwesome6.h>
+#include <ImGuizmo/ImGuizmo.h>
 
 namespace Urho3D
 {
@@ -71,6 +74,24 @@ const float OverlayMaxHeightFraction = 0.4f;
 const unsigned MaxDebugShapesPerFrame = 64;
 /// The editor settings key of the "Draw Debug Geometry" option of the selection renderer.
 const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeometry";
+/// The editor settings key of the local space option of the transform manipulator.
+const char* const GizmoLocalIniKey = "TransformGizmo.IsLocal";
+
+/// The editor settings keys of the shape handles.
+const char* const ShowHandlesIniKey = "CsgEditor.ShowHandles";
+const char* const HandleGridStepIniKey = "CsgEditor.HandleGridStep";
+/// The size of a handle and the pick radius in pixels.
+const float HandleSize = 8.0f;
+const float HandlePickRadius = 10.0f;
+/// The length of the short axis line of an axis handle in pixels.
+const float HandleAxisLineLength = 18.0f;
+/// The half length of the long axis line of a selected axis handle in pixels. The draw list clips it.
+const float HandleAxisGuideLength = 4000.0f;
+const ImU32 HandlePointColor = IM_COL32(255, 255, 255, 255);
+const ImU32 HandleAxisColor = IM_COL32(255, 150, 30, 255);
+const ImU32 HandleHoveredColor = IM_COL32(255, 230, 0, 255);
+const ImU32 HandleSelectedColor = IM_COL32(0, 230, 255, 255);
+const ImU32 HandleOutlineColor = IM_COL32(0, 0, 0, 200);
 
 /// Return true if the selection renderer draws the debug shape of the brush.
 /// It draws a selected component, and all components of a selected node and of its children.
@@ -130,6 +151,85 @@ private:
     const WeakPtr<Scene> scene_;
     const unsigned rootNodeId_{};
 };
+
+/// The undo action of one handle drag. It keeps the attributes of the brush before and after the drag.
+/// It finds the component by the node id and the type. Then it works after the node is created again.
+class ShapeHandleDragAction : public EditorAction
+{
+public:
+    ShapeHandleDragAction(Component* component, ShapeAttributeSnapshot oldValues, ShapeAttributeSnapshot newValues)
+        : scene_(component->GetScene())
+        , nodeId_(component->GetNode()->GetID())
+        , type_(component->GetType())
+        , oldValues_(ea::move(oldValues))
+        , newValues_(ea::move(newValues))
+    {
+    }
+
+    /// Implement EditorAction.
+    /// @{
+    bool CanUndoRedo() const override { return GetComponent() != nullptr; }
+    void Redo() const override { RestoreShapeAttributes(GetComponent(), newValues_); }
+    void Undo() const override { RestoreShapeAttributes(GetComponent(), oldValues_); }
+    bool MergeWith(const EditorAction& other) override { return false; }
+    /// @}
+
+private:
+    Component* GetComponent() const
+    {
+        Node* node = scene_ ? scene_->GetNode(nodeId_) : nullptr;
+        return node ? node->GetComponent(type_) : nullptr;
+    }
+
+    const WeakPtr<Scene> scene_;
+    const unsigned nodeId_{};
+    const StringHash type_;
+    const ShapeAttributeSnapshot oldValues_;
+    const ShapeAttributeSnapshot newValues_;
+};
+
+/// Return the integer value of the key in the editor settings output of the addon.
+ea::optional<int> ReadAddonIniInt(SceneViewAddon* addon, const char* key)
+{
+    if (!addon)
+        return ea::nullopt;
+
+    ImGuiTextBuffer buffer;
+    addon->WriteIniSettings(buffer);
+    const ea::string_view text{buffer.c_str(), static_cast<eastl_size_t>(buffer.size())};
+    eastl_size_t start = 0;
+    while (start < text.size())
+    {
+        eastl_size_t end = text.find('\n', start);
+        if (end == ea::string_view::npos)
+            end = text.size();
+        if (const auto value = ReadIntFromIni(text.substr(start, end - start), key))
+            return value;
+        start = end + 1;
+    }
+    return ea::nullopt;
+}
+
+/// Return the screen position of the world point in the view, or none if the point is behind the camera.
+ea::optional<Vector2> ProjectToView(Camera* camera, const Rect& area, const Vector3& worldPos)
+{
+    const Vector3 eyePos = camera->GetView() * worldPos;
+    if (eyePos.z_ <= camera->GetNearClip())
+        return ea::nullopt;
+    return area.min_ + camera->WorldToScreenPoint(worldPos) * area.Size();
+}
+
+/// Return the screen direction of the world axis at the world point, or none.
+ea::optional<Vector2> ProjectAxisToView(Camera* camera, const Rect& area, const Vector3& worldPos, const Vector3& worldAxis)
+{
+    const auto start = ProjectToView(camera, area, worldPos);
+    // A step of 10% of the camera distance gives a stable direction.
+    const float step = ea::max(0.001f, (worldPos - camera->GetNode()->GetWorldPosition()).Length() * 0.1f);
+    const auto end = ProjectToView(camera, area, worldPos + worldAxis.Normalized() * step);
+    if (!start || !end || (*end - *start).LengthSquared() < 1e-6f)
+        return ea::nullopt;
+    return (*end - *start).Normalized();
+}
 
 /// Return the index of the child in the child list of its parent.
 unsigned GetChildIndex(Node* child)
@@ -545,6 +645,8 @@ void CsgEditorAddon::RenderPresetCombo()
 void CsgEditorAddon::WriteIniSettings(ImGuiTextBuffer& output)
 {
     WriteStringToIni(output, PresetIniKey, GetBrushPresets()[presetIndex_].name_);
+    WriteIntToIni(output, ShowHandlesIniKey, showHandles_);
+    WriteStringToIni(output, HandleGridStepIniKey, Format("{}", handleGridStep_));
 }
 
 void CsgEditorAddon::ReadIniSettings(const char* line)
@@ -559,6 +661,10 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
                 presetIndex_ = index;
         }
     }
+    if (const auto value = ReadIntFromIni(line, ShowHandlesIniKey))
+        showHandles_ = *value != 0;
+    if (const auto value = ReadStringFromIni(line, HandleGridStepIniKey))
+        handleGridStep_ = ea::max(0.0f, ToFloat(*value));
 }
 
 CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const
@@ -926,24 +1032,15 @@ void CsgEditorAddon::Render(SceneViewPage& page)
 bool CsgEditorAddon::IsSelectionDebugGeometryEnabled() const
 {
     // The option is private in the selection renderer. Its editor settings output gives the value.
-    auto selectionRenderer = owner_->GetAddon<SceneSelectionRenderer>();
-    if (!selectionRenderer)
-        return true;
+    const auto value = ReadAddonIniInt(owner_->GetAddon<SceneSelectionRenderer>(), DrawDebugGeometryIniKey);
+    return !value || *value != 0;
+}
 
-    ImGuiTextBuffer buffer;
-    selectionRenderer->WriteIniSettings(buffer);
-    const ea::string_view text{buffer.c_str(), static_cast<eastl_size_t>(buffer.size())};
-    eastl_size_t start = 0;
-    while (start < text.size())
-    {
-        eastl_size_t end = text.find('\n', start);
-        if (end == ea::string_view::npos)
-            end = text.size();
-        if (const auto value = ReadIntFromIni(text.substr(start, end - start), DrawDebugGeometryIniKey))
-            return *value != 0;
-        start = end + 1;
-    }
-    return true;
+bool CsgEditorAddon::IsTransformGizmoLocal() const
+{
+    // The option is private in the transform manipulator. The handle gizmo uses the same space.
+    const auto value = ReadAddonIniInt(owner_->GetAddon<TransformManipulator>(), GizmoLocalIniKey);
+    return value && *value != 0;
 }
 
 void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
@@ -952,6 +1049,8 @@ void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
     if (overlayVisible_ && ui::IsMouseHoveringRect(ToImGui(overlayRect_.min_), ToImGui(overlayRect_.max_)))
         mouseConsumed = true;
     overlayVisible_ = false;
+
+    ProcessShapeHandles(page, mouseConsumed);
 }
 
 void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
@@ -1001,6 +1100,9 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
         }
         if (index == 0)
             ui::TextDisabled("No brushes");
+
+        if (handleBrush_)
+            RenderShapeSection();
     }
     ui::EndChild();
     ui::PopStyleColor();
@@ -1046,8 +1148,356 @@ bool CsgEditorAddon::RenderTabContextMenu()
             SetSelectedOperation(index);
     }
 
+    ui::Separator();
+    RenderShapeSettings();
+
     ui::EndMenu();
     return true;
+}
+
+void CsgEditorAddon::SetActiveShapeBrush(Component* brush)
+{
+    if (dragState_ == HandleDragState::Active)
+        EndHandleDrag(false);
+    if (dragState_ != HandleDragState::None)
+    {
+        dragState_ = HandleDragState::None;
+        // The gizmo can still be in use. The mouse stays consumed until the release, so the node gizmo does not take it.
+        handleClickPending_ = ui::IsMouseDown(MOUSEB_LEFT);
+    }
+    handleBrush_ = brush;
+    handleSet_ = {};
+    selectedHandles_.clear();
+    hoveredHandle_.reset();
+}
+
+void CsgEditorAddon::BeginHandleDrag()
+{
+    dragSnapshot_ = SnapshotShapeAttributes(handleBrush_);
+    dragStartHandles_ = handleSet_.handles_;
+    dragWorldDelta_ = Vector3::ZERO;
+    dragTriedDelta_.reset();
+    dragAcceptedDelta_.reset();
+    dragState_ = HandleDragState::Active;
+}
+
+void CsgEditorAddon::UpdateHandleDrag(Node* node, bool snap)
+{
+    Component* brush = handleBrush_;
+    if (!brush || selectedHandles_.empty())
+        return;
+
+    const ShapeHandle* primary = nullptr;
+    for (const ShapeHandle& handle : dragStartHandles_)
+    {
+        if (handle.id_ == selectedHandles_.front())
+            primary = &handle;
+    }
+    const bool isAxis = primary && primary->kind_ == CsgShapeHandleKind::Axis;
+
+    // The world delta goes to the local space as a direction. The node and parent scale apply.
+    Vector3 localDelta;
+    if (isAxis)
+    {
+        // An axis handle moves only along its axis line in the view. The world delta is projected on the world axis.
+        const Vector3 worldAxis = node->LocalToWorld(Vector4(primary->axis_, 0.0f));
+        localDelta = node->WorldToLocal(Vector4(ProjectDeltaOnAxis(dragWorldDelta_, worldAxis), 0.0f));
+    }
+    else
+        localDelta = node->WorldToLocal(Vector4(dragWorldDelta_, 0.0f));
+
+    // Ctrl snaps the local position of the primary handle to the grid. An axis handle snaps only along the axis.
+    if (snap && primary)
+        localDelta = SnapHandleDelta(primary->position_, localDelta, isAxis ? primary->axis_ : Vector3::ZERO, handleGridStep_);
+
+    if (dragTriedDelta_ && *dragTriedDelta_ == localDelta)
+        return;
+    dragTriedDelta_ = localDelta;
+
+    // The move is stateless: restore the snapshot, then move by the total delta.
+    // A refused move keeps the last accepted state.
+    RestoreShapeAttributes(brush, dragSnapshot_);
+    if (MoveShapeHandles(brush, selectedHandles_, localDelta))
+        dragAcceptedDelta_ = localDelta;
+    else if (dragAcceptedDelta_)
+        MoveShapeHandles(brush, selectedHandles_, *dragAcceptedDelta_);
+}
+
+void CsgEditorAddon::EndHandleDrag(bool commit)
+{
+    Component* brush = handleBrush_;
+    if (brush && dragState_ == HandleDragState::Active)
+    {
+        if (!commit)
+            RestoreShapeAttributes(brush, dragSnapshot_);
+        else
+        {
+            ShapeAttributeSnapshot endValues = SnapshotShapeAttributes(brush);
+            if (endValues != dragSnapshot_)
+            {
+                const auto action = MakeShared<ShapeHandleDragAction>(brush, dragSnapshot_, ea::move(endValues));
+                if (Node* rootNode = FindActiveRoot(brush->GetNode()))
+                    owner_->PushAction(MakeShared<RebuildRootActionWrapper>(action, rootNode));
+                else
+                    owner_->PushAction(action);
+            }
+        }
+    }
+    dragState_ = HandleDragState::None;
+    dragSnapshot_.clear();
+    dragStartHandles_.clear();
+}
+
+void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsumed)
+{
+    // On entry the camera, the overlay or a drop can own the mouse. Then the handles only draw.
+    const bool consumedOnEntry = mouseConsumed;
+    // The content area is the last item. The scene selector uses the same check.
+    const bool viewHovered = ui::IsItemHovered();
+
+    // The active shape brush: exactly one selected node with a procedural brush.
+    Component* brush = nullptr;
+    if (IsAvailable() && !page.IsSimulationActive() && page.selection_.GetNodes().size() == 1)
+    {
+        for (Node* node : page.selection_.GetNodes())
+            brush = FindShapeBrush(node);
+    }
+    if (brush != handleBrush_.Get())
+        SetActiveShapeBrush(brush);
+
+    const auto finish = [&]
+    {
+        if (handleClickPending_)
+        {
+            mouseConsumed = true;
+            if (!ui::IsMouseDown(MOUSEB_LEFT))
+                handleClickPending_ = false;
+        }
+    };
+
+    if (!brush)
+    {
+        finish();
+        return;
+    }
+
+    handleSet_ = QueryShapeHandles(brush);
+    if (!showHandles_)
+    {
+        if (dragState_ == HandleDragState::Active)
+            EndHandleDrag(false);
+        selectedHandles_.clear();
+        hoveredHandle_.reset();
+        finish();
+        return;
+    }
+
+    const auto findHandle = [this](unsigned id) -> const ShapeHandle*
+    {
+        for (const ShapeHandle& handle : handleSet_.handles_)
+        {
+            if (handle.id_ == id)
+                return &handle;
+        }
+        return nullptr;
+    };
+
+    // A shape can drop handles after a change, for example the cylinder at an apex. A drag keeps its ids.
+    if (dragState_ == HandleDragState::None)
+        ea::erase_if(selectedHandles_, [&](unsigned id) { return !findHandle(id); });
+
+    if (ui::IsKeyPressed(KEY_ESCAPE) && (viewHovered || ui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)))
+    {
+        if (dragState_ == HandleDragState::Active)
+        {
+            EndHandleDrag(false);
+            dragState_ = HandleDragState::Cancelled;
+        }
+        else if (dragState_ == HandleDragState::None)
+            selectedHandles_.clear();
+    }
+
+    Node* node = brush->GetNode();
+    Camera* camera = page.renderer_->GetCamera();
+    const Rect& area = page.contentArea_;
+    const Matrix3x4& worldTransform = node->GetWorldTransform();
+    const Vector2 mousePos = ToVector2(ui::GetMousePos());
+
+    ea::vector<HandleScreenPoint> points;
+    for (const ShapeHandle& handle : handleSet_.handles_)
+    {
+        const auto screenPos = ProjectToView(camera, area, worldTransform * handle.position_);
+        points.push_back(HandleScreenPoint{handle.id_, screenPos.value_or(Vector2::ZERO), screenPos.has_value()});
+    }
+
+    // No pick during the camera navigation (the right mouse button) and during a drag.
+    const bool canPick =
+        !consumedOnEntry && viewHovered && !ui::IsMouseDown(MOUSEB_RIGHT) && dragState_ == HandleDragState::None;
+    hoveredHandle_.reset();
+    if (canPick)
+    {
+        if (const auto index = PickNearestHandle(points, mousePos, HandlePickRadius))
+            hoveredHandle_ = points[*index].id_;
+    }
+
+    // The translate gizmo of the selected handles.
+    bool gizmoActive = false;
+    const bool runGizmo = !selectedHandles_.empty()
+        && (dragState_ != HandleDragState::None || (!consumedOnEntry && !ui::IsMouseDown(MOUSEB_RIGHT)));
+    if (runGizmo)
+    {
+        const auto centroid = ComputeSelectionCentroid(handleSet_.handles_, selectedHandles_)
+            .value_or(ComputeSelectionCentroid(dragStartHandles_, selectedHandles_).value_or(Vector3::ZERO));
+        const bool local = IsTransformGizmoLocal();
+        const Quaternion rotation = local ? node->GetWorldRotation() : Quaternion::IDENTITY;
+        const Matrix4 transform = Matrix3x4(worldTransform * centroid, rotation, Vector3::ONE).ToMatrix4();
+        const TransformGizmoAxes axes = TransformGizmoAxis::X | TransformGizmoAxis::Y | TransformGizmoAxis::Z;
+
+        // The gizmo returns the world delta of this frame. The drag sums it from the drag start.
+        const TransformGizmo gizmo{camera, area};
+        const auto frameDelta = gizmo.ManipulatePosition(transform, axes, local, Vector3::ZERO);
+        const bool inUse = ImGuizmo::IsUsing();
+        gizmoActive = inUse || ImGuizmo::IsOver();
+
+        if (inUse && dragState_ == HandleDragState::None)
+            BeginHandleDrag();
+        if (dragState_ == HandleDragState::Active && inUse)
+        {
+            if (frameDelta)
+                dragWorldDelta_ += *frameDelta;
+            UpdateHandleDrag(node, ui::IsKeyDown(KEY_CTRL));
+        }
+        if (dragState_ != HandleDragState::None && !inUse)
+        {
+            if (dragState_ == HandleDragState::Active)
+                EndHandleDrag(true);
+            dragState_ = HandleDragState::None;
+        }
+    }
+
+    // The pick. A click on a handle is consumed. A click on no handle clears the selection and goes to the scene.
+    if (canPick && !gizmoActive && ui::IsMouseClicked(MOUSEB_LEFT))
+    {
+        const ShapeHandle* handle = hoveredHandle_ ? findHandle(*hoveredHandle_) : nullptr;
+        if (!handle)
+            selectedHandles_.clear();
+        else
+        {
+            const bool shift = ui::IsKeyDown(KEY_LSHIFT) || ui::IsKeyDown(KEY_RSHIFT);
+            const bool hasAxis = ea::any_of(selectedHandles_.begin(), selectedHandles_.end(),
+                [&](unsigned id)
+                {
+                    const ShapeHandle* selected = findHandle(id);
+                    return selected && selected->kind_ == CsgShapeHandleKind::Axis;
+                });
+            // An axis handle is always single. Shift toggles a point handle among the selected points.
+            if (handle->kind_ == CsgShapeHandleKind::Axis || !shift || hasAxis)
+                selectedHandles_ = {handle->id_};
+            else if (auto iter = ea::find(selectedHandles_.begin(), selectedHandles_.end(), handle->id_);
+                iter != selectedHandles_.end())
+                selectedHandles_.erase(iter);
+            else
+                selectedHandles_.push_back(handle->id_);
+            mouseConsumed = true;
+            handleClickPending_ = true;
+        }
+    }
+
+    // The handles draw over the view image. The debug wireframe is in the image, so the handles are above it.
+    ImDrawList* drawList = ui::GetWindowDrawList();
+    drawList->PushClipRect(ToImGui(area.min_), ToImGui(area.max_), true);
+    const float half = HandleSize * 0.5f;
+    for (unsigned index = 0; index < handleSet_.handles_.size(); ++index)
+    {
+        const ShapeHandle& handle = handleSet_.handles_[index];
+        if (!points[index].visible_)
+            continue;
+
+        const bool selected = ea::find(selectedHandles_.begin(), selectedHandles_.end(), handle.id_) != selectedHandles_.end();
+        const bool hovered = hoveredHandle_ == handle.id_;
+        const bool isAxis = handle.kind_ == CsgShapeHandleKind::Axis;
+        const ImU32 color = selected ? HandleSelectedColor
+            : hovered               ? HandleHoveredColor
+            : isAxis                ? HandleAxisColor
+                                    : HandlePointColor;
+        const ImVec2 center = ToImGui(points[index].position_);
+
+        if (isAxis)
+        {
+            const Vector3 worldPos = worldTransform * handle.position_;
+            const Vector3 worldAxis = node->LocalToWorld(Vector4(handle.axis_, 0.0f));
+            if (const auto direction = ProjectAxisToView(camera, area, worldPos, worldAxis))
+            {
+                // A selected axis handle shows its axis line through the view: the drag moves along this line.
+                if (selected)
+                {
+                    drawList->AddLine(ToImGui(points[index].position_ - *direction * HandleAxisGuideLength),
+                        ToImGui(points[index].position_ + *direction * HandleAxisGuideLength), color, 1.0f);
+                }
+                drawList->AddLine(center, ToImGui(points[index].position_ + *direction * HandleAxisLineLength),
+                    color, 2.0f);
+            }
+            drawList->AddCircleFilled(center, half + 1.0f, HandleOutlineColor);
+            drawList->AddCircleFilled(center, half, color);
+        }
+        else
+        {
+            drawList->AddRectFilled(ImVec2{center.x - half - 1.0f, center.y - half - 1.0f},
+                ImVec2{center.x + half + 1.0f, center.y + half + 1.0f}, HandleOutlineColor);
+            drawList->AddRectFilled(ImVec2{center.x - half, center.y - half}, ImVec2{center.x + half, center.y + half}, color);
+        }
+    }
+    drawList->PopClipRect();
+
+    if (hoveredHandle_ && !gizmoActive)
+    {
+        if (const ShapeHandle* handle = findHandle(*hoveredHandle_))
+            ui::SetTooltip("%s", handle->name_.c_str());
+    }
+
+    // While handles are selected, the handles own the mouse. Then the gizmo of the node does not run.
+    if (gizmoActive || !selectedHandles_.empty())
+        mouseConsumed = true;
+    finish();
+}
+
+void CsgEditorAddon::RenderShapeSection()
+{
+    Component* brush = handleBrush_;
+    if (!brush)
+        return;
+
+    ui::Separator();
+    ui::TextUnformatted(Format("{} Shape: {}", ICON_FA_SHAPES, brush->GetTypeName()).c_str());
+    if (handleSet_.valid_)
+        ui::TextUnformatted("Valid");
+    else
+        ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: parameters are not valid");
+
+    ui::Text("Selected handles: %u", static_cast<unsigned>(selectedHandles_.size()));
+    if (!selectedHandles_.empty())
+    {
+        for (const ShapeHandle& handle : handleSet_.handles_)
+        {
+            if (handle.id_ != selectedHandles_.front())
+                continue;
+            if (selectedHandles_.size() == 1)
+                ui::TextWrapped("%s", handle.name_.c_str());
+            else
+                ui::TextWrapped("%s (+%u)", handle.name_.c_str(), static_cast<unsigned>(selectedHandles_.size() - 1));
+        }
+    }
+    RenderShapeSettings();
+}
+
+void CsgEditorAddon::RenderShapeSettings()
+{
+    ui::Checkbox("Show handles", &showHandles_);
+    ui::SetNextItemWidth(ui::CalcTextSize("0.0000").x + ui::GetStyle().FramePadding.x * 2.0f + 20.0f);
+    if (ui::DragFloat("Snap step", &handleGridStep_, 0.005f, 0.0f, 100.0f, "%.3f"))
+        handleGridStep_ = ea::max(0.0f, handleGridStep_);
+    if (ui::IsItemHovered())
+        ui::SetTooltip("The grid step of the Ctrl snap of a handle drag. 0 turns off the snap.");
 }
 
 } // namespace Urho3D
