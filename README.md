@@ -100,6 +100,28 @@ The root writes the result to a `StaticModel` on the same node.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
 - `Bake()` folds the applied brushes into the base operand and removes the brush nodes. The baked geometry exists only at run time and the root does not serialize it. `Bake()` returns false if a rebuild is in flight, a brush is dirty or a result is pending.
 
+## UV projection
+
+Each `CsgBrush` has three UV attributes. They come after "Materials" in the inspector.
+
+- "UV Mode": `Local` or `Root`. `Local` keeps the UV 0 of the operand mesh. `Root` projects UV 0 as a box in the local frame of the `CsgRoot`.
+- "UV Scale": the texture repeats for each unit. The default is 1.
+- "UV Offset": a `Vector2` that is added after the scale. The default is (0, 0).
+
+Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) uses `Root`.
+
+`Root` mode rules:
+
+- Each polygon picks the dominant axis of its plane normal. A tie goes to X, then Y, then Z. The choice is for the whole polygon.
+- The UV is (U, V) for the axis X: (z, y), Y: (x, z), Z: (x, y). V is the negative of the second coordinate, so V grows down. U has a sign that keeps the texture not mirrored when seen from outside.
+- uv = (U, V) * scale + offset. Only UV 0 and the tangent change. The normals and UV 1 stay.
+- In `Local` mode, uv = uv0 * scale + offset. A mesh without UV elements has no UV to change.
+- The projection uses the frame of the root. A move of the root does not change the textures. A scale of the root does.
+
+To line up the textures of many brushes, use `Root` on all of them and the same "UV Scale" and "UV Offset". The UV of a point then depends only on its position in the root. A brush that moves its faces does not make the texture slide. One material for each brush is the normal case. A procedural brush with empty slots uses slot 0.
+
+A change of a UV attribute folds again from that brush, as a change of the operation does.
+
 ## Editor addon
 
 `Plugin.CSG.Editor` adds CSG tools to the scene view of the editor. It does not link `Plugin.CSG`. It finds the CSG types by name at run time.
@@ -285,6 +307,10 @@ The editor has no test harness for addons. Do these checks by hand:
 41. Set "Arc" to 180. The ring opens and the two end caps appear. Set a material in slot 4 and in slot 5. Each cap gets its own material.
 42. Set "Tube Segments" to 4 and "Tube Angle" to 45. The tube section is a square. Set "Tube Angle" to 0. The section is a diamond. Set a material in slot 3. Only the bottom of the ring gets it.
 43. Set "Tube Radius" to (5, 0.1). The radial radius goes down to 0.99 times "Radius". The ring stays solid. Subtract the ring from a box. The cut stays closed.
+44. Select a brush of a root with a textured material. Set "UV Mode" to `Root`. The texture does not stretch on the faces and is not mirrored on any face seen from outside.
+45. Add a second box next to the first one with the same material, "UV Mode" `Root` and the same "UV Scale". The texture continues over the joint with no step.
+46. Move the first box along X. The texture stays in place in the world. Set "UV Scale" to 2. The texture is half the size. Change "UV Offset". The texture slides.
+47. Add a `CsgBrush` with a model. Its "UV Mode" is `Local` and the texture looks as before. Set `Root`. The texture changes to the world projection.
 
 ## How to try the sample scene
 
