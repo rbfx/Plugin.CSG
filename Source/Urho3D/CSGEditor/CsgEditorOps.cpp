@@ -141,13 +141,14 @@ Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* mo
     return node;
 }
 
-/// The procedural box, sphere, cylinder and ring are first. The model presets use the CoreData models.
+/// The procedural box, sphere, cylinder, ring and wedge are first. The model presets use the CoreData models.
 /// Tests.CSG checks that CSG accepts each model as a closed mesh.
 const CsgBrushPreset BrushPresets[] = {
     {"Box", nullptr, "CsgBoxBrush"},
     {"Sphere", nullptr, "CsgSphereBrush"},
     {"Cylinder", nullptr, "CsgCylinderBrush"},
     {"Ring", nullptr, "CsgRingBrush"},
+    {"Wedge", nullptr, "CsgWedgeBrush"},
     {"Box.mdl", "Models/Box.mdl", nullptr},
     {"Sphere.mdl", "Models/Sphere.mdl", nullptr},
     {"Cylinder.mdl", "Models/Cylinder.mdl", nullptr},

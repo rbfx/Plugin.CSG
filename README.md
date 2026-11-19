@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder" and "Procedural ring".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring" and "Procedural wedge".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -122,7 +122,7 @@ A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
   `P_ACCEPTED` is false if the shape is centered (offset below 1e-6), always centered (sphere, ring) or the new parameters are not valid.
   Then the parameters stay. The handle ids do not change. The editor queries the positions again.
   In C++ the same API is `CsgProceduralBrush::Recenter`. The box center is the mean of the 8 positions `Size * Corner`.
-  The cylinder center is the midpoint of the two end centers.
+  The cylinder center is the midpoint of the two end centers. The wedge center is its "Center" attribute. The recenter sets it to zero.
 
 The move is stateless. The brush applies the delta to its current parameters. The editor restores the attributes before each call.
 The brush clamps the result with the sanitizer of the shape. It refuses a result that is not valid.
@@ -145,6 +145,7 @@ The ids are a file contract.
 | Ring | 1 | Radial tube radius (axis +X). |
 | Ring | 2 | Axial tube radius (axis +Y). |
 | Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
+| Wedge | 0 to 5 | Faces (axes) in the order -X, +X, -Z (front edge), +Z (back), +Y (top edge), -Y (bottom). The size on the axis grows by the move and "Center" moves by half of it, so the opposite face stays. |
 
 ### Pick event (provenance)
 
@@ -179,7 +180,7 @@ Each `CsgBrush` has three UV attributes. They come after "Materials" in the insp
 - "UV Scale": the texture repeats for each unit. The default is 1.
 - "UV Offset": a `Vector2` that is added after the scale. The default is (0, 0).
 
-Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) uses `Root`.
+Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) uses `Root`.
 
 `Root` mode rules:
 
@@ -231,6 +232,7 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 - `Sphere`: a procedural `CsgSphereBrush`. It has no model file.
 - `Cylinder`: a procedural `CsgCylinderBrush`. It has no model file.
 - `Ring`: a procedural `CsgRingBrush`. It has no model file.
+- `Wedge`: a procedural `CsgWedgeBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -296,6 +298,19 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - Validity: the volume must be positive and no triangle can have two equal positions. The sanitized values always give a valid ring. A shape that is not valid gives no operand and logs one warning.
 - A value that is not finite gets its default value.
 
+### Procedural wedge
+
+`CsgWedgeBrush` generates a right-angle ramp from parameters. It has no "Model" attribute. See `CsgGenerateWedge`.
+
+- "Size": the size of the bounding box. Each component is in [0.001, 16384]. The default is (1, 1, 1).
+- "Center": the center of the bounding box in the local space of the brush. Each component is in [-16384, 16384]. The default is (0, 0, 0). Each vertex is generated around it.
+- The slope rises from the front bottom edge (-Z, -Y) to the back top edge (+Z, +Y). The mesh has 6 positions and 8 triangles.
+- "Materials": five slots, in this order: 0 the bottom (-Y), 1 the back (+Z), 2 the slope, 3 the left triangle (-X), 4 the right triangle (+X). The order is a file contract.
+- Each triangle has a flat normal. UV 0 is a planar projection of each face in local units, relative to "Center". UV 1 is equal to UV 0.
+- Handles: see the table in "Shape handles (protocol)". A face handle changes the size on its axis by the move and moves "Center" by half of the move, so the opposite face stays fixed.
+- Validity: the volume must be positive and no triangle can have two equal positions. The sanitized values always give a valid wedge.
+- A value that is not finite gets its default value.
+
 ### Operation colors and operand overlay
 
 - The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
@@ -349,7 +364,7 @@ The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the te
 
 ### Shape handles
 
-The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) in the view. A brush with a model has no handles.
+The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) in the view. A brush with a model has no handles.
 
 - Select exactly one node with a procedural brush. The handles show on the brush. With two or more selected nodes, no handles show.
 - A point handle is a square. It moves freely. An axis handle is a circle with a short line. It moves only along its axis.
@@ -385,6 +400,7 @@ The handles of each shape:
 | Sphere | 6 radii (axes) at +X, -X, +Y, -Y, +Z and -Z. |
 | Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes) and the bulge (axis). A radius at an apex and a bulge on a thin body are not offered. |
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
+| Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. |
 
 ### Manual check list
 
@@ -457,6 +473,9 @@ The editor has no test harness for addons. Do these checks by hand:
 65. Add a box. Drag a face handle by some distance. At the release the node gizmo and the handles show at the center of the box (check box on). Ctrl+Z restores the shape and the node position. Ctrl+Y gives the centered state again.
 66. Clear "Recenter pivot after drag". Drag a face. The box stays off the node origin. Use "Recenter pivot" in the "Shape" section. The origin goes to the center and the box does not move. Ctrl+Z reverts it. Restart the editor. The check box keeps its state.
 67. Push Escape during a drag. The shape and the node position stay as before the drag.
+68. Select "Wedge" in the preset combo. Push B. A `CsgWedgeBrush` appears as a wireframe ramp and the root rebuilds. The overlay line shows "CsgWedgeBrush".
+69. Drag the +Y handle of the wedge up. The slope gets steeper and the bottom stays on its plane. Drag the -Z handle. The front edge moves and the back face stays.
+70. Set a material in slot 2. Only the slope gets it. Subtract the wedge from a box. The ramp cut stays closed.
 
 ## How to try the sample scene
 
