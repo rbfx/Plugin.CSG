@@ -155,6 +155,7 @@ PLUGIN_RBFXCSG_API bool CsgGenerateSphere(const CsgSphereParams& params, CsgShap
 /// The radius pair of an end is the two radii along the local X and Z axes, not along the tilted axis.
 /// The radii of a ring in the body are lerp(bottom, top, t) * (1 + bulge * 4 * t * (1 - t)), per component.
 /// The center line of the body stays a straight line between the centers.
+/// The centers must be at least MinCenterDistance apart in Y, because the end planes are perpendicular to Y.
 struct CsgCylinderParams
 {
     static constexpr float MaxCoordinate = 16384.0f;

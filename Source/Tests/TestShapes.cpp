@@ -1142,6 +1142,18 @@ TEST_CASE("CsgGenerateCylinder refuses shapes that are not valid", "[shapes][pro
     horizontal.bottomCenter_ = Vector3(-0.5f, 0.0f, 0.0f);
     horizontal.topCenter_ = Vector3(0.5f, 0.0f, 0.0f);
     CHECK(!CsgGenerateCylinder(horizontal, mesh));
+
+    // A near-horizontal axis: the Y offset is below the minimum, so a sliver is refused.
+    CsgCylinderParams nearHorizontal;
+    nearHorizontal.bottomCenter_ = Vector3(-0.5f, 0.0f, 0.0f);
+    nearHorizontal.topCenter_ = Vector3(0.5f, 1e-4f, 0.0f);
+    CHECK(!CsgGenerateCylinder(nearHorizontal, mesh));
+    CHECK(mesh.vertices_.empty());
+    nearHorizontal.topCenter_ = Vector3(0.5f, 0.002f, 0.0f);
+    REQUIRE(CsgGenerateCylinder(nearHorizontal, mesh));
+    CHECK(mesh.groups_.size() == 3);
+    CHECK(IsEdgeClosed(MeshToPolygons(mesh), 1e-6f));
+    CHECK(SolidVolume(mesh) > 0.0);
 }
 
 TEST_CASE("CsgSanitizeCylinderParams clamps the range and replaces values that are not finite", "[shapes][procedural]")

@@ -182,7 +182,7 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - "Smooth Normals": the default is on. Off gives a flat normal for each triangle. A cap normal is always flat.
 - "Materials": three slots, in this order: 0 the side, 1 the top cap, 2 the bottom cap. An apex end has no cap, and its slot stays free. The other slots keep their numbers.
 - UV 0 of the side is (angle / 2pi, height fraction). UV 0 of a cap is the planar (x + 0.5, z + 0.5). UV 1 is equal to UV 0.
-- Validity: the centers must be at least 0.001 apart. Both ends must not be apexes. The volume must be positive. A shape that is not valid gives no operand and logs one warning.
+- Validity: the centers must be at least 0.001 apart, and also at least 0.001 apart in Y. A horizontal axis is not valid. Both ends must not be apexes. The volume must be positive. A shape that is not valid gives no operand and logs one warning.
 - If the top is below the bottom in Y, the generator flips the winding. The volume stays positive and the top cap stays at "Top Center".
 - A value that is not finite gets its default value.
 

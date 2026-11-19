@@ -463,7 +463,9 @@ bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
     const Vector3 top = sanitized.topCenter_;
     const bool bottomApex = sanitized.bottomRadius_ == Vector2::ZERO;
     const bool topApex = sanitized.topRadius_ == Vector2::ZERO;
-    if ((top - bottom).Length() < CsgCylinderParams::MinCenterDistance || (bottomApex && topApex))
+    // The end planes are perpendicular to Y, so the Y distance must be large enough, not only the 3D distance.
+    if ((top - bottom).Length() < CsgCylinderParams::MinCenterDistance
+        || std::fabs(top.y_ - bottom.y_) < CsgCylinderParams::MinCenterDistance || (bottomApex && topApex))
         return false;
 
     const unsigned segments = static_cast<unsigned>(sanitized.segments_);
