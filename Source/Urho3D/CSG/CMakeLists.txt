@@ -23,11 +23,13 @@ set (SOURCE_FILES
     CsgRoot.cpp
     CsgShapes.cpp
     CsgSphereBrush.cpp
+    CsgCylinderBrush.cpp
     CsgTriangulation.cpp
     Csg.h
     CsgBoolean.h
     CsgBoxBrush.h
     CsgSphereBrush.h
+    CsgCylinderBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h

@@ -7,6 +7,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgBrush.h"
+#include "Urho3D/CSG/CsgCylinderBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
@@ -3860,6 +3861,470 @@ TEST_CASE("CsgSphereBrush generates the model fast", "[root][procedural]")
     fine.rings_ = 64;
     const double fineMs = measure(fine);
     WARN("Sphere generation and model build: default " << defaultMs << " ms, 128x64 " << fineMs << " ms");
+    // A sanitizer build is much slower, so it gets a wider limit.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    const double slowFactor = 10.0;
+#else
+    const double slowFactor = 1.0;
+#endif
+    CHECK(defaultMs < 5.0 * slowFactor);
+    CHECK(fineMs < 50.0 * slowFactor);
+}
+
+namespace
+{
+
+/// Add a procedural cylinder brush under the node of the root.
+CsgCylinderBrush* AddProceduralCylinder(CsgRoot* root, const ea::string& name, const CsgCylinderParams& params,
+    CsgOperation op, const Vector3& position = Vector3::ZERO)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<CsgCylinderBrush>();
+    brush->SetParams(params);
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Add the model of a generated cylinder to the resource cache.
+void AddGeneratedCylinderModel(Context* context, const ea::string& name, const CsgCylinderParams& params)
+{
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(params, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+}
+
+/// Return the exact volume of a cylinder polyhedron with circular ends and a given height: a frustum.
+double FrustumPolyhedronVolume(unsigned segments, double bottomRadius, double topRadius, double height)
+{
+    const double pi = 3.14159265358979323846;
+    const double k = 0.5 * segments * std::sin(2.0 * pi / segments);
+    const double a0 = k * bottomRadius * bottomRadius;
+    const double a1 = k * topRadius * topRadius;
+    return height / 3.0 * (a0 + a1 + std::sqrt(a0 * a1));
+}
+
+} // namespace
+
+TEST_CASE("CsgCylinderBrush is an operand with the polyhedron volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A cylinder alone gives the volume of the polyhedron")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgCylinderParams params;
+        params.bottomRadius_ = Vector2(1.0f, 1.0f);
+        params.topRadius_ = Vector2(1.0f, 1.0f);
+        params.topCenter_ = Vector3(0.0f, 2.0f, 0.0f);
+        CsgCylinderBrush* brush = AddProceduralCylinder(root, "Cylinder", params, CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ ==
+            Catch::Approx(FrustumPolyhedronVolume(24, 1.0, 1.0, 2.5)).epsilon(1e-3));
+    }
+
+    SECTION("A cone alone gives the volume of the polyhedron")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Cone");
+        CsgCylinderParams params;
+        params.topRadius_ = Vector2::ZERO;
+        AddProceduralCylinder(root, "Cone", params, CsgOperation::Union);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(FrustumPolyhedronVolume(24, 0.5, 0.0, 1.0)).epsilon(1e-3));
+    }
+
+    SECTION("A subtract cylinder makes a hole through the box")
+    {
+        // The base box is the cube from -1 to 1. The cylinder is longer than the box.
+        CsgRoot* root = MakeBoxRoot(scene, "Procedural");
+        CsgCylinderParams params;
+        params.bottomCenter_ = Vector3(0.0f, -2.0f, 0.0f);
+        params.topCenter_ = Vector3(0.0f, 2.0f, 0.0f);
+        params.bottomRadius_ = Vector2(0.5f, 0.5f);
+        params.topRadius_ = Vector2(0.5f, 0.5f);
+        AddProceduralCylinder(root, "Hole", params, CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().volume_ ==
+            Catch::Approx(8.0 - FrustumPolyhedronVolume(24, 0.5, 0.5, 2.0)).epsilon(1e-3));
+        CHECK(errors.GetCount() == 0);
+
+        // A model brush with the same mesh gives the same output.
+        AddGeneratedCylinderModel(context, "Csg/GeneratedCylinder.mdl", params);
+        CsgRoot* expected = MakeBoxRoot(scene, "Model");
+        Node* cutNode = expected->GetNode()->CreateChild("Cut");
+        auto* cut = cutNode->CreateComponent<CsgBrush>();
+        cut->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/GeneratedCylinder.mdl"));
+        cut->SetOperation(CsgOperation::DifferenceAB);
+        BuildFully(expected, workQueue);
+        CheckSameOutput(root, expected);
+    }
+
+    SECTION("A cone, a sheared cylinder and a bulge subtracted from a box fold without a failure")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Fold");
+        CsgCylinderParams cone;
+        cone.bottomCenter_ = Vector3(0.0f, -1.5f, 0.0f);
+        cone.topCenter_ = Vector3(0.0f, 0.5f, 0.0f);
+        cone.bottomRadius_ = Vector2(0.6f, 0.6f);
+        cone.topRadius_ = Vector2::ZERO;
+        AddProceduralCylinder(root, "Cone", cone, CsgOperation::DifferenceAB);
+        CsgCylinderParams sheared;
+        sheared.bottomCenter_ = Vector3(0.0f, 0.0f, 0.0f);
+        sheared.topCenter_ = Vector3(0.6f, 1.5f, 0.2f);
+        sheared.bottomRadius_ = Vector2(0.3f, 0.2f);
+        sheared.topRadius_ = Vector2(0.2f, 0.2f);
+        sheared.bulge_ = 1.0f;
+        sheared.heightSegments_ = 3;
+        AddProceduralCylinder(root, "Sheared", sheared, CsgOperation::DifferenceAB, Vector3(0.0f, -0.5f, 0.5f));
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.2);
+    }
+
+    SECTION("A cylinder united with a rotated box folds without a failure")
+    {
+        CsgRoot* united = MakeEmptyBaseRoot(scene, "United");
+        AddProceduralBox(united, "Box", Vector3::ZERO, Vector3(2.0f, 1.0f, 1.0f), CsgOperation::Union)
+            ->GetNode()->SetRotation(Quaternion(30.0f, Vector3(0.3f, 1.0f, 0.2f)));
+        CsgCylinderParams params;
+        params.bottomRadius_ = Vector2(0.8f, 0.6f);
+        params.topRadius_ = Vector2(0.4f, 0.3f);
+        AddProceduralCylinder(united, "Cylinder", params, CsgOperation::Union, Vector3(0.7f, 0.1f, 0.2f));
+        BuildFully(united, workQueue);
+        CHECK(!united->GetLastBuildFailed());
+        CHECK(united->GetLastBuildStats().valid_);
+        CHECK(united->GetLastBuildStats().closed_);
+        CHECK(united->GetLastBuildStats().foldSteps_ == 2);
+        CHECK(united->GetLastBuildStats().volume_ > 2.0);
+    }
+
+    SECTION("A brush with a shape that is not valid gives no operand")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Invalid");
+        CsgCylinderParams params;
+        params.topCenter_ = params.bottomCenter_;
+        CsgCylinderBrush* brush = AddProceduralCylinder(root, "Invalid", params, CsgOperation::DifferenceAB);
+        CHECK(!brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(8.0).epsilon(1e-6));
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgCylinderBrush* brush = AddProceduralCylinder(root, "Cylinder", CsgCylinderParams{}, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgCylinderBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgCylinderBrush* third = AddProceduralCylinder(
+        root, "Third", CsgCylinderParams{}, CsgOperation::Union, Vector3(1.2f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    double volume = root->GetLastBuildStats().volume_;
+
+    // The attribute path: SetAttribute and ApplyAttributes. The value is clamped.
+    Component* component = third;
+    CHECK(component->SetAttribute("Top Radius", Vector2(1.0f, 1.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetTopRadius() == Vector2(1.0f, 1.0f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.05);
+    volume = root->GetLastBuildStats().volume_;
+
+    CHECK(component->SetAttribute("Segments", 8));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSegments() == 8);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ < volume);
+
+    CHECK(component->SetAttribute("Height Segments", 3));
+    CHECK(component->SetAttribute("Bulge", 1.0f));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetHeightSegments() == 3);
+    CHECK(third->GetBulge() == 1.0f);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Top Center", Vector3(0.5f, 1.0f, 0.0f)));
+    CHECK(component->SetAttribute("Bottom Center", Vector3(0.0f, -0.25f, 0.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetTopCenter() == Vector3(0.5f, 1.0f, 0.0f));
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Smooth Normals", false));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(!third->GetSmoothNormals());
+    CHECK(!component->GetAttribute("Smooth Normals").GetBool());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Bottom Radius", Vector2(-1.0f, 1e9f)));
+    CHECK(component->SetAttribute("Segments", 1000));
+    CHECK(component->SetAttribute("Height Segments", 0));
+    CHECK(component->SetAttribute("Bulge", 100.0f));
+    CHECK(component->SetAttribute("Top Center", Vector3(1e9f, 0.0f, 0.0f)));
+    component->ApplyAttributes();
+    CHECK(third->GetBottomRadius() == Vector2(CsgCylinderParams::MinRadius, CsgCylinderParams::MaxRadius));
+    CHECK(third->GetSegments() == 128);
+    CHECK(third->GetHeightSegments() == 1);
+    CHECK(third->GetBulge() == CsgCylinderParams::MaxBulge);
+    CHECK(third->GetTopCenter().x_ == CsgCylinderParams::MaxCoordinate);
+    CHECK(component->GetAttribute("Segments").GetInt() == 128);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgCylinderBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgCylinderParams params;
+    params.bottomCenter_ = Vector3(0.0f, -1.5f, 0.25f);
+    params.topCenter_ = Vector3(0.5f, 1.5f, 0.0f);
+    params.bottomRadius_ = Vector2(0.75f, 0.5f);
+    params.topRadius_ = Vector2::ZERO;
+    params.segments_ = 10;
+    params.heightSegments_ = 3;
+    params.bulge_ = 0.5f;
+    params.smoothNormals_ = false;
+    CsgCylinderBrush* cylinder = AddProceduralCylinder(
+        root, "Cylinder", params, CsgOperation::DifferenceAB, Vector3(0.5f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    const double volume = root->GetLastBuildStats().volume_;
+    CHECK(volume < 8.0);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild("Root");
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    Node* loadedNode = loadedRootNode->GetChild("Cylinder");
+    REQUIRE(loadedNode);
+    auto* loadedCylinder = loadedNode->GetComponent<CsgCylinderBrush>();
+    REQUIRE(loadedCylinder);
+    CHECK(loadedCylinder->GetOperation() == CsgOperation::DifferenceAB);
+    const CsgCylinderParams& loadedParams = loadedCylinder->GetParams();
+    CHECK(loadedParams.bottomCenter_ == cylinder->GetBottomCenter());
+    CHECK(loadedParams.topCenter_ == cylinder->GetTopCenter());
+    CHECK(loadedParams.bottomRadius_ == cylinder->GetBottomRadius());
+    CHECK(loadedParams.topRadius_ == Vector2::ZERO);
+    CHECK(loadedParams.segments_ == 10);
+    CHECK(loadedParams.heightSegments_ == 3);
+    CHECK(loadedParams.bulge_ == 0.5f);
+    CHECK(!loadedParams.smoothNormals_);
+
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(loadedRoot->GetLastBuildStats().volume_ == Catch::Approx(volume).epsilon(1e-9));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgCylinderBrush has three material slots and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    context->RegisterSubsystem<VirtualFileSystem>();
+    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml", "Materials/Bottom.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+    const ResourceRefList threeMaterials(
+        Material::GetTypeStatic(), {"Materials/Box.xml", "Materials/Top.xml", "Materials/Bottom.xml"});
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("The attributes are the ones of a brush without Model")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgCylinderBrush* cylinder =
+            AddProceduralCylinder(root, "Cylinder", CsgCylinderParams{}, CsgOperation::DifferenceAB);
+        Component* component = cylinder;
+        CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 3);
+        CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
+        for (const AttributeInfo& info : *component->GetAttributes())
+            CHECK(info.name_ != "Model");
+        CHECK(component->GetAttribute("Bottom Center").GetVector3() == Vector3(0.0f, -0.5f, 0.0f));
+        CHECK(component->GetAttribute("Top Center").GetVector3() == Vector3(0.0f, 0.5f, 0.0f));
+        CHECK(component->GetAttribute("Bottom Radius").GetVector2() == Vector2(0.5f, 0.5f));
+        CHECK(component->GetAttribute("Top Radius").GetVector2() == Vector2(0.5f, 0.5f));
+        CHECK(component->GetAttribute("Segments").GetInt() == 24);
+        CHECK(component->GetAttribute("Height Segments").GetInt() == 1);
+        CHECK(component->GetAttribute("Bulge").GetFloat() == 0.0f);
+        CHECK(component->GetAttribute("Smooth Normals").GetBool());
+
+        cylinder->SetMaterials(ResourceRefList(
+            Material::GetTypeStatic(), ea::vector<ea::string>(5u, ea::string("Materials/Top.xml"))));
+        CHECK(cylinder->GetMaterialsAttr().names_.size() == 3);
+        cylinder->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Top.xml"}));
+        CHECK(cylinder->GetMaterialsAttr().names_.size() == 3);
+        CHECK(cylinder->GetMaterialsAttr().names_[0] == "Materials/Top.xml");
+        CHECK(cylinder->GetMaterialsAttr().names_[2].empty());
+    }
+
+    SECTION("The material of slot 1 reaches the top cap")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgCylinderBrush* cylinder =
+            AddProceduralCylinder(root, "Cylinder", CsgCylinderParams{}, CsgOperation::Union);
+        cylinder->SetMaterials(threeMaterials);
+        BuildFully(root, workQueue);
+        const Model* output = GetOutput(root)->GetModel();
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        REQUIRE(output->GetNumGeometries() == 3);
+        REQUIRE(names.size() == 3);
+        // Find the geometry with the top cap: all its triangles have the normal +Y.
+        bool found = false;
+        for (unsigned i = 0; i < output->GetNumGeometries(); ++i)
+        {
+            const Geometry* geometry = output->GetGeometry(i, 0);
+            ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY);
+            bool allUp = true;
+            unsigned count = 0;
+            for (const CsgPolygon& polygon : polygons)
+            {
+                if ((polygon.shared_ & 0xFFFFu) != i)
+                    continue;
+                ++count;
+                allUp = allUp && polygon.vertices_[0].GetNormal().Equals(Vector3::UP, 1e-4f);
+            }
+            if (geometry && count > 0 && allUp)
+            {
+                CHECK(names[i] == "Materials/Top.xml");
+                found = true;
+            }
+        }
+        CHECK(found);
+        for (const char* name : {"Materials/Box.xml", "Materials/Top.xml", "Materials/Bottom.xml"})
+            CHECK(ea::find(names.begin(), names.end(), name) != names.end());
+    }
+
+    SECTION("A cone keeps the slots: the top cap is slot 1, the bottom cap is slot 2")
+    {
+        CsgRoot* bottomRoot = MakeEmptyBaseRoot(scene, "BottomApex");
+        CsgCylinderParams bottomApex;
+        bottomApex.bottomRadius_ = Vector2::ZERO;
+        AddProceduralCylinder(bottomRoot, "Cone", bottomApex, CsgOperation::Union)->SetMaterials(threeMaterials);
+        BuildFully(bottomRoot, workQueue);
+        const ea::vector<ea::string>& bottomNames = GetOutput(bottomRoot)->GetMaterialsAttr().names_;
+        CHECK(ea::find(bottomNames.begin(), bottomNames.end(), "Materials/Box.xml") != bottomNames.end());
+        CHECK(ea::find(bottomNames.begin(), bottomNames.end(), "Materials/Top.xml") != bottomNames.end());
+        CHECK(ea::find(bottomNames.begin(), bottomNames.end(), "Materials/Bottom.xml") == bottomNames.end());
+
+        CsgRoot* topRoot = MakeEmptyBaseRoot(scene, "TopApex");
+        CsgCylinderParams topApex;
+        topApex.topRadius_ = Vector2::ZERO;
+        AddProceduralCylinder(topRoot, "Cone", topApex, CsgOperation::Union)->SetMaterials(threeMaterials);
+        BuildFully(topRoot, workQueue);
+        const ea::vector<ea::string>& topNames = GetOutput(topRoot)->GetMaterialsAttr().names_;
+        CHECK(ea::find(topNames.begin(), topNames.end(), "Materials/Box.xml") != topNames.end());
+        CHECK(ea::find(topNames.begin(), topNames.end(), "Materials/Top.xml") == topNames.end());
+        CHECK(ea::find(topNames.begin(), topNames.end(), "Materials/Bottom.xml") != topNames.end());
+        CHECK(!topRoot->GetLastBuildFailed());
+    }
+
+    SECTION("A subtract cylinder gives its materials to the cut faces")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Root");
+        CsgCylinderParams params;
+        params.bottomCenter_ = Vector3(0.0f, -2.0f, 0.0f);
+        params.topCenter_ = Vector3(0.0f, 2.0f, 0.0f);
+        CsgCylinderBrush* cylinder = AddProceduralCylinder(root, "Hole", params, CsgOperation::DifferenceAB);
+        cylinder->SetMaterials(threeMaterials);
+        BuildFully(root, workQueue);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgCylinderBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto measure = [&](const CsgCylinderParams& params)
+    {
+        // The best of several runs. The limits are generous, so a loaded CI machine does not fail.
+        double best = 1e9;
+        for (unsigned run = 0; run < 5; ++run)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            CsgShapeMesh mesh;
+            const bool generated = CsgGenerateCylinder(params, mesh);
+            SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+            const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - start;
+            REQUIRE(generated);
+            REQUIRE(model);
+            best = ea::min(best, elapsed.count());
+        }
+        return best;
+    };
+
+    const double defaultMs = measure(CsgCylinderParams{});
+    CsgCylinderParams fine;
+    fine.segments_ = 128;
+    fine.heightSegments_ = 64;
+    const double fineMs = measure(fine);
+    WARN("Cylinder generation and model build: default " << defaultMs << " ms, 128x64 " << fineMs << " ms");
     // A sanitizer build is much slower, so it gets a wider limit.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
     const double slowFactor = 10.0;
