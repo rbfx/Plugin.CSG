@@ -466,9 +466,11 @@ The handles of each shape:
 - The command "Bake to Asset" is in the CSG menu and in the overlay of the root. It needs a root with a result and a parent node.
 - The file is `Models/<root name>_Baked.mdl` in the resource directory of the scene file. If the scene has no resource file name, the data directory of the project is used. Without both, the command logs an error.
 - The command never overwrites a file. It appends _1, _2 and so on to the name.
-- One undo step adds the sibling node "<root name> Baked" and disables the `CsgRoot` component. The node has the world transform of the root. Its `StaticModel` has the saved model and the materials of the result.
+- One undo step adds the sibling node "<root name> Baked" and disables the `CsgRoot` component. The node has the local transform of the root and the same parent, so the world transforms are equal. Its `StaticModel` has the saved model and the materials of the result.
 - Undo removes the new node and enables the root. The file stays on the disk.
 - This command is not `Bake()`. `Bake()` works at run time and removes the brush nodes.
+- The command refuses while the root builds or has a pending rebuild. It logs the warning "Bake to Asset: the result is still building. Try again." and changes nothing.
+- The baked node has no collision. Add a `CollisionShape` or a `RigidBody` to the baked node if you need collision.
 
 ### Stats and dimensions in the overlay
 
