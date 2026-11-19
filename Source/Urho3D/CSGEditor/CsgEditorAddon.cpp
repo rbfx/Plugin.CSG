@@ -71,6 +71,7 @@ const auto Hotkey_SetDifference = EditorHotkey{"Csg.SetDifference"}.Press(KEY_2)
 const auto Hotkey_SetIntersection = EditorHotkey{"Csg.SetIntersection"}.Press(KEY_3);
 const auto Hotkey_MoveEarlier = EditorHotkey{"Csg.MoveEarlier"}.Press(KEY_LEFTBRACKET);
 const auto Hotkey_MoveLater = EditorHotkey{"Csg.MoveLater"}.Press(KEY_RIGHTBRACKET);
+const auto Hotkey_ToggleBrush = EditorHotkey{"Csg.ToggleBrush"}.Press(KEY_H);
 
 const StringHash RootType("CsgRoot");
 const StringHash BrushType("CsgBrush");
@@ -202,6 +203,7 @@ CsgEditorAddon::CsgEditorAddon(SceneViewTab* owner)
     hotkeyManager->BindHotkey(this, Hotkey_SetIntersection, &CsgEditorAddon::SetIntersection);
     hotkeyManager->BindHotkey(this, Hotkey_MoveEarlier, &CsgEditorAddon::MoveEarlier);
     hotkeyManager->BindHotkey(this, Hotkey_MoveLater, &CsgEditorAddon::MoveLater);
+    hotkeyManager->BindHotkey(this, Hotkey_ToggleBrush, &CsgEditorAddon::ToggleSelectedBrushes);
 
     URHO3D_LOGDEBUG("CSG editor addon is registered");
 }
@@ -352,6 +354,37 @@ void CsgEditorAddon::MoveActiveBrush(int step)
 
     const auto reorder = MakeShared<ReorderNodeAction>(brushNode, oldChildIndex, newChildIndex);
     owner_->PushAction(MakeShared<RebuildRootActionWrapper>(reorder, rootNode));
+}
+
+void CsgEditorAddon::ToggleSelectedBrushes()
+{
+    if (!IsAvailable())
+        return;
+
+    SceneViewPage* page = owner_->GetActivePage();
+    if (!page || page->IsSimulationActive())
+        return;
+
+    ea::vector<Component*> components;
+    VariantVector oldValues;
+    VariantVector newValues;
+    for (Node* brushNode : GetSelectedBrushes(*page))
+    {
+        Component* component = brushNode->GetComponent(BrushType);
+        const Variant oldValue = component->GetAttribute("Is Enabled");
+        // The brush registers with the root when its enabled state changes. The root rebuilds then.
+        if (!ToggleBrushEnabled(brushNode))
+            continue;
+        components.push_back(component);
+        oldValues.push_back(oldValue);
+        newValues.push_back(component->GetAttribute("Is Enabled"));
+    }
+
+    if (components.empty())
+        return;
+
+    // The attribute "Is Enabled" calls SetEnabled. Then undo and redo also make the root rebuild.
+    owner_->PushAction<ChangeComponentAttributesAction>(page->scene_.Get(), "Is Enabled", components, oldValues, newValues);
 }
 
 void CsgEditorAddon::MoveEarlier()
@@ -771,6 +804,15 @@ bool CsgEditorAddon::RenderTabContextMenu()
 
     SceneViewPage* page = owner_->GetActivePage();
     const bool hasBrushes = page && !GetSelectedBrushes(*page).empty();
+    if (ui::MenuItem("Toggle Brush", hotkeyManager->GetHotkeyLabel(Hotkey_ToggleBrush).c_str(), false, hasBrushes))
+        ToggleSelectedBrushes();
+    if (ui::MenuItem("Move Brush Earlier", hotkeyManager->GetHotkeyLabel(Hotkey_MoveEarlier).c_str(), false, hasBrushes))
+        MoveActiveBrush(-1);
+    if (ui::MenuItem("Move Brush Later", hotkeyManager->GetHotkeyLabel(Hotkey_MoveLater).c_str(), false, hasBrushes))
+        MoveActiveBrush(1);
+
+    ui::Separator();
+
     const int count = OperationCount(context_);
     for (int index = 0; index < count; ++index)
     {

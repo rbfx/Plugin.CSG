@@ -34,6 +34,7 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 /// Each shape has the color of its operation. A selected brush draws with no depth test.
 /// An overlay in the view corner lists the brushes of the root and the build status.
 /// A click on a list item selects the brush. The hotkeys `[` and `]` move the active brush in the list.
+/// The hotkey `H` toggles the selected brushes. A disabled brush is not an operand.
 class CsgEditorAddon : public SceneViewAddon
 {
     URHO3D_OBJECT(CsgEditorAddon, SceneViewAddon);
@@ -66,6 +67,8 @@ public:
     void SetSelectedOperation(int operation);
     /// Move the active brush by the step in the operand list of its root. One undo step reverts the move.
     void MoveActiveBrush(int step);
+    /// Toggle the enabled state of all selected brushes. One undo step reverts the change.
+    void ToggleSelectedBrushes();
 
 private:
     enum class DropMode
