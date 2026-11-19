@@ -97,6 +97,8 @@ private:
     void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
+    /// Return true if the nearest geometry under the cursor is the result node of a root of the selection.
+    bool IsHoveringSelectedResult(SceneViewPage& page) const;
     /// Set the material on the brush components of the drop. Slot 0 only, or all slots.
     void ApplyDropMaterial(const ea::string& materialName, bool allSlots);
     /// Set the old "Materials" values back on the brush components of the drop.

@@ -735,12 +735,12 @@ TEST_CASE("SetBrushMaterial works on a model brush", "[editorops][material]")
     brush->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Old0.xml", "Materials/Old1.xml", ""}));
     brush->ApplyAttributes();
     const unsigned numSlots = GetMaterialNames(brushNode).size();
-    REQUIRE(numSlots >= 1);
+    // The test brush model has the geometries that the check of slot 1 needs.
+    REQUIRE(numSlots >= 2);
 
     CHECK(SetBrushMaterial(brushNode, "Materials/New.xml", 0));
     CHECK(GetMaterialNames(brushNode)[0] == "Materials/New.xml");
-    if (numSlots > 1)
-        CHECK(GetMaterialNames(brushNode)[1] == "Materials/Old1.xml");
+    CHECK(GetMaterialNames(brushNode)[1] == "Materials/Old1.xml");
 
     CHECK(SetAllBrushMaterialSlots(brushNode, "Materials/All.xml"));
     CHECK(GetMaterialNames(brushNode).size() == numSlots);
@@ -795,7 +795,7 @@ TEST_CASE("Texture names and material names", "[editorops][material]")
         CHECK(IsTextureResourceName(name));
     for (const char* name : {"Textures/A.material", "x.mdl", "x", "x.png.txt", ""})
         CHECK_FALSE(IsTextureResourceName(name));
-    CHECK(GetTextureMaterialName("Textures/Wall/Brick.png") == "Textures/Wall/Brick.material");
+    CHECK(GetTextureMaterialName("Textures/Wall/Brick.png") == "Textures/Wall/Brick.png.material");
 }
 
 TEST_CASE("EnsureTextureMaterial writes the material next to the texture", "[editorops][material]")
@@ -805,18 +805,24 @@ TEST_CASE("EnsureTextureMaterial writes the material next to the texture", "[edi
     TempResourceDir dir(f.context);
     dir.WriteFile("Textures/Brick.png", "not a real image");
 
-    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.material");
-    const std::string text = dir.ReadFile("Textures/Brick.material");
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.png.material");
+    const std::string text = dir.ReadFile("Textures/Brick.png.material");
     CHECK(text.find("Techniques/LitOpaque.xml") != std::string::npos);
     CHECK(text.find("slot=\"Albedo\"") != std::string::npos);
     CHECK(text.find("name=\"Textures/Brick.png\"") != std::string::npos);
     CHECK(errors.GetCount() == 0);
 
     // An existing material stays as it is.
-    dir.WriteFile("Textures/Brick.material", "keep me");
-    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.material");
-    CHECK(dir.ReadFile("Textures/Brick.material") == "keep me");
+    dir.WriteFile("Textures/Brick.png.material", "keep me");
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.png.material");
+    CHECK(dir.ReadFile("Textures/Brick.png.material") == "keep me");
     CHECK(errors.GetCount() == 0);
+
+    // A texture with the same base name and another extension gets its own material.
+    dir.WriteFile("Textures/Brick.jpg", "not a real image");
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.jpg") == "Textures/Brick.jpg.material");
+    CHECK(dir.ReadFile("Textures/Brick.jpg.material").find("name=\"Textures/Brick.jpg\"") != std::string::npos);
+    CHECK(dir.ReadFile("Textures/Brick.png.material") == "keep me");
 }
 
 TEST_CASE("EnsureTextureMaterial logs one error for a texture outside a resource directory", "[editorops][material]")
@@ -827,7 +833,21 @@ TEST_CASE("EnsureTextureMaterial logs one error for a texture outside a resource
 
     CHECK(EnsureTextureMaterial(f.context, "Textures/Missing.png").empty());
     CHECK(errors.GetCount() == 1);
-    CHECK_FALSE(std::filesystem::exists(dir.path_ / "Textures/Missing.material"));
+    CHECK_FALSE(std::filesystem::exists(dir.path_ / "Textures/Missing.png.material"));
+}
+
+TEST_CASE("EnsureTextureMaterial logs one error and leaves no file when the write fails", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    TempResourceDir dir(f.context);
+    dir.WriteFile("Textures/Brick.png", "not a real image");
+    // A directory with the name of the material file stops the write.
+    std::filesystem::create_directories(dir.path_ / "Textures/Brick.png.material/sub");
+
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png").empty());
+    CHECK(errors.GetCount() == 1);
+    CHECK_FALSE(std::filesystem::is_regular_file(dir.path_ / "Textures/Brick.png.material"));
 }
 
 TEST_CASE("DecideDrop maps payload, selection and Shift to an action", "[editorops][material]")
@@ -840,6 +860,8 @@ TEST_CASE("DecideDrop maps payload, selection and Shift to an action", "[editoro
     DropSelection root;
     root.activeIsRoot_ = true;
     DropSelection other;
+    // The cursor is over the result node. A material drop needs it.
+    model.hoveringResult_ = procedural.hoveringResult_ = root.hoveringResult_ = true;
 
     // Models keep the rules of the model drop. Shift does not matter.
     for (const bool shift : {false, true})
@@ -872,4 +894,37 @@ TEST_CASE("DecideDrop maps payload, selection and Shift to an action", "[editoro
     DropSelection mixed = root;
     mixed.anySelectedBrush_ = true;
     CHECK(DecideDrop(DropPayloadKind::Material, mixed, false).action_ == DropAction::AssignMaterial);
+}
+
+TEST_CASE("DecideDrop leaves a material drop away from the result to the stock handler", "[editorops][material]")
+{
+    DropSelection brush;
+    brush.activeIsBrush_ = brush.anySelectedBrush_ = true;
+    DropSelection root;
+    root.activeIsRoot_ = true;
+
+    for (const bool shift : {false, true})
+    {
+        CHECK(DecideDrop(DropPayloadKind::Material, brush, shift).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Material, root, shift).action_ == DropAction::None);
+        // A texture has no stock handler. The hover does not matter.
+        CHECK(DecideDrop(DropPayloadKind::Texture, brush, shift).action_ == DropAction::AssignTexture);
+        CHECK(DecideDrop(DropPayloadKind::Texture, root, shift).action_ == DropAction::HintSelectBrush);
+    }
+}
+
+TEST_CASE("IsResultNodeOfRoot accepts only the temporary result child of the root", "[editorops][material]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    Node* result = rootNode->CreateTemporaryChild("CsgResult");
+    Node* named = rootNode->CreateChild("CsgResult");
+    Node* other = rootNode->CreateTemporaryChild("Other");
+    Node* otherRoot = f.MakeRoot();
+
+    CHECK(IsResultNodeOfRoot(result, rootNode));
+    CHECK_FALSE(IsResultNodeOfRoot(named, rootNode));
+    CHECK_FALSE(IsResultNodeOfRoot(other, rootNode));
+    CHECK_FALSE(IsResultNodeOfRoot(result, otherRoot));
+    CHECK_FALSE(IsResultNodeOfRoot(nullptr, rootNode));
 }

@@ -303,8 +303,9 @@ During the drag, the scene shows a preview. The preview brush of the "add" case 
 Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.dds`, `.bmp`, `.webp`, `.ktx`) from the resource browser onto the scene view. The selected brushes get the material.
 
 - A brush is selected: slot 0 of the attribute "Materials" of each selected brush gets the material. A model brush and a procedural brush work the same way. The other slots stay. Hold Shift to set all slots. One undo step restores all materials.
-- A texture: the addon makes a material for the texture, then assigns it. The material file goes next to the texture file, with the same base name and the extension `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.material` in the same resource directory. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten.
+- A texture: the addon makes a material for the texture, then assigns it. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten.
 - A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
+- A material drop is taken only when the cursor is over the CSG result of the root of the selection. Elsewhere the stock editor handler assigns the material to the geometry under the cursor, as before. A texture drop has no stock handler, so it works with any cursor position.
 - Only a CSG root is selected, with no brush: the drop does nothing. A tooltip shows "Select a brush to assign a material".
 - No selected brush and no root: the stock editor handlers take the drop, as before.
 
@@ -366,9 +367,9 @@ The editor has no test harness for addons. Do these checks by hand:
 48. Select a brush. Drag a `.material` from the resource browser to the view. The tooltip shows "Material: <name>" and the brush shows the material. Release. Undo restores the old material. Redo sets it again.
 49. Drag a material onto a procedural box with Shift held. All six slots get the material. Without Shift only slot 0 gets it.
 50. Select two brushes. Drop a material. Both get it. One undo step restores both.
-51. Drag a `.png` that has no `.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
-52. Select only a CSG root. Drag a material to the view. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
-53. Select a plain node with a `StaticModel`. Drag a material onto the model. The stock editor assigns the material, as before.
+51. Drag a `.png` that has no `<name>.png.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.png.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
+52. Select only a CSG root. Drag a material over the result of the root. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
+53. Select a brush, then drag a material onto another model that is not the CSG result. The stock editor assigns the material to that model, as before. Also select a plain node with a `StaticModel` and drag a material onto it. The stock editor assigns the material, as before.
 
 ## How to try the sample scene
 

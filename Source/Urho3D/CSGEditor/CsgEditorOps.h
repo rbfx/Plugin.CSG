@@ -92,7 +92,8 @@ bool SetAllBrushMaterialSlots(Node* brush, const ea::string& materialName);
 
 /// Return true if the resource name has the extension of a texture that the engine loads as Texture2D.
 bool IsTextureResourceName(const ea::string& resourceName);
-/// Return the name of the material for the texture: the texture name with the extension ".material".
+/// Return the name of the material for the texture: the full texture name plus ".material".
+/// Example: "Textures/Brick.png" gives "Textures/Brick.png.material". Two textures with the same base name stay apart.
 ea::string GetTextureMaterialName(const ea::string& textureResourceName);
 /// Make the material file for the texture next to the texture file. Return the material resource name.
 /// An existing material file is reused and never changed. The material uses the technique "Techniques/LitOpaque.xml",
@@ -120,6 +121,8 @@ struct DropSelection
     bool activeIsRoot_{};
     /// At least one selected node is a brush.
     bool anySelectedBrush_{};
+    /// The cursor is over the result node of the root of the selection.
+    bool hoveringResult_{};
 };
 
 /// What the addon does with a drop.
@@ -145,7 +148,12 @@ struct DropDecision
     bool allSlots_{};
 };
 
+/// Return true if the node is the temporary result node "CsgResult" of the root node.
+bool IsResultNodeOfRoot(Node* node, Node* rootNode);
+
 /// Decide what to do with a drop. The function is pure. Shift sets all material slots.
+/// A material drop needs the cursor over the result node, else the stock handler takes it.
+/// The stock editor has no handler for a texture. A texture drop needs no hover.
 DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift);
 
 /// Return the direct children with an enabled CsgBrush, in child order.

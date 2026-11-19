@@ -577,6 +577,7 @@ CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDr
         selection.activeIsRoot_ = IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent()));
     }
     selection.anySelectedBrush_ = !GetSelectedBrushes(page).empty();
+    selection.hoveringResult_ = kind == DropPayloadKind::Material && IsHoveringSelectedResult(page);
 
     switch (DecideDrop(kind, selection, IsShiftDown()).action_)
     {
@@ -588,6 +589,20 @@ CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDr
     case DropAction::None: break;
     }
     return DropMode::None;
+}
+
+bool CsgEditorAddon::IsHoveringSelectedResult(SceneViewPage& page) const
+{
+    const auto hits = QueryGeometriesFromScene(page.scene_, page.cameraRay_);
+    if (hits.empty() || !hits[0].node_)
+        return false;
+    // The roots of the selected nodes: a selected root, or the parent of a selected brush.
+    for (Node* node : page.selection_.GetNodes())
+    {
+        if (IsResultNodeOfRoot(hits[0].node_, FindActiveRoot(node)))
+            return true;
+    }
+    return false;
 }
 
 void CsgEditorAddon::ApplyDropMaterial(const ea::string& materialName, bool allSlots)

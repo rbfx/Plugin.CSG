@@ -8,12 +8,13 @@
 #include <Urho3D/Core/ObjectReflection.h>
 #include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
-#include <Urho3D/IO/File.h>
 #include <Urho3D/IO/FileSystem.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Resource/XMLElement.h>
 #include <Urho3D/Resource/XMLFile.h>
+
+#include <fstream>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
 
@@ -311,7 +312,7 @@ bool IsTextureResourceName(const ea::string& resourceName)
 
 ea::string GetTextureMaterialName(const ea::string& textureResourceName)
 {
-    return ReplaceExtension(textureResourceName, ".material");
+    return textureResourceName + ".material";
 }
 
 ea::string EnsureTextureMaterial(Context* context, const ea::string& textureResourceName)
@@ -343,14 +344,30 @@ ea::string EnsureTextureMaterial(Context* context, const ea::string& textureReso
     texture.SetAttribute("slot", "Albedo");
     texture.SetAttribute("name", textureResourceName);
 
-    const ea::string materialFile = ReplaceExtension(textureFile, ".material");
-    File file(context, materialFile, FILE_WRITE);
-    if (!file.IsOpen() || !xml.Save(file))
+    const ea::string materialFile = textureFile + ".material";
+    // A plain stream gives no log of its own. The function logs one error.
+    const ea::string text = xml.ToString();
+    bool saved = false;
     {
+        std::ofstream stream(materialFile.c_str(), std::ios::binary);
+        stream.write(text.c_str(), static_cast<std::streamsize>(text.size()));
+        stream.flush();
+        saved = stream.good();
+    }
+    if (!saved)
+    {
+        // A broken file must not stay. A later drop would reuse it.
+        if (auto fileSystem = context->GetSubsystem<FileSystem>())
+            fileSystem->Delete(materialFile);
         URHO3D_LOGERROR("Cannot write the material file \"{}\"", materialFile);
         return EMPTY_STRING;
     }
     return materialName;
+}
+
+bool IsResultNodeOfRoot(Node* node, Node* rootNode)
+{
+    return node && rootNode && node->IsTemporary() && node->GetParent() == rootNode && node->GetName() == "CsgResult";
 }
 
 DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift)
@@ -366,6 +383,9 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
         break;
     case DropPayloadKind::Material:
     case DropPayloadKind::Texture:
+        // The stock handler assigns a material to the geometry under the cursor.
+        if (kind == DropPayloadKind::Material && !selection.hoveringResult_)
+            break;
         if (selection.anySelectedBrush_)
         {
             result.action_ = kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
