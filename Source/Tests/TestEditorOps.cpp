@@ -7,6 +7,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
+#include "TestGeneratedBrush.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -17,6 +18,7 @@
 #include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/IO/IOEvents.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/IO/VirtualFileSystem.h>
 #include <Urho3D/Resource/ResourceCache.h>
@@ -41,51 +43,17 @@ SharedPtr<Context> MakeContext(bool withCsg)
     RegisterSceneLibrary(context);
     RegisterGraphicsLibrary(context);
     if (withCsg)
+    {
         RegisterCsgLibrary(context);
+        TestGeneratedBrush::RegisterObject(context);
+    }
     return context;
 }
 
 /// Add a box model to the resource cache.
 void AddBox(Context* context, const ea::string& name, const Vector3& halfSize)
 {
-    const Vector3 normals[6] = {Vector3::RIGHT, Vector3::LEFT, Vector3::UP, Vector3::DOWN, Vector3::FORWARD,
-        Vector3::BACK};
-
-    GeometryLODView lod;
-    lod.primitiveType_ = TRIANGLE_LIST;
-    lod.vertexFormat_.position_ = TYPE_VECTOR3;
-    lod.vertexFormat_.normal_ = TYPE_VECTOR3;
-
-    for (const Vector3& normal : normals)
-    {
-        const Vector3 u = normal.y_ != 0.0f ? Vector3::RIGHT : Vector3::UP;
-        const Vector3 v = normal.CrossProduct(u);
-        const unsigned first = lod.vertices_.size();
-        const float signs[4][2] = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
-        for (const auto& sign : signs)
-        {
-            ModelVertex vertex{};
-            vertex.SetPosition((normal + u * sign[0] + v * sign[1]) * halfSize);
-            vertex.SetNormal(normal);
-            lod.vertices_.push_back(vertex);
-        }
-        const Vector3 p0 = lod.vertices_[first].GetPosition();
-        const Vector3 p1 = lod.vertices_[first + 1].GetPosition();
-        const Vector3 p2 = lod.vertices_[first + 2].GetPosition();
-        const bool flip = (p1 - p0).CrossProduct(p2 - p0).DotProduct(normal) < 0.0f;
-        const unsigned order[6] = {0, flip ? 2u : 1u, flip ? 1u : 2u, 0, flip ? 3u : 2u, flip ? 2u : 3u};
-        for (const unsigned index : order)
-            lod.indices_.push_back(first + index);
-    }
-
-    GeometryView geometry;
-    geometry.lods_.push_back(lod);
-
-    ModelView modelView(context);
-    modelView.SetName(name);
-    modelView.SetGeometries({geometry});
-
-    SharedPtr<Model> model = modelView.ExportModel();
+    SharedPtr<Model> model = MakeTestBoxModel(context, halfSize);
     model->SetName(name);
     context->GetSubsystem<ResourceCache>()->AddManualResource(model);
 }
@@ -345,7 +313,7 @@ TEST_CASE("SetBrushModel changes the model of the brush", "[editorops]")
     Node* rootNode = f.MakeRoot();
     Node* brush = AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3::ZERO);
     REQUIRE(brush);
-    Component* component = brush->GetComponent(StringHash("CsgBrush"));
+    Component* component = FindBrushComponent(brush);
 
     CHECK(SetBrushModel(brush, "Csg/BoxA.mdl"));
     CHECK(component->GetAttribute("Model").GetResourceRef().name_ == "Csg/BoxA.mdl");
@@ -469,4 +437,105 @@ TEST_CASE("DescribeRoot lists the operands and the build status", "[editorops]")
     const ea::string status = rootNode->GetComponent<CsgRoot>()->GetBuildStatus();
     CHECK_FALSE(status.empty());
     CHECK(text.find(status) != ea::string::npos);
+}
+
+namespace
+{
+
+/// Count the error messages that the engine logs.
+class EditorErrorCounter : public Object
+{
+    URHO3D_OBJECT(EditorErrorCounter, Object);
+
+public:
+    explicit EditorErrorCounter(Context* context)
+        : Object(context)
+    {
+        SubscribeToEvent(E_LOGMESSAGE,
+            [this](StringHash, VariantMap& eventData)
+            {
+                if (eventData[LogMessage::P_LEVEL].GetInt() >= LOG_ERROR)
+                    ++count_;
+            });
+    }
+
+    unsigned GetCount() const { return count_; }
+
+private:
+    unsigned count_{};
+};
+
+/// Add the brushes "Grow" and "Cut" as in AddGrowAndCut. "Grow" has a generated model.
+void AddGeneratedGrowAndCut(Fixture& f, Node* rootNode)
+{
+    Node* grow = rootNode->CreateChild("Grow");
+    grow->SetPosition(Vector3(1.0f, 0.0f, 0.0f));
+    auto* brush = grow->CreateComponent<TestGeneratedBrush>();
+    brush->SetGeneratedModel(MakeTestBoxModel(f.context, Vector3::ONE));
+    brush->SetOperation(CsgOperation::Union);
+
+    Node* cut = AddBrushNode(rootNode, "Csg/BoxB.mdl", f.FindOperation("DifferenceAB"), Vector3(2.0f, 0.0f, 0.0f));
+    REQUIRE(cut);
+    cut->SetName("Cut");
+    cut->SetScale(Vector3(1.0f, 2.0f, 2.0f));
+}
+
+} // namespace
+
+TEST_CASE("Editor functions find a brush of a derived type", "[editorops][generated]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* plain = rootNode->CreateChild("Plain");
+    AddGeneratedGrowAndCut(f, rootNode);
+    Node* grow = rootNode->GetChild("Grow");
+    Node* cut = rootNode->GetChild("Cut");
+    REQUIRE(f.MaxX(rootNode) == Catch::Approx(1.0f).margin(1e-3f));
+
+    CHECK(IsBrushNode(grow));
+    CHECK(FindBrushComponent(grow) == grow->GetComponent<TestGeneratedBrush>());
+    CHECK(FindBrushComponent(plain) == nullptr);
+    CHECK(FindActiveRoot(grow) == rootNode);
+    CHECK(GetOperands(rootNode) == ea::vector<Node*>{grow, cut});
+    CHECK(GetAllBrushChildren(rootNode) == ea::vector<Node*>{grow, cut});
+
+    SECTION("Operation")
+    {
+        CHECK(GetOperation(grow) == f.FindOperation("Union"));
+        REQUIRE(SetOperation(grow, f.FindOperation("Intersection")));
+        CHECK(GetOperation(grow) == f.FindOperation("Intersection"));
+        CHECK(grow->GetComponent<TestGeneratedBrush>()->GetOperation() == CsgOperation::Intersection);
+    }
+
+    SECTION("Enabled state")
+    {
+        REQUIRE(ToggleBrushEnabled(grow));
+        CHECK(GetOperands(rootNode) == ea::vector<Node*>{cut});
+        CHECK(f.MaxX(rootNode) == Catch::Approx(1.0f).margin(1e-3f));
+        REQUIRE(ToggleBrushEnabled(grow));
+        CHECK(GetOperands(rootNode) == ea::vector<Node*>{grow, cut});
+    }
+
+    SECTION("Move")
+    {
+        // The swapped order cuts first and then grows. The result ends at x = 2.
+        REQUIRE(MoveOperand(rootNode, 1, 0));
+        CHECK(rootNode->GetChildren()[1] == cut);
+        CHECK(rootNode->GetChildren()[2] == grow);
+        CHECK(f.MaxX(rootNode) == Catch::Approx(2.0f).margin(1e-3f));
+    }
+
+    SECTION("Model")
+    {
+        // A brush with no "Model" attribute is not a target for a model. The refusal logs no error.
+        CHECK_FALSE(HasModelAttribute(FindBrushComponent(grow)));
+        CHECK_FALSE(IsModelBrushNode(grow));
+        CHECK(IsModelBrushNode(cut));
+        CHECK_FALSE(SetBrushModel(grow, "Csg/BoxA.mdl"));
+        CHECK(SetBrushModel(cut, "Csg/BoxB.mdl"));
+        CHECK(DescribeRoot(rootNode).find("(generated)") != ea::string::npos);
+    }
+
+    CHECK(errors.GetCount() == 0);
 }

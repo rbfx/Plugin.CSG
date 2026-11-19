@@ -12,6 +12,7 @@
 namespace Urho3D
 {
 
+class Component;
 class Context;
 class Node;
 
@@ -20,9 +21,15 @@ class Node;
 // The functions do not link the CSG library. They find the types "CsgRoot" and "CsgBrush" by name.
 // They read and write the attributes by name. If "CsgRoot" is not registered, a function returns null or false.
 
+/// Return the CsgBrush of the node, or a component of a type that derives from CsgBrush.
+Component* FindBrushComponent(Node* node);
+/// Return true if the component has the attribute "Model". A brush with a generated model has none.
+bool HasModelAttribute(Component* component);
+/// Return true if the node has a brush with the attribute "Model".
+bool IsModelBrushNode(Node* node);
 /// Return the node that has a CsgRoot: the selected node or its parent. A temporary node maps to its parent.
 Node* FindActiveRoot(Node* selected);
-/// Return true if the node has a CsgBrush.
+/// Return true if the node has a CsgBrush or a type that derives from it.
 bool IsBrushNode(Node* node);
 /// Return true if the node has a CsgRoot.
 bool IsRootNode(Node* node);
@@ -45,6 +52,7 @@ ea::string OperationName(Context* context, int operation);
 /// Add the step to the operation and wrap around.
 int CycleOperation(Context* context, int current, int step);
 
+/// Set the model of the brush. Return false if the brush has no attribute "Model".
 bool SetBrushModel(Node* brush, const ea::string& modelName);
 
 /// Return the direct children with an enabled CsgBrush, in child order.

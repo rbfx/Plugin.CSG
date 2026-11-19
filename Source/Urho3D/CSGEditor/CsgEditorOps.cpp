@@ -21,7 +21,7 @@ const StringHash rebuildEvent("CsgRequestRebuild");
 
 Component* GetRootComponent(Node* node) { return node ? node->GetComponent(rootType) : nullptr; }
 
-Component* GetBrushComponent(Node* node) { return node ? node->GetComponent(brushType) : nullptr; }
+Component* GetBrushComponent(Node* node) { return FindBrushComponent(node); }
 
 bool IsRootRegistered(Context* context) { return context && context->GetReflection(rootType) != nullptr; }
 
@@ -33,6 +33,34 @@ const AttributeInfo* FindOperationAttribute(Context* context)
 ResourceRef MakeModelRef(const ea::string& modelName) { return ResourceRef(Model::GetTypeStatic(), modelName); }
 
 } // namespace
+
+Component* FindBrushComponent(Node* node)
+{
+    if (!node)
+        return nullptr;
+    // A type that derives from CsgBrush is also a brush.
+    for (Component* component : node->GetComponents())
+    {
+        if (component && component->GetTypeInfo()->IsTypeOf(brushType))
+            return component;
+    }
+    return nullptr;
+}
+
+bool HasModelAttribute(Component* component)
+{
+    const ea::vector<AttributeInfo>* attributes = component ? component->GetAttributes() : nullptr;
+    if (!attributes)
+        return false;
+    for (const AttributeInfo& info : *attributes)
+    {
+        if (info.name_ == "Model")
+            return true;
+    }
+    return false;
+}
+
+bool IsModelBrushNode(Node* node) { return HasModelAttribute(GetBrushComponent(node)); }
 
 Node* FindActiveRoot(Node* selected)
 {
@@ -140,8 +168,9 @@ int CycleOperation(Context* context, int current, int step)
 
 bool SetBrushModel(Node* brush, const ea::string& modelName)
 {
+    // A brush with a generated model has no "Model" attribute. It is not a target.
     Component* component = GetBrushComponent(brush);
-    if (!component || !component->SetAttribute("Model", MakeModelRef(modelName)))
+    if (!HasModelAttribute(component) || !component->SetAttribute("Model", MakeModelRef(modelName)))
         return false;
     component->ApplyAttributes();
     return true;
@@ -224,9 +253,11 @@ ea::string DescribeRoot(Node* rootNode)
     for (Node* operand : GetOperands(rootNode))
     {
         Component* brush = GetBrushComponent(operand);
-        const ea::string model = brush->GetAttribute("Model").GetResourceRef().name_;
+        const bool hasModel = HasModelAttribute(brush);
+        const ea::string model = hasModel ? brush->GetAttribute("Model").GetResourceRef().name_ : EMPTY_STRING;
+        const char* modelText = !hasModel ? "(generated)" : model.empty() ? "(no model)" : model.c_str();
         text += ea::string(ea::string::CtorSprintf(), "%u: %s | %s | %s\n", index++, operand->GetName().c_str(),
-            OperationName(context, GetOperation(operand)).c_str(), model.empty() ? "(no model)" : model.c_str());
+            OperationName(context, GetOperation(operand)).c_str(), modelText);
     }
 
     const Variant status = root->GetAttribute("Build Status");

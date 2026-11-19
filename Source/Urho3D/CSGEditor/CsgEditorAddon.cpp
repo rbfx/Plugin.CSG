@@ -327,7 +327,7 @@ void CsgEditorAddon::SetSelectedOperation(int operation)
     VariantVector newValues;
     for (Node* brushNode : GetSelectedBrushes(*page))
     {
-        Component* component = brushNode->GetComponent(BrushType);
+        Component* component = FindBrushComponent(brushNode);
         if (!component || GetOperation(brushNode) == operation)
             continue;
 
@@ -393,7 +393,7 @@ void CsgEditorAddon::ToggleSelectedBrushes()
     VariantVector newValues;
     for (Node* brushNode : GetSelectedBrushes(*page))
     {
-        Component* component = brushNode->GetComponent(BrushType);
+        Component* component = FindBrushComponent(brushNode);
         const Variant oldValue = component->GetAttribute("Is Enabled");
         // The brush registers with the root when its enabled state changes. The root rebuilds then.
         if (!ToggleBrushEnabled(brushNode))
@@ -544,8 +544,10 @@ CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDr
     Node* activeNode = page.selection_.GetActiveNode();
     if (!activeNode)
         return DropMode::None;
-    if (IsBrushNode(activeNode))
+    if (IsModelBrushNode(activeNode))
         return DropMode::ReplaceModel;
+    if (IsBrushNode(activeNode))
+        return DropMode::None;
     // The result node of a root is a temporary child. It maps to the root.
     if (IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent())))
         return DropMode::NewBrush;
@@ -576,8 +578,9 @@ void CsgEditorAddon::BeginDragDrop(SceneViewPage& page, DragDropPayload* payload
         // The live preview sets the model now. CancelDragDrop restores the old models.
         for (Node* brushNode : GetSelectedBrushes(page))
         {
-            Component* component = brushNode->GetComponent(BrushType);
-            if (!component)
+            // A brush with a generated model has no "Model" attribute. The drop skips it.
+            Component* component = FindBrushComponent(brushNode);
+            if (!HasModelAttribute(component))
                 continue;
             const Variant oldValue = component->GetAttribute("Model");
             if (!SetBrushModel(brushNode, desc->resourceName_))
@@ -746,7 +749,7 @@ void CsgEditorAddon::Render(SceneViewPage& page)
         unsigned numDrawn = 0;
         for (Node* brushNode : GetOperands(rootNode))
         {
-            Component* brush = brushNode->GetComponent(BrushType);
+            Component* brush = FindBrushComponent(brushNode);
             if (!brush || IsDrawnBySelectionRenderer(page.selection_, brushNode, brush))
                 continue;
             if (numDrawn++ >= MaxDebugShapesPerFrame)
@@ -813,7 +816,7 @@ void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
         unsigned index = 0;
         for (Node* brushNode : GetAllBrushChildren(rootNode))
         {
-            Component* brush = brushNode->GetComponent(BrushType);
+            Component* brush = FindBrushComponent(brushNode);
             const bool enabled = brush && brush->IsEnabled();
             const ea::string& name = brushNode->GetName();
 
