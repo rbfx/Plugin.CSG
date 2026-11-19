@@ -26,6 +26,7 @@ set (SOURCE_FILES
     TestParallel.cpp
     TestBenchmark.cpp
     TestGolden.cpp
+    TestShapes.cpp
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
@@ -36,6 +37,7 @@ set (CSG_SOURCE_FILES
     ${CSG_DIR}/CsgBrush.cpp
     ${CSG_DIR}/CsgComponent.cpp
     ${CSG_DIR}/CsgRoot.cpp
+    ${CSG_DIR}/CsgShapes.cpp
     ${CSG_DIR}/CsgBoolean.cpp
     ${CSG_DIR}/CsgCommon.cpp
     ${CSG_DIR}/CsgCorefine.cpp

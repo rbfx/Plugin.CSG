@@ -8,6 +8,7 @@
 #include "Urho3D/CSG/CsgCommon.h"
 #include "Urho3D/CSG/CsgComponent.h"
 #include "Urho3D/CSG/CsgRoot.h"
+#include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include <Urho3D/Container/ByteVector.h>
@@ -133,6 +134,35 @@ ByteVector PackVerticesToLayout(const ea::vector<ModelVertex>& vertices, const e
     }
 
     return packed;
+}
+
+/// Build a shadowed vertex buffer, an index buffer and a triangle list geometry from unpacked vertices.
+/// Return false if the vertex buffer cannot get the size.
+bool BuildGeometryBuffers(Context* context, const ea::vector<ModelVertex>& vertices, const ea::vector<unsigned>& indices,
+    const ea::vector<VertexElement>& elements, SharedPtr<VertexBuffer>& vb, SharedPtr<IndexBuffer>& ib,
+    SharedPtr<Geometry>& geom)
+{
+    const unsigned vertexCount = vertices.size();
+    vb = MakeShared<VertexBuffer>(context);
+    vb->SetShadowed(true);
+    if (!vb->SetSize(vertexCount, elements))
+        return false;
+
+    const ByteVector packedVertices = PackVerticesToLayout(vertices, elements);
+    vb->Update(packedVertices.data());
+
+    const bool largeIndices = vertexCount > 0xFFFFu;
+    ib = MakeShared<IndexBuffer>(context);
+    ib->SetShadowed(true);
+    ib->SetSize(indices.size(), largeIndices);
+    ib->SetUnpackedData(indices.data(), 0, indices.size());
+
+    geom = MakeShared<Geometry>(context);
+    geom->SetNumVertexBuffers(1);
+    geom->SetVertexBuffer(0, vb);
+    geom->SetIndexBuffer(ib);
+    geom->SetDrawRange(TRIANGLE_LIST, 0, ib->GetIndexCount(), 0, vb->GetVertexCount());
+    return true;
 }
 
 } // namespace
@@ -325,27 +355,13 @@ SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& tri
 
         const Model* srcModel = meshId < sourceModels.size() ? sourceModels[meshId] : nullptr;
         Geometry* srcGeometry = srcModel ? srcModel->GetGeometry(geometryIndex, 0) : nullptr;
-        ea::vector<VertexElement> vbElements = GetSupportedVertexElements(srcGeometry);
+        const ea::vector<VertexElement> vbElements = GetSupportedVertexElements(srcGeometry);
 
-        auto vb = MakeShared<VertexBuffer>(context);
-        vb->SetShadowed(true);
-        if (!vb->SetSize(vertexCount, vbElements))
+        SharedPtr<VertexBuffer> vb;
+        SharedPtr<IndexBuffer> ib;
+        SharedPtr<Geometry> geom;
+        if (!BuildGeometryBuffers(context, src.vertices_, src.indexData_, vbElements, vb, ib, geom))
             continue;
-
-        const ByteVector packedVertices = PackVerticesToLayout(src.vertices_, vbElements);
-        vb->Update(packedVertices.data());
-
-        const bool largeIndices = vertexCount > 0xFFFFu;
-        auto ib = MakeShared<IndexBuffer>(context);
-        ib->SetShadowed(true);
-        ib->SetSize(src.indexData_.size(), largeIndices);
-        ib->SetUnpackedData(src.indexData_.data(), 0, src.indexData_.size());
-
-        auto geom = MakeShared<Geometry>(context);
-        geom->SetNumVertexBuffers(1);
-        geom->SetVertexBuffer(0, vb);
-        geom->SetIndexBuffer(ib);
-        geom->SetDrawRange(TRIANGLE_LIST, 0, ib->GetIndexCount(), 0, vb->GetVertexCount());
 
         modelVertexBuffers.push_back(vb);
         modelIndexBuffers.push_back(ib);
@@ -375,6 +391,40 @@ SharedPtr<Model> CsgBuildModel(Context* context, const CsgTriangulatedModel& tri
     outModel->SetBoundingBox(triangulated.boundingBox_);
 
     return outModel;
+}
+
+SharedPtr<Model> CsgBuildModelFromMesh(
+    Context* context, const CsgShapeMesh& mesh, const ea::vector<VertexElement>& elements)
+{
+    const unsigned vertexCount = mesh.vertices_.size();
+    if (vertexCount == 0 || mesh.indices_.empty() || mesh.indices_.size() % 3 != 0)
+        return nullptr;
+    for (const unsigned index : mesh.indices_)
+    {
+        if (index >= vertexCount)
+            return nullptr;
+    }
+
+    ea::vector<VertexElement> vbElements = elements.empty() ? CsgGetShapeVertexElements() : elements;
+    VertexBuffer::UpdateOffsets(vbElements);
+
+    SharedPtr<VertexBuffer> vb;
+    SharedPtr<IndexBuffer> ib;
+    SharedPtr<Geometry> geom;
+    if (!BuildGeometryBuffers(context, mesh.vertices_, mesh.indices_, vbElements, vb, ib, geom))
+        return nullptr;
+
+    BoundingBox boundingBox;
+    for (const ModelVertex& vertex : mesh.vertices_)
+        boundingBox.Merge(vertex.GetPosition());
+
+    auto model = MakeShared<Model>(context);
+    model->SetVertexBuffers({vb}, {}, {});
+    model->SetIndexBuffers({ib});
+    model->SetNumGeometries(1);
+    model->SetGeometry(0, 0, geom);
+    model->SetBoundingBox(boundingBox);
+    return model;
 }
 
 void RegisterCsgLibrary(Context* context)

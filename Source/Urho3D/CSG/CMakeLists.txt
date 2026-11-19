@@ -19,6 +19,7 @@ set (SOURCE_FILES
     CsgExpansion.cpp
     CsgFaceBvh.cpp
     CsgRoot.cpp
+    CsgShapes.cpp
     CsgTriangulation.cpp
     Csg.h
     CsgBoolean.h
@@ -36,6 +37,7 @@ set (SOURCE_FILES
     CsgFaceBvh.h
     CsgRoot.h
     CsgRootInternal.h
+    CsgShapes.h
     CsgSimd.h
     CsgTriangulation.h
 )
