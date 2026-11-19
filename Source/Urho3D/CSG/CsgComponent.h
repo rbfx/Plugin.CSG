@@ -37,6 +37,8 @@ public:
 protected:
     void DrawDebugGeometry(DebugRenderer* debug, bool depthTest) override;
     void DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTest, const ResourceRef& modelAttr, const Color& wireColor) const;
+    /// Draw the wireframe of the model. A component with a generated model uses this overload.
+    void DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTest, Model* model, const Color& wireColor) const;
     virtual const ResourceRef& GetDebugModelAttr() const = 0;
     virtual void OnModelChanged();
     virtual void OnMaterialsChanged() {}

@@ -19,6 +19,7 @@ class CsgRoot;
 /// High-level behavior:
 /// - Represents one operand in a `CsgRoot` boolean operation tree.
 /// - The operand geometry is taken from the base `CsgComponent` attributes (`Model` + `Materials`).
+/// - A procedural brush gives a generated model in place of the `Model` attribute. See `GetGeneratedModel`.
 /// - The boolean operation to apply against the accumulated result is controlled by `op_`.
 ///
 /// Root association:
@@ -53,7 +54,16 @@ public:
     /// Draw the model wireframe in the color of the operation. See `GetOperationColor`.
     void DrawDebugGeometry(DebugRenderer* debug, bool depthTest) override;
 
+    /// Get the generated model of a procedural brush. Return false when the brush uses the `Model` attribute.
+    /// Return true when the brush is procedural. Then the root uses `model` and ignores the `Model` attribute.
+    /// A procedural brush with a null `model` is invalid. It gives no operand until it is valid again.
+    /// @nobind
+    virtual bool GetGeneratedModel(SharedPtr<Model>& model) const { return false; }
+
 protected:
+    /// Mark the brush dirty and request a rebuild of the root.
+    void MarkDirty();
+
     const ResourceRef& GetDebugModelAttr() const override { return GetModelAttr(); }
 
     void ApplyAttributes() override;
@@ -66,7 +76,6 @@ protected:
 private:
     friend class CsgRoot;
 
-    void MarkDirty();
     CsgRoot* FindContainingRoot() const;
     void UpdateRootRegistration();
 

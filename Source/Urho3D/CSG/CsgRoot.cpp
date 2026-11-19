@@ -653,7 +653,7 @@ void CsgRoot::HandleNodeAdded(StringHash /*eventType*/, VariantMap& eventData)
 
     // The brush leaves its old root and registers with this root. Both roots request a rebuild.
     auto* child = static_cast<Node*>(eventData[P_NODE].GetPtr());
-    if (CsgBrush* brush = child ? child->GetComponent<CsgBrush>() : nullptr)
+    if (CsgBrush* brush = child ? child->GetDerivedComponent<CsgBrush>() : nullptr)
         brush->UpdateRootRegistration();
 }
 
@@ -666,7 +666,7 @@ void CsgRoot::HandleNodeRemoved(StringHash /*eventType*/, VariantMap& eventData)
     // The node still has this parent during the event, so the brush cannot find its new root yet.
     // The root releases the brush now. The new root registers it when it receives the node.
     auto* child = static_cast<Node*>(eventData[P_NODE].GetPtr());
-    CsgBrush* brush = child ? child->GetComponent<CsgBrush>() : nullptr;
+    CsgBrush* brush = child ? child->GetDerivedComponent<CsgBrush>() : nullptr;
     if (!brush)
         return;
 
@@ -1385,6 +1385,23 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
     if (!staticModel || !brush)
         return false;
 
+    // A procedural brush gives its own model. A null model is an invalid procedural brush: no operand.
+    SharedPtr<Model> generatedModel;
+    if (brush->GetGeneratedModel(generatedModel))
+    {
+        if (!generatedModel)
+            return false;
+
+        staticModel->SetModel(generatedModel);
+        // A generated model has no name, so it has no material list file. Empty materials clear the old ones.
+        const ResourceRefList& materialsAttr = brush->GetMaterialsAttr();
+        if (materialsAttr.names_.empty())
+            staticModel->SetMaterial(nullptr);
+        else
+            staticModel->SetMaterialsAttr(materialsAttr);
+        return true;
+    }
+
     return SetupOperandStaticModel(staticModel, brush->GetModelAttr(), brush->GetMaterialsAttr());
 }
 
@@ -1406,7 +1423,7 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
         if (child->GetComponent<CsgRoot>())
             continue;
 
-        CsgBrush* brush = child->GetComponent<CsgBrush>();
+        CsgBrush* brush = child->GetDerivedComponent<CsgBrush>();
         if (!brush || !brush->IsEnabledEffective())
             continue;
 

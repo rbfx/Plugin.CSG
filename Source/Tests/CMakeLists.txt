@@ -22,6 +22,7 @@ set (SOURCE_FILES
     TestTriangulation.cpp
     TestRoot.cpp
     TestEditorOps.cpp
+    TestGeneratedBrush.h
     TestParallel.cpp
     TestBenchmark.cpp
     TestGolden.cpp

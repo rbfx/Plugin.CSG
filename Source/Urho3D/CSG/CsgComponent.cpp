@@ -63,8 +63,12 @@ void CsgComponent::DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTes
     if (!debug || !node_)
         return;
 
-    Model* model = GetCachedDebugModel(modelAttr.name_);
-    if (!model)
+    DrawDebugGeometryInternal(debug, depthTest, GetCachedDebugModel(modelAttr.name_), wireColor);
+}
+
+void CsgComponent::DrawDebugGeometryInternal(DebugRenderer* debug, bool depthTest, Model* model, const Color& wireColor) const
+{
+    if (!debug || !node_ || !model)
         return;
 
     const unsigned numGeometries = model->GetNumGeometries();

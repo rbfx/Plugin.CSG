@@ -10,6 +10,7 @@
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
 #include "Urho3D/CSG/CsgSolid.h"
+#include "TestGeneratedBrush.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -58,6 +59,7 @@ SharedPtr<Context> MakeCsgTestContext()
     RegisterSceneLibrary(context);
     RegisterGraphicsLibrary(context);
     RegisterCsgLibrary(context);
+    TestGeneratedBrush::RegisterObject(context);
     return context;
 }
 
@@ -65,51 +67,7 @@ SharedPtr<Context> MakeCsgTestContext()
 /// If `skipFace` is below 6, the model has no triangles for that face, so the box is open.
 SharedPtr<Model> AddBoxModel(Context* context, const ea::string& name, const Vector3& halfSize, unsigned skipFace = 6)
 {
-    const Vector3 normals[6] = {Vector3::RIGHT, Vector3::LEFT, Vector3::UP, Vector3::DOWN, Vector3::FORWARD,
-        Vector3::BACK};
-
-    GeometryLODView lod;
-    lod.primitiveType_ = TRIANGLE_LIST;
-    lod.vertexFormat_.position_ = TYPE_VECTOR3;
-    lod.vertexFormat_.normal_ = TYPE_VECTOR3;
-
-    unsigned faceIndex = 0;
-    for (const Vector3& normal : normals)
-    {
-        const bool skip = faceIndex++ == skipFace;
-        // Pick two axes that are perpendicular to the normal.
-        const Vector3 u = normal.y_ != 0.0f ? Vector3::RIGHT : Vector3::UP;
-        const Vector3 v = normal.CrossProduct(u);
-        const unsigned first = lod.vertices_.size();
-        const float signs[4][2] = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
-        for (const auto& sign : signs)
-        {
-            ModelVertex vertex{};
-            const Vector3 offset = normal + u * sign[0] + v * sign[1];
-            vertex.SetPosition(offset * halfSize);
-            vertex.SetNormal(normal);
-            lod.vertices_.push_back(vertex);
-        }
-        // The cross product of the first two sides points out of the box.
-        const Vector3 p0 = lod.vertices_[first].GetPosition();
-        const Vector3 p1 = lod.vertices_[first + 1].GetPosition();
-        const Vector3 p2 = lod.vertices_[first + 2].GetPosition();
-        const bool flip = (p1 - p0).CrossProduct(p2 - p0).DotProduct(normal) < 0.0f;
-        const unsigned order[6] = {0, flip ? 2u : 1u, flip ? 1u : 2u, 0, flip ? 3u : 2u, flip ? 2u : 3u};
-        if (skip)
-            continue;
-        for (const unsigned index : order)
-            lod.indices_.push_back(first + index);
-    }
-
-    GeometryView geometry;
-    geometry.lods_.push_back(lod);
-
-    ModelView modelView(context);
-    modelView.SetName(name);
-    modelView.SetGeometries({geometry});
-
-    SharedPtr<Model> model = modelView.ExportModel();
+    SharedPtr<Model> model = MakeTestBoxModel(context, halfSize, skipFace);
     model->SetName(name);
     context->GetSubsystem<ResourceCache>()->AddManualResource(model);
     return model;
@@ -2712,4 +2670,158 @@ TEST_CASE("CSG accepts each CoreData brush preset model as a closed mesh", "[roo
             CHECK(errors.GetCount() == 0);
         }
     }
+}
+
+TEST_CASE("Node::GetComponent finds the exact type only", "[root][generated]")
+{
+    auto context = MakeCsgTestContext();
+    auto scene = MakeShared<Scene>(context);
+    Node* node = scene->CreateChild("Node");
+    auto* brush = node->CreateComponent<TestGeneratedBrush>();
+
+    // The lookup by type does not find a derived type. The derived lookup finds it.
+    CHECK(node->GetComponent<CsgBrush>() == nullptr);
+    CHECK(node->GetComponent(CsgBrush::GetTypeStatic()) == nullptr);
+    CHECK(node->GetDerivedComponent<CsgBrush>() == brush);
+    CHECK(node->GetComponent<TestGeneratedBrush>() == brush);
+}
+
+namespace
+{
+
+/// Add a brush with a generated model under the node of the root.
+TestGeneratedBrush* AddGeneratedBrush(
+    CsgRoot* root, const ea::string& name, const Vector3& position, CsgOperation op, Model* model)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<TestGeneratedBrush>();
+    brush->SetGeneratedModel(model);
+    brush->SetOperation(op);
+    return brush;
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot uses the generated model of a brush as an operand", "[root][generated]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A generated box alone gives the box volume")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Generated");
+        AddGeneratedBrush(root, "Box", Vector3::ZERO, CsgOperation::Union, MakeTestBoxModel(context, Vector3::ONE));
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(8.0).margin(1e-3));
+    }
+
+    SECTION("A generated box gives the same result as a box model resource")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Generated");
+        AddGeneratedBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB,
+            MakeTestBoxModel(context, Vector3::ONE));
+        BuildFully(root, workQueue);
+
+        CsgRoot* expected = MakeBoxRoot(scene, "Resource");
+        AddBoxBrush(expected, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        BuildFully(expected, workQueue);
+
+        CheckSameOutput(root, expected);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    }
+
+    SECTION("A brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Generated");
+        TestGeneratedBrush* brush =
+            AddGeneratedBrush(root, "Box", Vector3::ZERO, CsgOperation::Union, MakeTestBoxModel(context, Vector3::ONE));
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRoot skips a brush with a null generated model", "[root][generated]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Generated");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    TestGeneratedBrush* invalid =
+        AddGeneratedBrush(root, "Invalid", Vector3(-1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB, nullptr);
+    BuildFully(root, workQueue);
+
+    // The root builds the other brush. The invalid brush is no operand.
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(errors.GetCount() == 0);
+
+    // A valid model makes the brush an operand. The root rebuilds with no explicit request.
+    invalid->SetGeneratedModel(MakeTestBoxModel(context, Vector3::ONE));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(6.0).margin(1e-3));
+
+    // A null model again removes the operand.
+    invalid->SetGeneratedModel(nullptr);
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRoot rebuilds from a changed generated model and reuses the fold steps before it", "[root][generated]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The third brush of the fold has a generated model. The result is the same as with the resource.
+    CsgRoot* root = MakeBoxRoot(scene, "Generated");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    TestGeneratedBrush* third = AddGeneratedBrush(
+        root, "Third", Vector3(1.5f, 0.0f, 0.0f), CsgOperation::Union, MakeTestBoxModel(context, Vector3::ONE));
+    third->GetNode()->SetScale(Vector3(0.5f, 0.5f, 0.5f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+    CsgRoot* expected = MakeBoxRoot(scene, "Resource");
+    AddFoldBrushes(expected);
+    BuildFully(expected, workQueue);
+    CheckSameOutput(root, expected);
+
+    // A new model object marks the brush dirty. Only the last fold step runs again.
+    const double oldVolume = root->GetLastBuildStats().volume_;
+    third->SetGeneratedModel(MakeTestBoxModel(context, Vector3(2.0f, 1.0f, 1.0f)));
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > oldVolume + 0.1);
+    CHECK(errors.GetCount() == 0);
 }
