@@ -4,9 +4,11 @@
 
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoolean.h"
+#include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgCommon.h"
 #include "Urho3D/CSG/CsgComponent.h"
+#include "Urho3D/CSG/CsgProceduralBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSolid.h"
@@ -431,6 +433,8 @@ void RegisterCsgLibrary(Context* context)
 {
     CsgComponent::RegisterObject(context);
     CsgBrush::RegisterObject(context);
+    CsgProceduralBrush::RegisterObject(context);
+    CsgBoxBrush::RegisterObject(context);
     CsgRoot::RegisterObject(context);
 }
 
@@ -438,6 +442,8 @@ void RegisterCsgLibrary(PluginApplication& plugin)
 {
     plugin.RegisterObject<CsgComponent>();
     plugin.RegisterObject<CsgBrush>();
+    plugin.RegisterObject<CsgProceduralBrush>();
+    plugin.RegisterObject<CsgBoxBrush>();
     plugin.RegisterObject<CsgRoot>();
 }
 

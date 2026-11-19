@@ -8,6 +8,7 @@ set (SOURCE_FILES
     _Plugin.cpp
     _Plugin.h
     Csg.cpp
+    CsgBoxBrush.cpp
     CsgBrush.cpp
     CsgBoolean.cpp
     CsgPolygon.cpp
@@ -18,11 +19,13 @@ set (SOURCE_FILES
     CsgExact.cpp
     CsgExpansion.cpp
     CsgFaceBvh.cpp
+    CsgProceduralBrush.cpp
     CsgRoot.cpp
     CsgShapes.cpp
     CsgTriangulation.cpp
     Csg.h
     CsgBoolean.h
+    CsgBoxBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h
@@ -35,6 +38,7 @@ set (SOURCE_FILES
     CsgExactFilter.h
     CsgExpansion.h
     CsgFaceBvh.h
+    CsgProceduralBrush.h
     CsgRoot.h
     CsgRootInternal.h
     CsgShapes.h

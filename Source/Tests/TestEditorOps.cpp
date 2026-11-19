@@ -5,6 +5,7 @@
 // Headless tests for the editor scene functions. The test uses no render device.
 
 #include "Urho3D/CSG/Csg.h"
+#include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 #include "TestGeneratedBrush.h"
@@ -537,5 +538,23 @@ TEST_CASE("Editor functions find a brush of a derived type", "[editorops][genera
         CHECK(DescribeRoot(rootNode).find("(generated)") != ea::string::npos);
     }
 
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("Editor functions treat a procedural box as a brush without a model", "[editorops][procedural]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = rootNode->CreateChild("Box");
+    auto* box = boxNode->CreateComponent<CsgBoxBrush>();
+
+    CHECK(IsBrushNode(boxNode));
+    CHECK(FindBrushComponent(boxNode) == box);
+    CHECK(GetOperands(rootNode) == ea::vector<Node*>{boxNode});
+    CHECK_FALSE(HasModelAttribute(box));
+    CHECK_FALSE(IsModelBrushNode(boxNode));
+    // The drop of a model does not replace the shape of a procedural brush.
+    CHECK_FALSE(SetBrushModel(boxNode, "Csg/BoxA.mdl"));
     CHECK(errors.GetCount() == 0);
 }

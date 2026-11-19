@@ -5,10 +5,12 @@
 // Headless regression test for CsgRoot. The test uses no render device.
 
 #include "Urho3D/CSG/Csg.h"
+#include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
+#include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include "TestGeneratedBrush.h"
 
@@ -2823,5 +2825,315 @@ TEST_CASE("CsgRoot rebuilds from a changed generated model and reuses the fold s
     CHECK(root->GetLastBuildStats().valid_);
     CHECK(root->GetLastBuildStats().foldSteps_ == 1);
     CHECK(root->GetLastBuildStats().volume_ > oldVolume + 0.1);
+    CHECK(errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// This object counts the warning messages that contain a text.
+class WarningCounter : public Object
+{
+    URHO3D_OBJECT(WarningCounter, Object);
+
+public:
+    WarningCounter(Context* context, const ea::string& text)
+        : Object(context)
+        , text_(text)
+    {
+        SubscribeToEvent(E_LOGMESSAGE,
+            [this](StringHash, VariantMap& eventData)
+            {
+                if (eventData[LogMessage::P_LEVEL].GetInt() == LOG_WARNING
+                    && eventData[LogMessage::P_MESSAGE].GetString().contains(text_))
+                    ++count_;
+            });
+    }
+
+    unsigned GetCount() const { return count_; }
+
+private:
+    ea::string text_;
+    unsigned count_{};
+};
+
+/// Add a procedural box brush under the node of the root.
+CsgBoxBrush* AddProceduralBox(
+    CsgRoot* root, const ea::string& name, const Vector3& position, const Vector3& size, CsgOperation op)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<CsgBoxBrush>();
+    brush->SetSize(size);
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Add the model of a generated box to the resource cache.
+void AddGeneratedBoxModel(Context* context, const ea::string& name, const CsgBoxParams& params)
+{
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateBox(params, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+}
+
+} // namespace
+
+TEST_CASE("CsgBoxBrush is an operand with the box volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    CsgBoxParams cutParams;
+    cutParams.size_ = Vector3(2.0f, 2.0f, 2.0f);
+    AddGeneratedBoxModel(context, "Csg/GeneratedBox.mdl", cutParams);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A box alone gives the product of the size")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgBoxBrush* brush =
+            AddProceduralBox(root, "Box", Vector3::ZERO, Vector3(2.0f, 3.0f, 4.0f), CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(24.0).margin(1e-3));
+    }
+
+    SECTION("A subtract box cuts the base and equals a model brush with the same mesh")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Procedural");
+        AddProceduralBox(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+
+        CsgRoot* expected = MakeBoxRoot(scene, "Model");
+        Node* cutNode = expected->GetNode()->CreateChild("Cut");
+        cutNode->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+        auto* cut = cutNode->CreateComponent<CsgBrush>();
+        cut->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/GeneratedBox.mdl"));
+        cut->SetOperation(CsgOperation::DifferenceAB);
+        BuildFully(expected, workQueue);
+        CheckSameOutput(root, expected);
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgBoxBrush* brush = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBoxBrush and a CoreData Box.mdl brush share one output geometry", "[root][procedural][preset]")
+{
+    auto context = MakeCsgTestContext();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    if (!LoadCoreDataModel(context, "Models/Box.mdl"))
+    {
+        INFO("The model is missing in " << CSG_CORE_DATA_DIR << ": Models/Box.mdl");
+        REQUIRE(!IsCoreDataRequired());
+        WARN("Test skipped. The model is missing in " << CSG_CORE_DATA_DIR << ": Models/Box.mdl");
+        return;
+    }
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    Node* modelNode = root->GetNode()->CreateChild("Model");
+    auto* modelBrush = modelNode->CreateComponent<CsgBrush>();
+    modelBrush->SetModel(ResourceRef(Model::GetTypeStatic(), "Models/Box.mdl"));
+    AddProceduralBox(root, "Box", Vector3(0.5f, 0.0f, 0.0f), Vector3::ONE, CsgOperation::Union);
+    BuildFully(root, workQueue);
+
+    // Both operands have the same layout and no material, so the output has one geometry.
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(1.5).margin(1e-3));
+    CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBoxBrush that is not valid gives no operand and one warning", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    WarningCounter warnings(context, "CsgBoxBrush");
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    CsgBoxBrush* box =
+        AddProceduralBox(root, "Box", Vector3(-1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
+    // Corner 7 goes through the opposite face.
+    box->SetCorner(7, Vector3(-1.0f, 0.5f, 0.5f));
+    BuildFully(root, workQueue);
+
+    SharedPtr<Model> model;
+    CHECK(box->GetGeneratedModel(model));
+    CHECK(!model);
+    CHECK(!box->IsShapeValid());
+    CHECK(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+
+    // More frames and a debug draw give no more warnings.
+    auto* debug = scene->CreateComponent<DebugRenderer>();
+    static_cast<Component*>(box)->DrawDebugGeometry(debug, false);
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(warnings.GetCount() == 1);
+
+    // A valid corner makes the brush an operand again. The root rebuilds with no explicit request.
+    box->SetCorner(7, CsgBoxParams::GetDefaultCorner(7));
+    RunFrames(root, workQueue, 60);
+    CHECK(box->IsShapeValid());
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(6.0).margin(1e-3));
+
+    // The next change to a shape that is not valid gives one more warning.
+    box->SetCorner(0, Vector3(1.0f, -0.5f, -0.5f));
+    RunFrames(root, workQueue, 60);
+    CHECK(warnings.GetCount() == 2);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(7.0).margin(1e-3));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBoxBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgBoxBrush* third =
+        AddProceduralBox(root, "Third", Vector3(1.5f, 0.0f, 0.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::Union);
+    third->GetNode()->SetScale(Vector3(0.5f, 0.5f, 0.5f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    const double oldVolume = root->GetLastBuildStats().volume_;
+
+    // The attribute path: SetAttribute and ApplyAttributes. The value is clamped.
+    Component* component = third;
+    CHECK(component->SetAttribute("Size", Vector3(4.0f, 2.0f, 2.0f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSize() == Vector3(4.0f, 2.0f, 2.0f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > oldVolume + 0.1);
+
+    CHECK(component->SetAttribute("Corner 7", Vector3(100.0f, 0.5f, 0.5f)));
+    component->ApplyAttributes();
+    CHECK(third->GetCorner(7) == Vector3(64.0f, 0.5f, 0.5f));
+    CHECK(component->GetAttribute("Corner 7").GetVector3() == Vector3(64.0f, 0.5f, 0.5f));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBoxBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgBoxBrush* box =
+        AddProceduralBox(root, "Box", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 1.5f, 2.0f), CsgOperation::DifferenceAB);
+    box->SetCorner(7, Vector3(0.75f, 0.5f, 0.5f));
+    BuildFully(root, workQueue);
+    const double volume = root->GetLastBuildStats().volume_;
+    CHECK(volume < 8.0);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild("Root");
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    Node* loadedBoxNode = loadedRootNode->GetChild("Box");
+    REQUIRE(loadedBoxNode);
+    auto* loadedBox = loadedBoxNode->GetComponent<CsgBoxBrush>();
+    REQUIRE(loadedBox);
+    CHECK(loadedBox->GetOperation() == CsgOperation::DifferenceAB);
+    CHECK(loadedBox->GetSize() == box->GetSize());
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(loadedBox->GetCorner(i) == box->GetCorner(i));
+
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(loadedRoot->GetLastBuildStats().volume_ == Catch::Approx(volume).epsilon(1e-9));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgBoxBrush has one material slot and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    // A material needs the file system to load its default resources.
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto material = MakeShared<Material>(context);
+    material->SetName("Materials/Box.xml");
+    context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+
+    // The material logs an error for its missing default technique, so the counter starts after it.
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgBoxBrush* box =
+        AddProceduralBox(root, "Box", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
+
+    // The brush has the attributes of a brush without "Model".
+    Component* component = box;
+    CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 1);
+    CHECK(component->GetAttribute("Is Enabled").GetBool());
+    CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
+    for (const AttributeInfo& info : *component->GetAttributes())
+        CHECK(info.name_ != "Model");
+
+    // A material on the brush reaches the cut faces of the result.
+    box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+    BuildFully(root, workQueue);
+    const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+    CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
+    CHECK(names.size() == 2);
+
+    // An apply resizes a longer list to one slot and keeps the first name.
+    component->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml", "Other.xml"}));
+    component->ApplyAttributes();
+    CHECK(box->GetMaterialsAttr().names_.size() == 1);
+    CHECK(box->GetMaterialsAttr().names_[0] == "Materials/Box.xml");
     CHECK(errors.GetCount() == 0);
 }
