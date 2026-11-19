@@ -69,6 +69,10 @@ public:
     void CancelDragDrop() override;
     /// @}
 
+    /// Recenter the pivot of the active shape brush. One undo step reverts the shape and the node position.
+    /// It does nothing while a handle drag is active. Return true if the shape changed.
+    bool RecenterActiveShape();
+
     /// Add a brush with the operation. The cursor ray gives the position.
     void AddBrush(int operation, bool useCursorRay);
     /// Set the operation on all selected brush nodes.
@@ -183,6 +187,8 @@ private:
 
     /// The settings of the shape handles. A grid step of 0 turns off the Ctrl snap.
     bool showHandles_{true};
+    /// Recenter the pivot of the shape at the commit of a handle drag.
+    bool autoRecenter_{true};
     float handleGridStep_{0.125f};
     /// The active shape brush and its handles of this frame.
     WeakPtr<Component> handleBrush_;
@@ -206,6 +212,8 @@ private:
     ea::optional<PendingFace> pendingFace_;
     HandleDragState dragState_{HandleDragState::None};
     ShapeAttributeSnapshot dragSnapshot_;
+    /// The local position of the brush node at the drag start.
+    Vector3 dragStartPosition_;
     ea::vector<ShapeHandle> dragStartHandles_;
     /// The total world delta of the gizmo from the drag start.
     Vector3 dragWorldDelta_;

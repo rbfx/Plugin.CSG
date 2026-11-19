@@ -13,6 +13,7 @@
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 #include "TestGeneratedBrush.h"
+#include "TestModelMeasure.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
@@ -1361,4 +1362,107 @@ TEST_CASE("PickRootSource finds the subtract brush through the cavity", "[editor
     if (stale.hit_ && stale.source_ != 0)
         CHECK(f.scene->GetNode(stale.source_) == nullptr);
     CHECK(errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// Build a root with a scale and one box brush (size 1) on a child with a local scale. Return the output volume.
+/// The base is empty. The output is in the node space of the root.
+double MeasureScaledBoxBrush(Fixture& f, const Vector3& rootScale, const Vector3& brushScale, bool scaleBeforeBuild)
+{
+    Node* rootNode = f.scene->CreateChild("ScaleRoot");
+    rootNode->SetScale(rootScale);
+    auto* root = rootNode->CreateComponent<CsgRoot>();
+    root->SetDeferredDelaySec(0.0f);
+    Node* boxNode = rootNode->CreateChild("Box");
+    if (scaleBeforeBuild)
+        boxNode->SetScale(brushScale);
+    boxNode->CreateComponent<CsgBoxBrush>();
+    RunFrames(f.scene, 60);
+    if (!scaleBeforeBuild)
+        boxNode->SetScale(brushScale);
+    RunFrames(f.scene, 60);
+    auto* output = root->GetResultModel();
+    REQUIRE(output);
+    REQUIRE(output->GetModel());
+    return MeasureModelVolume(f.context, output->GetModel());
+}
+
+} // namespace
+
+TEST_CASE("A procedural box brush uses its node scale in the root frame", "[editorops][root][procedural]")
+{
+    for (const bool before : {true, false})
+    {
+        CAPTURE(before);
+        Fixture f;
+        // Root scale 1: the box of size 1 with the node scale 0.5 has the volume 0.5^3.
+        CHECK(MeasureScaledBoxBrush(f, Vector3::ONE, Vector3::ONE * 0.5f, before) == Catch::Approx(0.125).margin(1e-3));
+    }
+    for (const bool before : {true, false})
+    {
+        CAPTURE(before);
+        Fixture f;
+        // Root scale 2: the world scale of the brush is 1, so the fold space volume is 1.
+        // The output is in the node space of the root, so its volume is 1 / (2 * 2 * 2).
+        const double volume = MeasureScaledBoxBrush(f, Vector3::ONE * 2.0f, Vector3::ONE * 0.5f, before);
+        CHECK(volume == Catch::Approx(0.125).margin(1e-3));
+        CHECK(volume * 8.0 == Catch::Approx(1.0).margin(1e-3));
+    }
+}
+
+TEST_CASE("RecenterShapePivot moves the node and the undo state restores both", "[editorops][handles][recenter]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3(1.0f, 2.0f, 3.0f));
+    REQUIRE(boxNode);
+    boxNode->SetRotation(Quaternion(30.0f, Vector3(1.0f, 2.0f, 3.0f)));
+    boxNode->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    Component* brush = FindShapeBrush(boxNode);
+    REQUIRE(brush);
+
+    // A face move puts the box off the node origin.
+    const ShapeEditState start = CaptureShapeEditState(brush);
+    REQUIRE(MoveShapeHandles(brush, {21}, Vector3(2.0f, 0.0f, 0.0f)));
+    const auto worldHandle = [&](unsigned id)
+    {
+        for (const ShapeHandle& handle : QueryShapeHandles(brush).handles_)
+        {
+            if (handle.id_ == id)
+                return boxNode->LocalToWorld(handle.position_);
+        }
+        return Vector3::ZERO;
+    };
+    ea::vector<Vector3> before;
+    for (unsigned id : {0u, 7u, 20u, 21u, 25u})
+        before.push_back(worldHandle(id));
+    const ShapeEditState moved = CaptureShapeEditState(brush);
+    CHECK(moved != start);
+
+    REQUIRE(RecenterShapePivot(brush));
+    const ShapeEditState centered = CaptureShapeEditState(brush);
+    CHECK(centered.nodePosition_ != moved.nodePosition_);
+    unsigned index = 0;
+    for (unsigned id : {0u, 7u, 20u, 21u, 25u})
+        CHECK(worldHandle(id).Equals(before[index++], 1e-4f));
+    // The handle ids are the same and the handles stay valid.
+    CHECK(QueryShapeHandles(brush).valid_);
+    CHECK_FALSE(RecenterShapePivot(brush));
+
+    // One undo step reverts the attributes and the position. Redo gives the centered state.
+    CHECK(RestoreShapeEditState(brush, moved));
+    CHECK(CaptureShapeEditState(brush) == moved);
+    CHECK(boxNode->GetPosition() == moved.nodePosition_);
+    CHECK_FALSE(RestoreShapeEditState(brush, moved));
+    CHECK(RestoreShapeEditState(brush, centered));
+    CHECK(CaptureShapeEditState(brush) == centered);
+    index = 0;
+    for (unsigned id : {0u, 7u, 20u, 21u, 25u})
+        CHECK(worldHandle(id).Equals(before[index++], 1e-4f));
+
+    // A non-shape component and a null pointer do nothing.
+    CHECK_FALSE(RecenterShapePivot(nullptr));
+    CHECK_FALSE(RecenterShapePivot(rootNode->GetComponent<CsgRoot>()));
 }

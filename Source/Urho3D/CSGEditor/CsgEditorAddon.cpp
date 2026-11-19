@@ -79,6 +79,7 @@ const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeo
 
 /// The editor settings keys of the shape handles.
 const char* const ShowHandlesIniKey = "CsgEditor.ShowHandles";
+const char* const AutoRecenterIniKey = "CsgEditor.AutoRecenter";
 const char* const HandleGridStepIniKey = "CsgEditor.HandleGridStep";
 const float DefaultHandleGridStep = 0.125f;
 /// The size of a handle and the pick radius in pixels.
@@ -153,25 +154,26 @@ private:
     const unsigned rootNodeId_{};
 };
 
-/// The undo action of one handle drag. It keeps the attributes of the brush before and after the drag.
+/// The undo action of one handle drag or one recenter. It keeps the attributes of the brush
+/// and the position of its node before and after. One undo step reverts both.
 /// It finds the component by the node id and the type. Then it works after the node is created again.
 class ShapeHandleDragAction : public EditorAction
 {
 public:
-    ShapeHandleDragAction(Component* component, ShapeAttributeSnapshot oldValues, ShapeAttributeSnapshot newValues)
+    ShapeHandleDragAction(Component* component, ShapeEditState oldState, ShapeEditState newState)
         : scene_(component->GetScene())
         , nodeId_(component->GetNode()->GetID())
         , type_(component->GetType())
-        , oldValues_(ea::move(oldValues))
-        , newValues_(ea::move(newValues))
+        , oldState_(ea::move(oldState))
+        , newState_(ea::move(newState))
     {
     }
 
     /// Implement EditorAction.
     /// @{
     bool CanUndoRedo() const override { return GetComponent() != nullptr; }
-    void Redo() const override { RestoreShapeAttributes(GetComponent(), newValues_); }
-    void Undo() const override { RestoreShapeAttributes(GetComponent(), oldValues_); }
+    void Redo() const override { RestoreShapeEditState(GetComponent(), newState_); }
+    void Undo() const override { RestoreShapeEditState(GetComponent(), oldState_); }
     bool MergeWith(const EditorAction& other) override { return false; }
     /// @}
 
@@ -185,8 +187,8 @@ private:
     const WeakPtr<Scene> scene_;
     const unsigned nodeId_{};
     const StringHash type_;
-    const ShapeAttributeSnapshot oldValues_;
-    const ShapeAttributeSnapshot newValues_;
+    const ShapeEditState oldState_;
+    const ShapeEditState newState_;
 };
 
 /// Return the integer value of the key in the editor settings output of the addon.
@@ -647,6 +649,7 @@ void CsgEditorAddon::WriteIniSettings(ImGuiTextBuffer& output)
 {
     WriteStringToIni(output, PresetIniKey, GetBrushPresets()[presetIndex_].name_);
     WriteIntToIni(output, ShowHandlesIniKey, showHandles_);
+    WriteIntToIni(output, AutoRecenterIniKey, autoRecenter_);
     WriteStringToIni(output, HandleGridStepIniKey, Format("{}", handleGridStep_));
 }
 
@@ -664,6 +667,8 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
     }
     if (const auto value = ReadIntFromIni(line, ShowHandlesIniKey))
         showHandles_ = *value != 0;
+    if (const auto value = ReadIntFromIni(line, AutoRecenterIniKey))
+        autoRecenter_ = *value != 0;
     if (const auto value = ReadStringFromIni(line, HandleGridStepIniKey))
     {
         // A value that is not finite gives the default. A negative value turns off the snap.
@@ -1240,6 +1245,7 @@ void CsgEditorAddon::SetActiveShapeBrush(Component* brush)
 void CsgEditorAddon::BeginHandleDrag()
 {
     dragSnapshot_ = SnapshotShapeAttributes(handleBrush_);
+    dragStartPosition_ = handleBrush_->GetNode()->GetPosition();
     dragStartHandles_ = handleSet_.handles_;
     dragWorldDelta_ = Vector3::ZERO;
     dragTriedDelta_.reset();
@@ -1285,6 +1291,27 @@ void CsgEditorAddon::UpdateHandleDrag(Node* node, bool snap)
     ApplyShapeHandleDrag(brush, dragSnapshot_, selectedHandles_, localDelta, dragAcceptedDelta_);
 }
 
+bool CsgEditorAddon::RecenterActiveShape()
+{
+    Component* brush = handleBrush_;
+    if (!brush || dragState_ != HandleDragState::None)
+        return false;
+
+    const ShapeEditState oldState = CaptureShapeEditState(brush);
+    if (!RecenterShapePivot(brush))
+        return false;
+
+    const auto action = MakeShared<ShapeHandleDragAction>(brush, oldState, CaptureShapeEditState(brush));
+    if (Node* rootNode = FindActiveRoot(brush->GetNode()))
+    {
+        RequestRebuild(rootNode->GetScene(), rootNode->GetID());
+        owner_->PushAction(MakeShared<RebuildRootActionWrapper>(action, rootNode));
+    }
+    else
+        owner_->PushAction(action);
+    return true;
+}
+
 void CsgEditorAddon::EndHandleDrag(bool commit)
 {
     Component* brush = handleBrush_;
@@ -1294,10 +1321,14 @@ void CsgEditorAddon::EndHandleDrag(bool commit)
             RestoreShapeAttributes(brush, dragSnapshot_);
         else
         {
-            ShapeAttributeSnapshot endValues = SnapshotShapeAttributes(brush);
-            if (endValues != dragSnapshot_)
+            // The drag is over and it changed the shape. The recenter is a part of the same undo step.
+            if (SnapshotShapeAttributes(brush) != dragSnapshot_)
             {
-                const auto action = MakeShared<ShapeHandleDragAction>(brush, dragSnapshot_, ea::move(endValues));
+                if (autoRecenter_)
+                    RecenterShapePivot(brush);
+                ShapeEditState oldState{dragSnapshot_, dragStartPosition_};
+                const auto action =
+                    MakeShared<ShapeHandleDragAction>(brush, ea::move(oldState), CaptureShapeEditState(brush));
                 if (Node* rootNode = FindActiveRoot(brush->GetNode()))
                     owner_->PushAction(MakeShared<RebuildRootActionWrapper>(action, rootNode));
                 else
@@ -1583,6 +1614,11 @@ void CsgEditorAddon::RenderShapeSection()
 void CsgEditorAddon::RenderShapeSettings()
 {
     ui::Checkbox("Show handles", &showHandles_);
+    ui::Checkbox("Recenter pivot after drag", &autoRecenter_);
+    if (ui::IsItemHovered())
+        ui::SetTooltip("Move the node origin to the center of the shape at the end of a handle drag.");
+    if (ui::MenuItem("Recenter pivot", nullptr, false, handleBrush_ && dragState_ == HandleDragState::None))
+        RecenterActiveShape();
     ui::SetNextItemWidth(ui::CalcTextSize("0.0000").x + ui::GetStyle().FramePadding.x * 2.0f + 20.0f);
     if (ui::DragFloat("Snap step", &handleGridStep_, 0.005f, 0.0f, 100.0f, "%.3f"))
         handleGridStep_ = ea::max(0.0f, handleGridStep_);

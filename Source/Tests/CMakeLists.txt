@@ -28,6 +28,7 @@ set (SOURCE_FILES
     TestGolden.cpp
     TestShapes.cpp
     TestShapeHandles.cpp
+    TestModelMeasure.h
 )
 
 # The tests compile the needed CSG sources directly. They do not link Plugin.CSG.
