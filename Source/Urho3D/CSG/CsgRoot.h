@@ -77,8 +77,9 @@ struct CsgBuildStats
 /// Rebuild policy and threading:
 /// - Rebuilds are async: the heavy work runs on `WorkQueue` worker thread(s) and the resulting
 ///   `Model` is applied on the main thread.
-/// - Rebuild requests are debounced using `deferredDelaySec_`. Any relevant change schedules a rebuild
-///   for after the quiet period; setting delay to 0 triggers immediate rebuild.
+/// - Rebuild requests are debounced using `deferredDelaySec_`. The wait starts at the first open change.
+///   A later change does not reset it. A rebuild with the newest state runs when the wait ends.
+///   A change during a build starts a new wait. Setting delay to 0 triggers immediate rebuild.
 /// - Results are de-staled: if multiple rebuilds are requested while a build is in-flight, older
 ///   results are discarded and a fresh rebuild is scheduled.
 ///
@@ -260,6 +261,7 @@ private:
     void RegisterBrushInternal(CsgBrush* brush, bool requestRebuild);
     void UnregisterBrushInternal(CsgBrush* brush);
     void PruneBrushes();
+    void MarkRebuildRequested();
     void ScheduleDeferredRebuild();
     void DeferredRebuildTick(unsigned scheduleToken, WorkQueue* queue);
     StaticModel* GetOrCreateTempStaticModel(const ea::string& name, WeakPtr<StaticModel>& cache);
@@ -291,7 +293,7 @@ private:
     float epsilon_{1e-4f};
     float minComponentVolumeFraction_{0.0f};
     bool rebuildDirty_{true};
-    unsigned lastChangeTimeMs_{};
+    unsigned waitStartTimeMs_{};
     unsigned deferredScheduleToken_{};
     bool deferredRebuildScheduled_{};
     unsigned rebuildRequestId_{1};

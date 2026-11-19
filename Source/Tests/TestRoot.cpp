@@ -43,7 +43,9 @@
 #include <fstream>
 #include <cmath>
 #include <limits>
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 
 using namespace Urho3D;
 
@@ -3216,4 +3218,155 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
     }
 
     CHECK(errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// Run one frame with a single work queue update. CompleteAll waits for the delayed tasks, so the test avoids it.
+void StepFrame(CsgRoot* root, WorkQueue* workQueue)
+{
+    auto* time = root->GetSubsystem<Time>();
+    workQueue->Update();
+    time->BeginFrame(1.0f / 60.0f);
+    root->GetScene()->Update(1.0f / 60.0f);
+    time->EndFrame();
+}
+
+/// Count the new output models of the root. Each applied result gives a new model.
+class OutputCounter
+{
+public:
+    explicit OutputCounter(CsgRoot* root)
+        : root_(root)
+    {
+    }
+
+    void Update()
+    {
+        const StaticModel* output = GetOutput(root_);
+        Model* model = output ? output->GetModel() : nullptr;
+        if (model && model != last_)
+        {
+            last_ = model;
+            keep_.push_back(SharedPtr<Model>(model));
+            ++count_;
+        }
+    }
+
+    unsigned GetCount() const { return count_; }
+
+private:
+    CsgRoot* root_;
+    Model* last_{};
+    ea::vector<SharedPtr<Model>> keep_;
+    unsigned count_{};
+};
+
+} // namespace
+
+TEST_CASE("CsgRoot waits from the first change and does not reset the wait", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Drag");
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    root->SetDeferredDelaySec(0.1f);
+    RunFrames(root, workQueue, 5);
+
+    OutputCounter counter(root);
+    counter.Update();
+    const unsigned before = counter.GetCount();
+
+    SECTION("A stream of changes gives live results and the last result has the final state")
+    {
+        Vector3 position;
+        for (unsigned i = 0; i < 50; ++i)
+        {
+            position = Vector3(1.0f + 0.01f * static_cast<float>(i + 1), 1.0f, 1.0f);
+            brush->GetNode()->SetPosition(position);
+            // A short job needs a few frames. A change in these frames makes its result stale.
+            for (unsigned step = 0; step < 4; ++step)
+            {
+                StepFrame(root, workQueue);
+                counter.Update();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        CHECK(counter.GetCount() - before >= 5);
+
+        for (unsigned i = 0; i < 30; ++i)
+        {
+            StepFrame(root, workQueue);
+            counter.Update();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+        AddBoxBrush(fresh, "Cut", position, CsgOperation::DifferenceAB);
+        BuildFully(fresh, workQueue);
+        CheckSameOutput(root, fresh);
+    }
+
+    SECTION("A single change gives exactly one rebuild after the wait")
+    {
+        brush->GetNode()->SetPosition(Vector3(1.2f, 1.0f, 1.0f));
+        StepFrame(root, workQueue);
+        counter.Update();
+        CHECK(counter.GetCount() == before);
+
+        for (unsigned i = 0; i < 40; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            StepFrame(root, workQueue);
+            counter.Update();
+        }
+        CHECK(counter.GetCount() - before == 1);
+    }
+}
+
+TEST_CASE("CsgRoot drops a stale result and keeps the newest state", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Stale");
+    CsgBrush* brush = AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+
+    OutputCounter counter(root);
+    counter.Update();
+    const unsigned before = counter.GetCount();
+
+    // The first build is in flight when the second change comes. Its result is stale.
+    brush->GetNode()->SetPosition(Vector3(1.1f, 1.0f, 1.0f));
+    root->Rebuild();
+    const Vector3 finalPosition(1.3f, 1.0f, 1.0f);
+    brush->GetNode()->SetPosition(finalPosition);
+
+    for (unsigned i = 0; i < 60; ++i)
+    {
+        StepFrame(root, workQueue);
+        counter.Update();
+    }
+    CHECK(counter.GetCount() - before == 1);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    AddBoxBrush(fresh, "Cut", finalPosition, CsgOperation::DifferenceAB);
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
 }

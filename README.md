@@ -95,7 +95,7 @@ A procedural brush (`CsgBoxBrush`) generates its model from parameters. See "Pro
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. The root drops a stale result and schedules a new build.
-- `Deferred Delay Sec` is the quiet time before a rebuild. `Rebuild()` ignores it.
+- `Deferred Delay Sec` is the wait before a rebuild. The wait starts at the first change and a later change does not reset it. A drag gives live updates. `Rebuild()` ignores it.
 - Solid cache: the root stores a fingerprint for each brush (brush, model, transform, mesh id and operation). If a rebuild only appends brushes and the base model, the epsilon and the earlier brushes did not change, it starts from the cached solid. It applies only the new brushes.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
 - `Bake()` folds the applied brushes into the base operand and removes the brush nodes. The baked geometry exists only at run time and the root does not serialize it. `Bake()` returns false if a rebuild is in flight, a brush is dirty or a result is pending.

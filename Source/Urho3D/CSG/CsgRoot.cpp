@@ -352,9 +352,7 @@ void CsgRoot::OnMarkedDirty(Node* node)
     if (ignoreChildDirtyFrame_ == currentFrame)
         return;
 
-    rebuildDirty_ = true;
-    ++rebuildRequestId_;
-    lastChangeTimeMs_ = Time::GetSystemTime();
+    MarkRebuildRequested();
 
     ScheduleDeferredRebuild();
 }
@@ -394,13 +392,18 @@ void CsgRoot::SetMinComponentVolumeFraction(float value)
 
 void CsgRoot::RequestRebuild()
 {
-    rebuildDirty_ = true;
-
-    ++rebuildRequestId_;
-
-    lastChangeTimeMs_ = Time::GetSystemTime();
+    MarkRebuildRequested();
 
     ScheduleDeferredRebuild();
+}
+
+void CsgRoot::MarkRebuildRequested()
+{
+    // The wait starts at the first open change. Later changes do not reset it.
+    if (!rebuildDirty_ || !deferredRebuildScheduled_)
+        waitStartTimeMs_ = Time::GetSystemTime();
+    rebuildDirty_ = true;
+    ++rebuildRequestId_;
 }
 
 void CsgRoot::RegisterBrush(CsgBrush* brush)
@@ -817,7 +820,7 @@ void CsgRoot::DeferredRebuildTick(unsigned scheduleToken, WorkQueue* queue)
 
     const unsigned nowMs = Time::GetSystemTime();
     const unsigned delayMs = static_cast<unsigned>(deferredDelaySec_ * 1000.0f);
-    if (nowMs - lastChangeTimeMs_ >= delayMs)
+    if (nowMs - waitStartTimeMs_ >= delayMs)
     {
         deferredRebuildScheduled_ = false;
         Rebuild();
