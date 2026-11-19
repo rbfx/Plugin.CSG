@@ -14,6 +14,8 @@ add_library (Plugin.CSG.Editor STATIC
     CsgEditorAddon.h
     CsgEditorOps.cpp
     CsgEditorOps.h
+    CsgShapeEditOps.cpp
+    CsgShapeEditOps.h
 )
 target_link_libraries (Plugin.CSG.Editor PUBLIC EditorLibrary)
 target_include_directories (Plugin.CSG.Editor PUBLIC $<BUILD_INTERFACE:${RbfxCsg_SOURCE_DIR}/Source>)

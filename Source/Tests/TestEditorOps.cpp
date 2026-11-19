@@ -11,6 +11,7 @@
 #include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
+#include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 #include "TestGeneratedBrush.h"
 
 #include <Urho3D/Core/Context.h>
@@ -927,4 +928,221 @@ TEST_CASE("IsResultNodeOfRoot accepts only the temporary result child of the roo
     CHECK_FALSE(IsResultNodeOfRoot(other, rootNode));
     CHECK_FALSE(IsResultNodeOfRoot(result, otherRoot));
     CHECK_FALSE(IsResultNodeOfRoot(nullptr, rootNode));
+}
+
+namespace
+{
+
+/// Return the handle with the id, or null.
+const ShapeHandle* FindShapeHandle(const ShapeHandleSet& set, unsigned id)
+{
+    for (const ShapeHandle& handle : set.handles_)
+    {
+        if (handle.id_ == id)
+            return &handle;
+    }
+    return nullptr;
+}
+
+/// Create a root with one procedural brush of the type.
+template <class T> T* AddShapeBrush(Fixture& f)
+{
+    Node* rootNode = f.MakeRoot();
+    Node* node = rootNode->CreateChild("Shape");
+    return node->CreateComponent<T>();
+}
+
+} // namespace
+
+TEST_CASE("QueryShapeHandles and MoveShapeHandles work on a box in a scene", "[editorops][handles]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    auto* box = AddShapeBrush<CsgBoxBrush>(f);
+
+    const ShapeHandleSet set = QueryShapeHandles(box);
+    CHECK(set.valid_);
+    CHECK(set.handles_.size() == 14);
+    REQUIRE(FindShapeHandle(set, 7));
+    CHECK(FindShapeHandle(set, 7)->kind_ == CsgShapeHandleKind::Point);
+    CHECK(FindShapeHandle(set, 7)->position_.Equals(Vector3(0.5f, 0.5f, 0.5f)));
+    REQUIRE(FindShapeHandle(set, 21));
+    CHECK(FindShapeHandle(set, 21)->kind_ == CsgShapeHandleKind::Axis);
+    CHECK(FindShapeHandle(set, 21)->axis_.Equals(Vector3(1.0f, 0.0f, 0.0f)));
+    CHECK_FALSE(FindShapeHandle(set, 7)->name_.empty());
+
+    CHECK(MoveShapeHandles(box, {7}, Vector3(0.25f, 0.0f, 0.0f)));
+    CHECK(box->GetAttribute("Corner 7").GetVector3().Equals(Vector3(0.75f, 0.5f, 0.5f)));
+    // The -X face through the +X face is not valid. The corners stay.
+    const Variant corner0 = box->GetAttribute("Corner 0");
+    CHECK_FALSE(MoveShapeHandles(box, {20}, Vector3(3.0f, 0.0f, 0.0f)));
+    CHECK(box->GetAttribute("Corner 0") == corner0);
+    // An unknown id, no id and a null brush give false.
+    CHECK_FALSE(MoveShapeHandles(box, {99}, Vector3::ONE));
+    CHECK_FALSE(MoveShapeHandles(box, {}, Vector3::ONE));
+    CHECK_FALSE(MoveShapeHandles(nullptr, {0}, Vector3::ONE));
+    CHECK_FALSE(QueryShapeHandles(nullptr).valid_);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("QueryShapeHandles and MoveShapeHandles work on a sphere, a cylinder and a ring", "[editorops][handles]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+
+    auto* sphere = AddShapeBrush<CsgSphereBrush>(f);
+    CHECK(QueryShapeHandles(sphere).handles_.size() == 6);
+    CHECK(MoveShapeHandles(sphere, {0}, Vector3(0.25f, 0.0f, 0.0f)));
+    CHECK(sphere->GetAttribute("Radius").GetVector3().Equals(Vector3(0.75f, 0.5f, 0.5f)));
+    CHECK_FALSE(MoveShapeHandles(sphere, {0}, Vector3(M_INFINITY, 0.0f, 0.0f)));
+
+    auto* cylinder = AddShapeBrush<CsgCylinderBrush>(f);
+    CHECK(QueryShapeHandles(cylinder).handles_.size() == 11);
+    CHECK(MoveShapeHandles(cylinder, {1}, Vector3(0.0f, 0.5f, 0.0f)));
+    CHECK(cylinder->GetAttribute("Top Center").GetVector3().Equals(Vector3(0.0f, 1.0f, 0.0f)));
+    // The top center on the bottom center gives no height.
+    CHECK_FALSE(MoveShapeHandles(cylinder, {1}, Vector3(0.0f, -1.5f, 0.0f)));
+
+    auto* ring = AddShapeBrush<CsgRingBrush>(f);
+    CHECK(QueryShapeHandles(ring).handles_.size() == 4);
+    CHECK(MoveShapeHandles(ring, {0}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK(ring->GetAttribute("Radius").GetFloat() == Catch::Approx(0.6f));
+    CHECK_FALSE(MoveShapeHandles(ring, {0}, Vector3::ZERO));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("IsShapeBrush finds the procedural brushes only", "[editorops][handles]")
+{
+    Fixture f;
+    CHECK(IsShapeBrush(AddShapeBrush<CsgBoxBrush>(f)));
+    CHECK(IsShapeBrush(AddShapeBrush<CsgSphereBrush>(f)));
+    CHECK(IsShapeBrush(AddShapeBrush<CsgCylinderBrush>(f)));
+    CHECK(IsShapeBrush(AddShapeBrush<CsgRingBrush>(f)));
+
+    Node* rootNode = f.MakeRoot();
+    Node* modelNode = AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3::ZERO);
+    REQUIRE(modelNode);
+    Component* modelBrush = FindBrushComponent(modelNode);
+    REQUIRE(modelBrush);
+    CHECK_FALSE(IsShapeBrush(modelBrush));
+    CHECK_FALSE(IsShapeBrush(rootNode->GetComponent<CsgRoot>()));
+    CHECK_FALSE(IsShapeBrush(nullptr));
+    CHECK(FindShapeBrush(modelNode) == nullptr);
+    CHECK_FALSE(QueryShapeHandles(modelBrush).valid_);
+    CHECK_FALSE(MoveShapeHandles(modelBrush, {0}, Vector3::ONE));
+}
+
+TEST_CASE("A shape attribute snapshot restores the attributes exactly", "[editorops][handles]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    auto* box = AddShapeBrush<CsgBoxBrush>(f);
+    CHECK(FindShapeBrush(box->GetNode()) == box);
+
+    const ShapeAttributeSnapshot start = SnapshotShapeAttributes(box);
+    CHECK(start.size() >= 9);
+    // No change: the restore does nothing.
+    CHECK_FALSE(RestoreShapeAttributes(box, start));
+
+    REQUIRE(MoveShapeHandles(box, {7}, Vector3(0.25f, 0.5f, 0.0f)));
+    REQUIRE(MoveShapeHandles(box, {21}, Vector3(0.5f, 0.0f, 0.0f)));
+    const ShapeAttributeSnapshot moved = SnapshotShapeAttributes(box);
+    CHECK(moved != start);
+
+    CHECK(RestoreShapeAttributes(box, start));
+    CHECK(SnapshotShapeAttributes(box) == start);
+    static_cast<Component*>(box)->ApplyAttributes();
+    CHECK(SnapshotShapeAttributes(box) == start);
+
+    // A drag restores the snapshot before each move. Two frames equal one move.
+    REQUIRE(MoveShapeHandles(box, {7}, Vector3(0.25f, 0.0f, 0.0f)));
+    const ShapeAttributeSnapshot once = SnapshotShapeAttributes(box);
+    RestoreShapeAttributes(box, start);
+    REQUIRE(MoveShapeHandles(box, {7}, Vector3(0.1f, 0.0f, 0.0f)));
+    RestoreShapeAttributes(box, start);
+    REQUIRE(MoveShapeHandles(box, {7}, Vector3(0.25f, 0.0f, 0.0f)));
+    CHECK(SnapshotShapeAttributes(box) == once);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("The undo logic of a handle drag switches between two snapshots", "[editorops][handles]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    auto* ring = AddShapeBrush<CsgRingBrush>(f);
+    ring->SetArc(90.0f);
+
+    const ShapeAttributeSnapshot start = SnapshotShapeAttributes(ring);
+    REQUIRE(MoveShapeHandles(ring, {3}, Vector3(-0.1f, 0.0f, 0.0f)));
+    const ShapeAttributeSnapshot end = SnapshotShapeAttributes(ring);
+    REQUIRE(start != end);
+
+    // Undo.
+    CHECK(RestoreShapeAttributes(ring, start));
+    CHECK(SnapshotShapeAttributes(ring) == start);
+    // Redo.
+    CHECK(RestoreShapeAttributes(ring, end));
+    CHECK(SnapshotShapeAttributes(ring) == end);
+    CHECK_FALSE(RestoreShapeAttributes(ring, end));
+    CHECK_FALSE(RestoreShapeAttributes(nullptr, end));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("PickNearestHandle picks the nearest handle in the radius", "[editorops][handles]")
+{
+    const ea::vector<HandleScreenPoint> points{
+        {5, Vector2(100.0f, 100.0f)},
+        {2, Vector2(106.0f, 100.0f)},
+        {1, Vector2(94.0f, 100.0f)},
+        {0, Vector2(101.0f, 100.0f), false},
+    };
+    CHECK(PickNearestHandle(points, Vector2(99.0f, 100.0f), 10.0f) == 0u);
+    CHECK(PickNearestHandle(points, Vector2(105.0f, 100.0f), 10.0f) == 1u);
+    // A tie goes to the lower id: id 1 at index 2 wins over id 5 at index 0.
+    CHECK(PickNearestHandle(points, Vector2(97.0f, 100.0f), 10.0f) == 2u);
+    // Outside the radius.
+    CHECK_FALSE(PickNearestHandle(points, Vector2(200.0f, 100.0f), 10.0f));
+    CHECK(PickNearestHandle(points, Vector2(100.0f, 110.0f), 10.0f) == 0u);
+    CHECK_FALSE(PickNearestHandle(points, Vector2(100.0f, 110.5f), 10.0f));
+    // A hidden point is not picked.
+    CHECK_FALSE(PickNearestHandle({{0, Vector2::ZERO, false}}, Vector2::ZERO, 10.0f));
+    CHECK_FALSE(PickNearestHandle({}, Vector2::ZERO, 10.0f));
+}
+
+TEST_CASE("Handle math: centroid, grid snap and axis projection", "[editorops][handles]")
+{
+    ea::vector<ShapeHandle> handles(3);
+    handles[0].id_ = 0;
+    handles[0].position_ = Vector3(0.0f, 0.0f, 0.0f);
+    handles[1].id_ = 4;
+    handles[1].position_ = Vector3(2.0f, 0.0f, 0.0f);
+    handles[2].id_ = 9;
+    handles[2].position_ = Vector3(0.0f, 4.0f, 0.0f);
+    CHECK(ComputeSelectionCentroid(handles, {0, 4}) == Vector3(1.0f, 0.0f, 0.0f));
+    CHECK(ComputeSelectionCentroid(handles, {9, 77}) == Vector3(0.0f, 4.0f, 0.0f));
+    CHECK_FALSE(ComputeSelectionCentroid(handles, {77}));
+    CHECK_FALSE(ComputeSelectionCentroid(handles, {}));
+
+    CHECK(SnapToGrid(0.3f, 0.125f) == Catch::Approx(0.25f));
+    CHECK(SnapToGrid(0.33f, 0.125f) == Catch::Approx(0.375f));
+    CHECK(SnapToGrid(-0.3f, 0.125f) == Catch::Approx(-0.25f));
+    CHECK(SnapToGrid(1.0f, 0.125f) == Catch::Approx(1.0f));
+    CHECK(SnapToGrid(0.3f, 0.0f) == 0.3f);
+    CHECK(SnapToGrid(0.3f, -1.0f) == 0.3f);
+
+    CHECK(ProjectDeltaOnAxis(Vector3(1.0f, 2.0f, 3.0f), Vector3(0.0f, 1.0f, 0.0f)) == Vector3(0.0f, 2.0f, 0.0f));
+    CHECK(ProjectDeltaOnAxis(Vector3(1.0f, 2.0f, 3.0f), Vector3(0.0f, -2.0f, 0.0f)) == Vector3(0.0f, 2.0f, 0.0f));
+    CHECK(ProjectDeltaOnAxis(Vector3(1.0f, 1.0f, 0.0f), Vector3(1.0f, -1.0f, 0.0f)).Equals(Vector3::ZERO));
+    CHECK(ProjectDeltaOnAxis(Vector3(1.0f, 2.0f, 3.0f), Vector3::ZERO) == Vector3::ZERO);
+
+    // A point snaps each coordinate of the target.
+    CHECK(SnapHandleDelta(Vector3(0.5f, 0.5f, 0.5f), Vector3(0.3f, -0.1f, 0.0f), Vector3::ZERO, 0.25f)
+              .Equals(Vector3(0.25f, 0.0f, 0.0f)));
+    // An axis snaps only the coordinate along the axis. The result is along the axis.
+    CHECK(SnapHandleDelta(Vector3(0.1f, 0.5f, 0.0f), Vector3(0.3f, 0.2f, 0.0f), Vector3(0.0f, 1.0f, 0.0f), 0.25f)
+              .Equals(Vector3(0.0f, 0.25f, 0.0f)));
+    CHECK(SnapHandleDelta(Vector3(-0.5f, 0.0f, 0.0f), Vector3(-0.2f, 0.0f, 0.0f), Vector3(-1.0f, 0.0f, 0.0f), 0.25f)
+              .Equals(Vector3(-0.25f, 0.0f, 0.0f)));
+    // Step 0 is off.
+    CHECK(SnapHandleDelta(Vector3::ONE, Vector3(0.3f, 0.2f, 0.1f), Vector3::ZERO, 0.0f) == Vector3(0.3f, 0.2f, 0.1f));
 }

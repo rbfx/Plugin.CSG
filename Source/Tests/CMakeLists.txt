@@ -58,6 +58,7 @@ set (CSG_SOURCE_FILES
 # The editor scene functions use reflection only. The tests compile them directly.
 set (CSG_EDITOR_SOURCE_FILES
     ${RbfxCsg_SOURCE_DIR}/Source/Urho3D/CSGEditor/CsgEditorOps.cpp
+    ${RbfxCsg_SOURCE_DIR}/Source/Urho3D/CSGEditor/CsgShapeEditOps.cpp
 )
 
 add_executable (${TARGET_NAME} ${SOURCE_FILES} ${CSG_SOURCE_FILES} ${CSG_EDITOR_SOURCE_FILES})
