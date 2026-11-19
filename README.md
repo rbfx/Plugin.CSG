@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring" and "Procedural wedge".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring", "Procedural wedge" and "Procedural stairs".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -122,7 +122,7 @@ A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
   `P_ACCEPTED` is false if the shape is centered (offset below 1e-6), always centered (sphere, ring) or the new parameters are not valid.
   Then the parameters stay. The handle ids do not change. The editor queries the positions again.
   In C++ the same API is `CsgProceduralBrush::Recenter`. The box center is the mean of the 8 positions `Size * Corner`.
-  The cylinder center is the midpoint of the two end centers. The wedge center is its "Center" attribute. The recenter sets it to zero.
+  The cylinder center is the midpoint of the two end centers. The wedge and stairs center is the "Center" attribute. The recenter sets it to zero.
 
 The move is stateless. The brush applies the delta to its current parameters. The editor restores the attributes before each call.
 The brush clamps the result with the sanitizer of the shape. It refuses a result that is not valid.
@@ -146,6 +146,7 @@ The ids are a file contract.
 | Ring | 2 | Axial tube radius (axis +Y). |
 | Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
 | Wedge | 0 to 5 | Faces (axes) in the order -X, +X, -Z (front edge), +Z (back), +Y (top edge), -Y (bottom). The size on the axis grows by the move and "Center" moves by half of it, so the opposite face stays. |
+| Stairs | 0 to 5 | Faces (axes) in the order -X (side center), +X (side center), -Z (first riser), +Z (back), +Y (top tread), -Y (bottom). The move is as for the wedge. There is no handle for "Steps". |
 
 ### Pick event (provenance)
 
@@ -180,7 +181,7 @@ Each `CsgBrush` has three UV attributes. They come after "Materials" in the insp
 - "UV Scale": the texture repeats for each unit. The default is 1.
 - "UV Offset": a `Vector2` that is added after the scale. The default is (0, 0).
 
-Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) uses `Root`.
+Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scenes and old results do not change. A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) uses `Root`.
 
 `Root` mode rules:
 
@@ -233,6 +234,7 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 - `Cylinder`: a procedural `CsgCylinderBrush`. It has no model file.
 - `Ring`: a procedural `CsgRingBrush`. It has no model file.
 - `Wedge`: a procedural `CsgWedgeBrush`. It has no model file.
+- `Stairs`: a procedural `CsgStairsBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -311,6 +313,21 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - Validity: the volume must be positive and no triangle can have two equal positions. The sanitized values always give a valid wedge.
 - A value that is not finite gets its default value.
 
+### Procedural stairs
+
+`CsgStairsBrush` generates solid stairs from parameters. It has no "Model" attribute. See `CsgGenerateStairs`.
+
+- "Size": the size of the bounding box. Each component is in [0.001, 16384]. The default is (1, 1, 1).
+- "Center": the center of the bounding box in the local space of the brush. Each component is in [-16384, 16384]. The default is (0, 0, 0).
+- "Steps": 1 to 64. The default is 5. Step i (from 0) has the height Size.y * (i + 1) / Steps and the tread depth Size.z / Steps. The first riser is at the front (-Z) and starts at the bottom. The top tread ends at the back top edge.
+- The profile in the YZ plane is extruded along X. Each tread and each riser is one quad. Each side is a fan of triangles from the back bottom corner. The fan uses only the profile points, so the mesh has no T-junction.
+- "Materials": five slots, in this order: 0 the treads, 1 the risers, 2 the two sides, 3 the bottom, 4 the back. The order is a file contract.
+- Each triangle has a flat normal. UV 0 is a planar projection of each face in local units, relative to "Center". UV 1 is equal to UV 0.
+- The volume is Size.x * Size.y * Size.z * (Steps + 1) / (2 * Steps).
+- Handles: see the table in "Shape handles (protocol)". The face handles work as for the wedge. The inspector changes "Steps".
+- Validity: the volume must be positive and no triangle can have two equal positions. Very small steps far from the origin merge their float positions. Then the shape is not valid, gives no operand and logs one warning.
+- A value that is not finite gets its default value.
+
 ### Operation colors and operand overlay
 
 - The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
@@ -364,7 +381,7 @@ The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the te
 
 ### Shape handles
 
-The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`) in the view. A brush with a model has no handles.
+The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`) in the view. A brush with a model has no handles.
 
 - Select exactly one node with a procedural brush. The handles show on the brush. With two or more selected nodes, no handles show.
 - A point handle is a square. It moves freely. An axis handle is a circle with a short line. It moves only along its axis.
@@ -401,6 +418,7 @@ The handles of each shape:
 | Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes) and the bulge (axis). A radius at an apex and a bulge on a thin body are not offered. |
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
 | Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. |
+| Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. |
 
 ### Manual check list
 
@@ -476,6 +494,9 @@ The editor has no test harness for addons. Do these checks by hand:
 68. Select "Wedge" in the preset combo. Push B. A `CsgWedgeBrush` appears as a wireframe ramp and the root rebuilds. The overlay line shows "CsgWedgeBrush".
 69. Drag the +Y handle of the wedge up. The slope gets steeper and the bottom stays on its plane. Drag the -Z handle. The front edge moves and the back face stays.
 70. Set a material in slot 2. Only the slope gets it. Subtract the wedge from a box. The ramp cut stays closed.
+71. Select "Stairs" in the preset combo. Push B. A `CsgStairsBrush` appears as a wireframe with 5 steps and the root rebuilds. The overlay line shows "CsgStairsBrush".
+72. Set "Steps" to 1, then to 64. The wireframe follows at once. Set a material in slot 0. Only the treads get it.
+73. Drag the +Z handle of the stairs. The treads get deeper and the front riser stays. Subtract the stairs from a box. The stair-shaped cut stays closed.
 
 ## How to try the sample scene
 
