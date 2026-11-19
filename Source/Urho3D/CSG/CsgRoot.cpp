@@ -956,9 +956,8 @@ CsgPickHit PickTriangles(const CsgPickTable& table, const Matrix3x4& worldTransf
         const Vector3 worldDir = direction / length;
         const Vector3 localOrigin = inverse * origin;
         const Vector3 localDir = inverse * Vector4(worldDir, 0.0f);
-        // A mirror transform turns the winding. Then the front face has the other sign.
-        const Matrix3 linear = worldTransform.ToMatrix3();
-        const double frontSign = linear.Determinant() < 0.0f ? -1.0 : 1.0;
+        // The front face test runs in the space of the table, where the winding is outward.
+        // So a mirrored root still hits the outward side of the solid.
 
         const double ox = localOrigin.x_, oy = localOrigin.y_, oz = localOrigin.z_;
         const double dx = localDir.x_, dy = localDir.y_, dz = localDir.z_;
@@ -975,10 +974,10 @@ CsgPickHit PickTriangles(const CsgPickTable& table, const Matrix3x4& worldTransf
             const double e2x = c.x_ - a.x_, e2y = c.y_ - a.y_, e2z = c.z_ - a.z_;
             // Moller-Trumbore. det = -dot(direction, (b - a) x (c - a)), so det > 0 is a front face hit.
             const double px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
-            const double det = (e1x * px + e1y * py + e1z * pz) * frontSign;
+            const double det = e1x * px + e1y * py + e1z * pz;
             if (!(det > 1e-30))
                 continue;
-            const double invDet = frontSign / det;
+            const double invDet = 1.0 / det;
             const double sx = ox - a.x_, sy = oy - a.y_, sz = oz - a.z_;
             const double u = (sx * px + sy * py + sz * pz) * invDet;
             if (u < -edgeTolerance || u > 1.0 + edgeTolerance)
@@ -1001,8 +1000,9 @@ CsgPickHit PickTriangles(const CsgPickTable& table, const Matrix3x4& worldTransf
             const Vector3& a = table.positions_[best * 3];
             const Vector3& b = table.positions_[best * 3 + 1];
             const Vector3& c = table.positions_[best * 3 + 2];
-            const Vector3 worldA = worldTransform * a;
-            const Vector3 worldNormal = (worldTransform * b - worldA).CrossProduct(worldTransform * c - worldA);
+            // A normal transforms with the inverse transpose. It keeps the outward side also for a mirror.
+            const Vector3 localNormal = (b - a).CrossProduct(c - a);
+            const Vector3 worldNormal = inverse.ToMatrix3().Transpose() * localNormal;
             result.hit_ = true;
             result.source_ = table.sources_[best];
             result.position_ = worldTransform * localHit;
@@ -1123,7 +1123,6 @@ void CsgRoot::Rebuild()
             ApplyResultToOutput(baked_->outputModel_, outputMaterials);
             lastGeometryComponents_.clear();
             SetPickTable(nullptr, {});
-        SetPickTable(nullptr, {});
             lastBuildFailed_ = false;
             return;
         }
@@ -1425,7 +1424,7 @@ bool CsgRoot::ApplyPendingResult()
     if (pendingResults_.empty())
         return false;
 
-    const PendingBuildResult result = ea::move(pendingResults_.front());
+    PendingBuildResult result = ea::move(pendingResults_.front());
     pendingResults_.erase(pendingResults_.begin());
     lastBuildFailed_ = result.failed_;
     if (result.failed_)
@@ -1434,7 +1433,7 @@ bool CsgRoot::ApplyPendingResult()
     ApplyResultToOutput(result.model_, result.materials_);
     lastBuildStats_ = result.stats_;
     lastGeometryComponents_ = result.components_;
-    SetPickTable(result.model_, result.pickTable_);
+    SetPickTable(result.model_, ea::move(result.pickTable_));
     hasAppliedBuild_ = true;
     return true;
 }

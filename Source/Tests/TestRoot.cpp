@@ -5701,3 +5701,72 @@ TEST_CASE("CsgRoot gives every triangle a brush source on an empty base", "[root
         CHECK(ea::find(sources.begin(), sources.end(), id) != sources.end());
     }
 }
+
+TEST_CASE("RepairFlatTriangles leaves a model without a source table alone", "[triangulate][pick]")
+{
+    const auto vertex = [](float x, float y)
+    {
+        ModelVertex v{};
+        v.SetPosition(Vector3(x, y, 0.0f));
+        v.SetNormal(Vector3::BACK);
+        return v;
+    };
+    CsgTriangulatedModel model;
+    CsgTriangulatedModel::Geometry neighbor;
+    neighbor.vertices_ = {vertex(0.0f, 0.0f), vertex(2.0f, 0.0f), vertex(1.0f, -1.0f)};
+    neighbor.indexData_ = {0, 1, 2};
+    CsgTriangulatedModel::Geometry flat;
+    flat.vertices_ = {vertex(1.0f, 0.0f), vertex(2.0f, 0.0f), vertex(0.0f, 0.0f), vertex(5.0f, 5.0f),
+        vertex(5.0f, 6.0f), vertex(4.0f, 5.0f)};
+    flat.indexData_ = {0, 1, 2, 3, 4, 5};
+    // The flat geometry has a table that does not match its triangles.
+    flat.triangleSources_ = {9};
+    model.geometries_.push_back(neighbor);
+    model.geometries_.push_back(flat);
+
+    CsgInternal::g_csgDiagnostics.Reset();
+    CsgInternal::RepairFlatTriangles(model);
+    CHECK(CsgInternal::g_csgDiagnostics.flatRepairs_.load() == 1);
+    CHECK(model.geometries_[0].indexData_.size() == 6);
+    CHECK(model.geometries_[0].triangleSources_.empty());
+    CHECK(model.geometries_[1].indexData_ == ea::vector<unsigned>{3, 4, 5});
+    CHECK(model.geometries_[1].triangleSources_ == ea::vector<unsigned>{9});
+}
+
+TEST_CASE("CsgRoot pick hits the outward side of a mirrored root", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    root->GetNode()->SetTransform(Vector3(2.0f, 0.0f, 0.0f), Quaternion::IDENTITY, Vector3(-1.0f, 1.0f, 1.0f));
+    CsgBrush* pocket = AddBoxBrush(root, "Pocket", Vector3(0.0f, 0.0f, 1.0f), CsgOperation::DifferenceAB);
+    pocket->GetNode()->SetScale(0.5f);
+    BuildFully(root, workQueue);
+
+    const Matrix3x4 world = root->GetNode()->GetWorldTransform();
+    const auto check = [&](const Vector3& localOrigin, const Vector3& localHit, unsigned source)
+    {
+        const Vector3 origin = world * localOrigin;
+        const Vector3 expected = world * localHit;
+        const CsgPickHit hit = root->Pick(origin, expected - origin);
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == source);
+        CHECK(hit.position_.Equals(expected, 1e-3f));
+        CHECK(hit.distance_ == Catch::Approx((expected - origin).Length()).margin(1e-3f));
+        CHECK(hit.normal_.Length() == Catch::Approx(1.0f).margin(1e-4f));
+        // The normal faces the side of the ray origin.
+        CHECK(hit.normal_.DotProduct(origin - hit.position_) > 0.0f);
+    };
+    // The pocket floor faces world +Z, and the local -X face of the box faces world +X.
+    check(Vector3(0.1f, 0.2f, 5.0f), Vector3(0.1f, 0.2f, 0.5f), IdOf(pocket));
+    check(Vector3(-5.0f, 0.3f, -0.4f), Vector3(-1.0f, 0.3f, -0.4f), 0);
+    CHECK(root->Pick(world * Vector3(0.1f, 0.2f, 5.0f), world * Vector3(0.1f, 0.2f, 0.5f) - world * Vector3(0.1f, 0.2f, 5.0f))
+              .normal_.Equals(Vector3::FORWARD, 1e-4f));
+    // From inside the solid the ray sees only back faces.
+    CHECK_FALSE(root->Pick(world * Vector3::ZERO, Vector3::FORWARD).hit_);
+}

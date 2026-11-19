@@ -833,12 +833,15 @@ void RepairFlatTriangles(CsgTriangulatedModel& model)
             geometry.vertices_.push_back(vertex);
 
             // The neighbor runs to_, from_, other. The halves run to_, middle, other and middle, from_, other.
+            // A model from another source can have no source table. Then the table stays as it is.
+            const bool hasSources = geometry.triangleSources_.size() * 3 == geometry.indexData_.size();
             geometry.indexData_[base + (neighbor.corner_ + 1) % 3] = indexMiddle;
             geometry.indexData_.push_back(indexMiddle);
             geometry.indexData_.push_back(indexFrom);
             geometry.indexData_.push_back(indexOther);
             // The new half comes from the same face as the neighbor.
-            geometry.triangleSources_.push_back(geometry.triangleSources_[base / 3]);
+            if (hasSources)
+                geometry.triangleSources_.push_back(geometry.triangleSources_[base / 3]);
             CSG_DIAG_COUNT(flatRepairs_);
             touched[neighbor.geometry_][neighbor.triangle_ / 3] = true;
             removed[flat.geometry_][flat.triangle_ / 3] = true;
@@ -851,19 +854,22 @@ void RepairFlatTriangles(CsgTriangulatedModel& model)
         {
             ea::vector<unsigned>& indices = model.geometries_[g].indexData_;
             ea::vector<unsigned>& sources = model.geometries_[g].triangleSources_;
+            const bool hasSources = sources.size() * 3 == indices.size();
             unsigned out = 0;
             for (unsigned i = 0; i + 2 < indices.size(); i += 3)
             {
                 if (i / 3 < removed[g].size() && removed[g][i / 3])
                     continue;
                 // The source table keeps one entry for each triangle, in the same order.
-                sources[out / 3] = sources[i / 3];
+                if (hasSources)
+                    sources[out / 3] = sources[i / 3];
                 indices[out++] = indices[i];
                 indices[out++] = indices[i + 1];
                 indices[out++] = indices[i + 2];
             }
             indices.resize(out);
-            sources.resize(out / 3);
+            if (hasSources)
+                sources.resize(out / 3);
         }
     }
 }

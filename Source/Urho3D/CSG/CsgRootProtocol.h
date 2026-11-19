@@ -30,7 +30,7 @@ constexpr int CsgRootPickVersion = 1;
 /// P_SOURCE is the node ID of the brush that made the hit face. 0 is the base model or an unknown source.
 /// P_POSITION is in world space. P_NORMAL is the unit world normal of the front face of the hit triangle.
 /// P_DISTANCE is the distance from the origin to the hit position in world units.
-/// The ray hits only front faces. The nearest hit wins.
+/// The ray hits only front faces: the outward side of the solid, also for a mirrored root. The nearest hit wins.
 /// The root uses only the applied result. A disabled root or a root that needs a rebuild still answers.
 /// P_HIT is false if no result is applied, the direction is zero or the ray hits no front face.
 URHO3D_EVENT(E_CSGROOTPICK, CsgRootPick)
