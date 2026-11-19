@@ -647,6 +647,7 @@ void CsgRoot::HandleQueryStats(StringHash /*eventType*/, VariantMap& eventData)
     eventData[P_REBUILDMS] = stats.booleanMs_ + stats.triangulateMs_ + stats.buildModelMs_;
     eventData[P_REUSEDOPERANDS] = stats.operandCount_ - ea::min(stats.operandCount_, stats.foldSteps_);
     eventData[P_BUILDING] = rebuildInFlight_;
+    eventData[P_DIRTY] = rebuildDirty_ || HasPendingResult();
     eventData[P_ERROR] = error;
 }
 

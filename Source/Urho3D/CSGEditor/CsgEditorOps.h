@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "Urho3D/CSGEditor/CsgShapeEditOps.h"
+
 #include <Urho3D/Container/Str.h>
 #include <Urho3D/Math/Vector3.h>
 
@@ -201,8 +203,14 @@ BakedModelPath ChooseBakedModelPath(Context* context, ea::span<const ea::string>
 /// A failed write removes the file.
 bool SaveBakedModel(Context* context, Node* rootNode, const ea::string& fileName);
 
-/// Create the sibling node "<root name> Baked" with a StaticModel. The node has the world transform of the root node.
-/// The model comes from the resource cache. The materials are those of the result of the root.
+/// Return true if the result of the root is final: no build runs and no rebuild is pending.
+/// A bake of a result that is not final saves an old model.
+bool CanBakeNow(const RootStats& stats);
+
+/// Create the sibling node "<root name> Baked" with a StaticModel. The node has the local transform of the root node.
+/// The two nodes have the same parent, so the world transforms are equal.
+/// The model comes from the resource cache. The function releases a cached model of that name first, so a reused
+/// file name loads the new file. The materials are those of the result of the root.
 /// Return null with an error log if the root node has no parent or the model does not load.
 Node* CreateBakedNode(Node* rootNode, const ea::string& modelResourceName);
 

@@ -160,6 +160,8 @@ struct RootStats
     float rebuildMs_{};
     unsigned reusedOperands_{};
     bool building_{};
+    /// A rebuild is requested or pending and the result is not applied yet.
+    bool dirty_{};
     /// The reason of an invalid result. Empty for a valid result.
     ea::string error_;
 };

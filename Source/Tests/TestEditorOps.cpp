@@ -1589,6 +1589,28 @@ TEST_CASE("ChooseBakedModelPath names the file and never overwrites", "[editorop
     CHECK(ChooseBakedModelPath(f.context, none, fallback, "Wall").fileName_ == fallback + "Models/Wall_Baked_2.mdl");
     CHECK(ChooseBakedModelPath(f.context, none, fallback + "Nope/", "Wall").fileName_.empty());
     CHECK(ChooseBakedModelPath(f.context, {}, "", "Wall").fileName_.empty());
+
+    // A scene without a file has an empty hint. Then the data directory of the project is the fallback.
+    const ea::vector<ea::string> unsaved{EMPTY_STRING};
+    const BakedModelPath unsavedPath = ChooseBakedModelPath(f.context, unsaved, fallback, "Wall");
+    CHECK(unsavedPath.resourceName_ == "Models/Wall_Baked_2.mdl");
+    CHECK(unsavedPath.fileName_ == fallback + "Models/Wall_Baked_2.mdl");
+    // A fallback without the final slash gets one.
+    const ea::string noSlash = fallback.substr(0, fallback.length() - 1);
+    CHECK(ChooseBakedModelPath(f.context, unsaved, noSlash, "Wall").fileName_ == unsavedPath.fileName_);
+}
+
+TEST_CASE("CanBakeNow refuses a root that builds or has a pending rebuild", "[editorops][bake]")
+{
+    RootStats stats;
+    CHECK(CanBakeNow(stats));
+    stats.building_ = true;
+    CHECK_FALSE(CanBakeNow(stats));
+    stats.building_ = false;
+    stats.dirty_ = true;
+    CHECK_FALSE(CanBakeNow(stats));
+    stats.building_ = true;
+    CHECK_FALSE(CanBakeNow(stats));
 }
 
 TEST_CASE("SaveBakedModel writes the result and CreateBakedNode uses it", "[editorops][bake]")
@@ -1632,6 +1654,56 @@ TEST_CASE("SaveBakedModel writes the result and CreateBakedNode uses it", "[edit
         CHECK(bakedModel->GetModel()->GetNumGeometries() == result->GetModel()->GetNumGeometries());
         CHECK(bakedModel->GetModel()->GetBoundingBox().max_.Equals(result->GetModel()->GetBoundingBox().max_));
         CHECK(bakedModel->GetMaterialsAttr().names_ == result->GetMaterialsAttr().names_);
+    }
+
+    SECTION("The baked node keeps the world matrix of a root with non-uniform scale under a scaled parent")
+    {
+        Node* parent = f.scene->CreateChild("Parent");
+        parent->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+        parent->SetScale(Vector3(1.0f, 2.0f, 1.0f));
+        rootNode->SetParent(parent);
+        rootNode->SetTransform(Vector3(5.0f, 1.0f, 0.0f), Quaternion(30.0f, Vector3::UP), Vector3(1.0f, 1.5f, 3.0f));
+        f.MaxX(rootNode);
+
+        const ea::vector<ea::string> hints{"Level.scene"};
+        const BakedModelPath path = ChooseBakedModelPath(f.context, hints, "", rootNode->GetName());
+        REQUIRE(SaveBakedModel(f.context, rootNode, path.fileName_));
+        Node* baked = CreateBakedNode(rootNode, path.resourceName_);
+        REQUIRE(baked);
+        CHECK(baked->GetParent() == parent);
+        const Matrix3x4 expected = rootNode->GetWorldTransform();
+        const Matrix3x4 actual = baked->GetWorldTransform();
+        const Matrix4 e = expected.ToMatrix4();
+        const Matrix4 a = actual.ToMatrix4();
+        for (int row = 0; row < 3; ++row)
+        {
+            for (int column = 0; column < 4; ++column)
+                CHECK(a.Element(row, column) == Catch::Approx(e.Element(row, column)).margin(1e-5f));
+        }
+    }
+
+    SECTION("A reused file name loads the new file and not the cached model")
+    {
+        const ea::vector<ea::string> hints{"Level.scene"};
+        const BakedModelPath path = ChooseBakedModelPath(f.context, hints, "", rootNode->GetName());
+        REQUIRE(SaveBakedModel(f.context, rootNode, path.fileName_));
+        Node* first = CreateBakedNode(rootNode, path.resourceName_);
+        REQUIRE(first);
+        const float firstMax = first->GetComponent<StaticModel>()->GetModel()->GetBoundingBox().max_.x_;
+
+        // Another root has another result. Its model replaces the file.
+        Node* other = f.MakeRoot();
+        other->SetName("Other");
+        AddBrushNode(other, "Csg/BoxB.mdl", f.FindOperation("Union"), Vector3(1.0f, 0.0f, 0.0f));
+        REQUIRE(f.MaxX(other) == Catch::Approx(2.0f).margin(1e-3f));
+        REQUIRE(SaveBakedModel(f.context, other, path.fileName_));
+        const float otherMax = FindResultStaticModel(other)->GetModel()->GetBoundingBox().max_.x_;
+        REQUIRE(otherMax != Catch::Approx(firstMax).margin(1e-3f));
+
+        Node* second = CreateBakedNode(rootNode, path.resourceName_);
+        REQUIRE(second);
+        CHECK(second->GetComponent<StaticModel>()->GetModel()->GetBoundingBox().max_.x_
+            == Catch::Approx(otherMax).margin(1e-3f));
     }
 
     SECTION("A root with no result and a root with no parent fail")

@@ -7012,6 +7012,27 @@ TEST_CASE("CsgRoot answers the stats query event", "[root][stats]")
         RunFrames(root, workQueue, 60);
     }
 
+    SECTION("The flag dirty is true from the request until the result is applied")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Edited");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        VariantMap clean;
+        root->SendEvent(E_CSGROOTQUERYSTATS, clean);
+        CHECK(!clean[P_DIRTY].GetBool());
+        CHECK(!clean[P_BUILDING].GetBool());
+
+        root->RequestRebuild();
+        VariantMap pending;
+        root->SendEvent(E_CSGROOTQUERYSTATS, pending);
+        CHECK(pending[P_DIRTY].GetBool());
+
+        BuildFully(root, workQueue);
+        VariantMap done;
+        root->SendEvent(E_CSGROOTQUERYSTATS, done);
+        CHECK(!done[P_DIRTY].GetBool());
+    }
+
     SECTION("An invalid fold reports valid false and a reason")
     {
         CsgRoot* root = scene->CreateChild("Open")->CreateComponent<CsgRoot>();

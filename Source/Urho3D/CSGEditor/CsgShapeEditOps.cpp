@@ -381,6 +381,7 @@ bool QueryRootStats(Component* root, RootStats& stats)
     stats.rebuildMs_ = eventData[P_REBUILDMS].GetFloat();
     stats.reusedOperands_ = eventData[P_REUSEDOPERANDS].GetUInt();
     stats.building_ = eventData[P_BUILDING].GetBool();
+    stats.dirty_ = eventData[P_DIRTY].GetBool();
     stats.error_ = eventData[P_ERROR].GetString();
     return true;
 }

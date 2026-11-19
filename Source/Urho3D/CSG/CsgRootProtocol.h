@@ -52,13 +52,15 @@ constexpr int CsgRootQueryStatsVersion = 1;
 /// Read the diagnostics of the root.
 /// In: none. The editor sends the event to the root component.
 /// Out: P_VERSION (int), P_VALID (bool), P_BRUSHCOUNT (unsigned), P_TRIANGLES (unsigned), P_VERTICES (unsigned),
-/// P_REBUILDMS (float), P_REUSEDOPERANDS (unsigned), P_BUILDING (bool) and P_ERROR (string).
+/// P_REBUILDMS (float), P_REUSEDOPERANDS (unsigned), P_BUILDING (bool), P_DIRTY (bool) and P_ERROR (string).
 /// The numbers describe the last applied build. A root that built nothing has zeros and P_VALID false.
 /// P_VALID is the valid flag of the fold result. P_BRUSHCOUNT is the number of operands of that build.
 /// P_TRIANGLES and P_VERTICES are the sizes of the applied result model.
 /// P_REBUILDMS is the job time in milliseconds: boolean, triangulation and model build.
 /// P_REUSEDOPERANDS is the number of operands that the build took from the cached fold states (the prefix).
-/// P_BUILDING is true while a build job runs. P_ERROR is empty for a valid result.
+/// P_BUILDING is true while a build job runs.
+/// P_DIRTY is true while a rebuild is requested or pending and the result is not applied yet.
+/// P_ERROR is empty for a valid result.
 /// Else it tells why: a failed build, an open solid, open edges, duplicate or degenerate triangles, or no volume.
 /// The root does not know which brush made the problem, so the event has no brush ID.
 /// A component that is not a root does not answer. Then P_VERSION is not in the event data.
@@ -72,6 +74,7 @@ URHO3D_EVENT(E_CSGROOTQUERYSTATS, CsgRootQueryStats)
     URHO3D_PARAM(P_REBUILDMS, RebuildMs); // float
     URHO3D_PARAM(P_REUSEDOPERANDS, ReusedOperands); // unsigned
     URHO3D_PARAM(P_BUILDING, Building); // bool
+    URHO3D_PARAM(P_DIRTY, Dirty); // bool
     URHO3D_PARAM(P_ERROR, Error); // string
 }
 

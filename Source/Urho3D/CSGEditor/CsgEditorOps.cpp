@@ -588,6 +588,11 @@ bool SaveBakedModel(Context* context, Node* rootNode, const ea::string& fileName
     return saved;
 }
 
+bool CanBakeNow(const RootStats& stats)
+{
+    return !stats.building_ && !stats.dirty_;
+}
+
 Node* CreateBakedNode(Node* rootNode, const ea::string& modelResourceName)
 {
     Node* parent = rootNode ? rootNode->GetParent() : nullptr;
@@ -598,12 +603,15 @@ Node* CreateBakedNode(Node* rootNode, const ea::string& modelResourceName)
         return nullptr;
     }
     auto* cache = rootNode->GetSubsystem<ResourceCache>();
+    // A cached model of the same name can be old, because a file name can be used again.
+    cache->ReleaseResource<Model>(modelResourceName, true);
     auto* model = cache->GetResource<Model>(modelResourceName);
     if (!model)
         return nullptr;
 
     Node* baked = parent->CreateChild(rootNode->GetName() + " Baked");
-    baked->SetWorldTransform(rootNode->GetWorldPosition(), rootNode->GetWorldRotation(), rootNode->GetWorldScale());
+    // The local transform keeps shear and non-uniform scale. A world decomposition loses them.
+    baked->SetTransform(rootNode->GetPosition(), rootNode->GetRotation(), rootNode->GetScale());
     auto* staticModel = baked->CreateComponent<StaticModel>();
     staticModel->SetModel(model);
     staticModel->SetMaterialsAttr(result->GetMaterialsAttr());

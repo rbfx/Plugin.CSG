@@ -534,6 +534,13 @@ void CsgEditorAddon::BakeToAsset()
     if (!root || !rootNode->GetParent())
         return;
 
+    RootStats stats;
+    if (!QueryRootStats(root, stats) || !CanBakeNow(stats))
+    {
+        URHO3D_LOGWARNING("Bake to Asset: the result is still building. Try again.");
+        return;
+    }
+
     // The resource directory comes from the scene file, or else it is the data directory of the project.
     const ea::vector<ea::string> hints{scene->GetFileName()};
     const ea::string dataPath = owner_->GetProject() ? owner_->GetProject()->GetDataPath() : EMPTY_STRING;
