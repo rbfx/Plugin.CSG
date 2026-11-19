@@ -464,7 +464,7 @@ The handles of each shape:
 
 - `CsgRoot::SaveResultModel(Serializer&)` saves the applied result with `Model::Save`. It returns false if the root has no result. The materials stay outside the file.
 - The command "Bake to Asset" is in the CSG menu and in the overlay of the root. It needs a root with a result and a parent node.
-- The file is `Models/<root name>_Baked.mdl` in the resource directory of the scene file. If the scene has no resource file name, the directory of the base model of the root is used. Without both, the command logs an error.
+- The file is `Models/<root name>_Baked.mdl` in the resource directory of the scene file. If the scene has no resource file name, the data directory of the project is used. Without both, the command logs an error.
 - The command never overwrites a file. It appends _1, _2 and so on to the name.
 - One undo step adds the sibling node "<root name> Baked" and disables the `CsgRoot` component. The node has the world transform of the root. Its `StaticModel` has the saved model and the materials of the result.
 - Undo removes the new node and enables the root. The file stays on the disk.

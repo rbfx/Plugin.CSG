@@ -12,6 +12,7 @@
 #include <Editor/Core/IniHelpers.h>
 #include <Editor/Core/CommonEditorActionBuilders.h>
 #include <Editor/Foundation/SceneViewTab/SceneSelectionRenderer.h>
+#include <Editor/Project/Project.h>
 #include <Editor/Foundation/SceneViewTab/TransformManipulator.h>
 
 #include <Urho3D/Core/Context.h>
@@ -533,9 +534,10 @@ void CsgEditorAddon::BakeToAsset()
     if (!root || !rootNode->GetParent())
         return;
 
-    // The resource directory comes from the scene file, or else from the base model of the root.
-    const ea::vector<ea::string> hints{scene->GetFileName(), root->GetAttribute("Model").GetResourceRef().name_};
-    const BakedModelPath path = ChooseBakedModelPath(context_, hints, rootNode->GetName());
+    // The resource directory comes from the scene file, or else it is the data directory of the project.
+    const ea::vector<ea::string> hints{scene->GetFileName()};
+    const ea::string dataPath = owner_->GetProject() ? owner_->GetProject()->GetDataPath() : EMPTY_STRING;
+    const BakedModelPath path = ChooseBakedModelPath(context_, hints, dataPath, rootNode->GetName());
     if (path.fileName_.empty())
     {
         URHO3D_LOGERROR("Cannot bake: save the scene in a resource directory first");

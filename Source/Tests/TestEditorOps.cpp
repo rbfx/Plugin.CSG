@@ -1566,25 +1566,29 @@ TEST_CASE("ChooseBakedModelPath names the file and never overwrites", "[editorop
     dir.WriteFile("Level.scene", "x");
     const ea::vector<ea::string> hints{"", "Level.scene"};
 
-    const BakedModelPath first = ChooseBakedModelPath(f.context, hints, "Wall");
+    const BakedModelPath first = ChooseBakedModelPath(f.context, hints, "", "Wall");
     CHECK(first.resourceName_ == "Models/Wall_Baked.mdl");
     CHECK(first.fileName_.ends_with("/Models/Wall_Baked.mdl"));
 
     std::filesystem::create_directories(dir.path_ / "Models");
     dir.WriteFile("Models/Wall_Baked.mdl", "x");
-    const BakedModelPath second = ChooseBakedModelPath(f.context, hints, "Wall");
+    const BakedModelPath second = ChooseBakedModelPath(f.context, hints, "", "Wall");
     CHECK(second.resourceName_ == "Models/Wall_Baked_1.mdl");
     dir.WriteFile("Models/Wall_Baked_1.mdl", "x");
-    CHECK(ChooseBakedModelPath(f.context, hints, "Wall").resourceName_ == "Models/Wall_Baked_2.mdl");
+    CHECK(ChooseBakedModelPath(f.context, hints, "", "Wall").resourceName_ == "Models/Wall_Baked_2.mdl");
 
     // A name with a separator or a space stays one plain file name. An empty name gets a default.
-    CHECK(ChooseBakedModelPath(f.context, hints, "A b/c").resourceName_ == "Models/A_b_c_Baked.mdl");
-    CHECK(ChooseBakedModelPath(f.context, hints, "").resourceName_ == "Models/CSG_Baked.mdl");
+    CHECK(ChooseBakedModelPath(f.context, hints, "", "A b/c").resourceName_ == "Models/A_b_c_Baked.mdl");
+    CHECK(ChooseBakedModelPath(f.context, hints, "", "").resourceName_ == "Models/CSG_Baked.mdl");
 
     // No hint with a file gives no path.
     const ea::vector<ea::string> none{"", "Missing/File.scene"};
-    CHECK(ChooseBakedModelPath(f.context, none, "Wall").resourceName_.empty());
-    CHECK(ChooseBakedModelPath(f.context, {}, "Wall").fileName_.empty());
+    CHECK(ChooseBakedModelPath(f.context, none, "", "Wall").resourceName_.empty());
+    // The fallback directory works without a hint. A directory that does not exist does not.
+    const ea::string fallback = ea::string(dir.path_.string().c_str()) + "/";
+    CHECK(ChooseBakedModelPath(f.context, none, fallback, "Wall").fileName_ == fallback + "Models/Wall_Baked_2.mdl");
+    CHECK(ChooseBakedModelPath(f.context, none, fallback + "Nope/", "Wall").fileName_.empty());
+    CHECK(ChooseBakedModelPath(f.context, {}, "", "Wall").fileName_.empty());
 }
 
 TEST_CASE("SaveBakedModel writes the result and CreateBakedNode uses it", "[editorops][bake]")
@@ -1607,12 +1611,12 @@ TEST_CASE("SaveBakedModel writes the result and CreateBakedNode uses it", "[edit
     SECTION("The saved file loads back as the result model")
     {
         const ea::vector<ea::string> hints{"Level.scene"};
-        const BakedModelPath path = ChooseBakedModelPath(f.context, hints, rootNode->GetName());
+        const BakedModelPath path = ChooseBakedModelPath(f.context, hints, "", rootNode->GetName());
         REQUIRE(!path.fileName_.empty());
         REQUIRE(SaveBakedModel(f.context, rootNode, path.fileName_));
         CHECK(std::filesystem::exists(path.fileName_.c_str()));
         // The next choice skips the file.
-        CHECK(ChooseBakedModelPath(f.context, hints, rootNode->GetName()).resourceName_ != path.resourceName_);
+        CHECK(ChooseBakedModelPath(f.context, hints, "", rootNode->GetName()).resourceName_ != path.resourceName_);
 
         Node* baked = CreateBakedNode(rootNode, path.resourceName_);
         REQUIRE(baked);

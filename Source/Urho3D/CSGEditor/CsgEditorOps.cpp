@@ -509,8 +509,8 @@ StaticModel* FindResultStaticModel(Node* rootNode)
     return nullptr;
 }
 
-BakedModelPath ChooseBakedModelPath(
-    Context* context, ea::span<const ea::string> hintResourceNames, const ea::string& rootNodeName)
+BakedModelPath ChooseBakedModelPath(Context* context, ea::span<const ea::string> hintResourceNames,
+    const ea::string& fallbackDirectory, const ea::string& rootNodeName)
 {
     auto cache = context ? context->GetSubsystem<ResourceCache>() : nullptr;
     auto fileSystem = context ? context->GetSubsystem<FileSystem>() : nullptr;
@@ -538,6 +538,8 @@ BakedModelPath ChooseBakedModelPath(
             break;
         }
     }
+    if (directory.empty() && !fallbackDirectory.empty() && fileSystem->DirExists(fallbackDirectory))
+        directory = fallbackDirectory.ends_with("/") ? fallbackDirectory : fallbackDirectory + "/";
     if (directory.empty())
         return {};
 

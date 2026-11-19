@@ -187,12 +187,14 @@ struct BakedModelPath
 };
 
 /// Choose the file for the baked model of a root: "Models/<name>_Baked.mdl" in a resource directory.
-/// The resource directory is that of the first hint that is a resource with a file name. A hint is a resource name,
-/// for example the scene file or the model of the root. The function never chooses an existing file.
+/// The resource directory is that of the first hint that is a resource with a file name. A hint is a resource name
+/// or an absolute file name, for example the scene file. If no hint works, the fallback directory is used.
+/// The fallback is an absolute directory name with a final slash, or empty. It must be a resource directory.
+/// The function never chooses an existing file.
 /// It appends _1, _2 and so on to the name. The name of the node gets only letters, digits, '_', '-' and '.'.
-/// Return empty names if no hint gives a resource directory.
-BakedModelPath ChooseBakedModelPath(
-    Context* context, ea::span<const ea::string> hintResourceNames, const ea::string& rootNodeName);
+/// Return empty names if no hint and no fallback gives a directory.
+BakedModelPath ChooseBakedModelPath(Context* context, ea::span<const ea::string> hintResourceNames,
+    const ea::string& fallbackDirectory, const ea::string& rootNodeName);
 
 /// Save the result model of the root node to the file with Model::Save. The directory of the file must exist or
 /// the function makes it. Return false with an error log if the root has no result or the write fails.
