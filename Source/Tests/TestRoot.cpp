@@ -950,7 +950,7 @@ TEST_CASE("CsgRoot refuses to bake after a failed build", "[root]")
     CHECK(stats.valid_);
     CHECK(stats.degenerates_ == 0);
 
-    // The epsilon changes, but the build fails. The root discards the cache.
+    // The epsilon changes, but the build fails. The cache keeps the old epsilon.
     CsgRoot::SetTestBuildHook([] { throw std::runtime_error("test failure"); });
     root->SetEpsilon(2e-4f);
     RunFrames(root, workQueue, 60);
@@ -1568,7 +1568,7 @@ TEST_CASE("CsgRoot discards the fold states while it is inactive", "[root]")
     CheckSameOutput(root, fresh);
 }
 
-TEST_CASE("CsgRoot discards the fold states after a failed build", "[root]")
+TEST_CASE("CsgRoot keeps the fold states after a failed build", "[root]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
@@ -1590,10 +1590,119 @@ TEST_CASE("CsgRoot discards the fold states after a failed build", "[root]")
     RunFrames(root, workQueue, 60);
     REQUIRE(root->GetLastBuildFailed());
 
-    // The next build has no cache, so it evaluates all steps.
+    // The cache of the last good build stays, so the next build evaluates only the last step.
     CsgRoot::SetTestBuildHook(nullptr);
     brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.5f, 0.0f));
     RunFrames(root, workQueue, 60);
     REQUIRE(!root->GetLastBuildFailed());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[2]->GetNode()->SetPosition(Vector3(1.5f, 0.5f, 0.0f));
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+}
+
+namespace
+{
+
+/// Load the data of the source model into the target model, then send the reload event.
+void ReloadModel(Model* target, Model* source)
+{
+    VectorBuffer data;
+    REQUIRE(source->Save(data));
+    data.Seek(0);
+    REQUIRE(target->Load(data));
+    target->SendEvent(E_RELOADFINISHED);
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot sees a reload after a build that ends while the root is inactive", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    // Model::Load looks for a metadata file. The file system has no mount points, so the search finds nothing.
+    context->RegisterSubsystem<VirtualFileSystem>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    SharedPtr<Model> reloaded = AddBoxModel(context, "Csg/BoxC.mdl", Vector3::ONE);
+    SharedPtr<Model> small = AddBoxModel(context, "Csg/Small.mdl", Vector3(0.5f, 0.5f, 0.5f));
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "InFlight");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[0]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxC.mdl"));
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    // The work queue of the test has no worker threads, so the job waits until the next frame.
+    brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.1f, 0.0f));
+    root->Rebuild();
+    root->SetEnabled(false);
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    ReloadModel(reloaded, small);
+    root->SetEnabled(true);
+    brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
     CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[0]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Small.mdl"));
+    expected[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+}
+
+TEST_CASE("CsgRoot sees a reload of a cached model during a build that becomes stale", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    // Model::Load looks for a metadata file. The file system has no mount points, so the search finds nothing.
+    context->RegisterSubsystem<VirtualFileSystem>();
+
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    SharedPtr<Model> reloaded = AddBoxModel(context, "Csg/BoxC.mdl", Vector3::ONE);
+    SharedPtr<Model> small = AddBoxModel(context, "Csg/Small.mdl", Vector3(0.5f, 0.5f, 0.5f));
+
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Stale");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[1]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxC.mdl"));
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetLastBuildStats().valid_);
+
+    // The removal starts a build without the second brush. Only the cache uses the model of that brush now.
+    Node* secondNode = brushes[1]->GetNode();
+    const auto& children = root->GetNode()->GetChildren();
+    const unsigned secondIndex =
+        static_cast<unsigned>(ea::find(children.begin(), children.end(), SharedPtr<Node>(secondNode)) - children.begin());
+    secondNode->SetParent(scene);
+    ReloadModel(reloaded, small);
+    // The second brush comes back at its old index. This makes the build in flight stale.
+    root->GetNode()->AddChild(secondNode, secondIndex);
+    REQUIRE(root->GetNode()->GetChildren()[secondIndex] == secondNode);
+    brushes[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    // The reload discards all states, so the build evaluates all steps.
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    expected[1]->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Small.mdl"));
+    expected[2]->GetNode()->SetPosition(Vector3(1.5f, 0.25f, 0.0f));
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
 }

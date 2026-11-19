@@ -424,12 +424,6 @@ void CsgRoot::UpdateSubscriptions()
             oldNode->RemoveListener(this);
     }
     listenedNodes_.clear();
-    if (!isActive)
-    {
-        // An inactive root does not see a reload, so the cached fold states can become stale.
-        UnwatchModels();
-        ClearBuildCache();
-    }
     UnsubscribeFromEvent(E_NODEADDED);
     UnsubscribeFromEvent(E_NODEREMOVED);
 
@@ -480,41 +474,60 @@ void CsgRoot::UpdateSubscriptions()
     }
 }
 
-void CsgRoot::WatchModels(Model* baseModel, const ea::vector<BrushStep>& operands)
+void CsgRoot::UpdateWatchedModels(const BuildJob* job)
 {
-    // The cached fold states contain the geometry of these models. A reload changes the geometry in place.
-    UnwatchModels();
-    const auto watch = [this](Model* model)
+    // The set covers each model with geometry in the cache or in the build in flight. A reload changes the
+    // geometry in place. The root listens also while it is inactive, because the cache stays.
+    ea::vector<Model*> models;
+    const auto add = [&models](Model* model)
     {
-        if (!model)
-            return;
-        for (const WeakPtr<Model>& existing : watchedModels_)
+        if (model && ea::find(models.begin(), models.end(), model) == models.end())
+            models.push_back(model);
+    };
+    if (cachedBaseSolid_)
+    {
+        add(cachedBaseModel_);
+        for (const BrushFingerprint& fingerprint : cachedBrushes_)
+            add(fingerprint.model_);
+    }
+    if (job)
+    {
+        add(job->baseModel_);
+        for (const BrushStep& operand : job->operands_)
+            add(operand.model_);
+    }
+    // The handler of a reload can start a build. The root must not remove the handler that runs.
+    add(reloadingModel_);
+
+    for (unsigned i = 0; i < watchedModels_.size();)
+    {
+        Model* model = watchedModels_[i];
+        if (model && ea::find(models.begin(), models.end(), model) != models.end())
         {
-            if (existing == model)
-                return;
+            ++i;
+            continue;
         }
+        if (model)
+            UnsubscribeFromEvent(model, E_RELOADFINISHED);
+        watchedModels_.erase(watchedModels_.begin() + i);
+    }
+    for (Model* model : models)
+    {
+        const auto isWatched = [model](const WeakPtr<Model>& watched) { return watched == model; };
+        if (ea::find_if(watchedModels_.begin(), watchedModels_.end(), isWatched) != watchedModels_.end())
+            continue;
         watchedModels_.push_back(WeakPtr<Model>(model));
         SubscribeToEvent(model, E_RELOADFINISHED, URHO3D_HANDLER(CsgRoot, HandleModelReloaded));
-    };
-    watch(baseModel);
-    for (const BrushStep& operand : operands)
-        watch(operand.model_);
-}
-
-void CsgRoot::UnwatchModels()
-{
-    for (const WeakPtr<Model>& weakModel : watchedModels_)
-    {
-        if (Model* model = weakModel)
-            UnsubscribeFromEvent(model, E_RELOADFINISHED);
     }
-    watchedModels_.clear();
 }
 
 void CsgRoot::HandleModelReloaded(StringHash /*eventType*/, VariantMap& /*eventData*/)
 {
+    // An inactive root does not start a build here. ScheduleDeferredRebuild checks the state.
+    reloadingModel_ = static_cast<Model*>(GetEventSender());
     ClearBuildCache();
     RequestRebuild();
+    reloadingModel_ = nullptr;
 }
 
 void CsgRoot::HandleNodeAdded(StringHash /*eventType*/, VariantMap& eventData)
@@ -544,7 +557,10 @@ void CsgRoot::HandleNodeRemoved(StringHash /*eventType*/, VariantMap& eventData)
 
     if (brush->root_ == this)
         brush->root_ = nullptr;
+    // The rebuild request can start a build at once. That build must not use the node that leaves.
+    removedChild_ = child;
     UnregisterBrushInternal(brush);
+    removedChild_ = nullptr;
 }
 
 void CsgRoot::RegisterBrushInternal(CsgBrush* brush, bool requestRebuild)
@@ -844,7 +860,7 @@ void CsgRoot::Rebuild()
     const Matrix3x4 rootFrame = Matrix3x4(Vector3::ZERO, Quaternion::IDENTITY, job->metricScale_) *
         node_->GetWorldTransform().Inverse();
     const bool hasOperands = BuildOperands(job->operands_, rootFrame, tempB, job->sourceModels_, job->sourceMaterials_);
-    WatchModels(job->baseModel_, job->operands_);
+    UpdateWatchedModels(job.get());
     if (!hasOperands)
     {
         ClearBuildCache();
@@ -1038,16 +1054,17 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     // Drop stale results.
     if (root->rebuildRequestId_ != job->buildId_)
     {
+        root->UpdateWatchedModels(nullptr);
         if (root->rebuildDirty_)
             root->Rebuild();
         return;
     }
 
-    // A failed build keeps the dirty brushes and the output. The build already changed the watched models,
-    // so the root discards the cache.
+    // A failed build changes nothing: the cache, the dirty brushes and the output stay as they are.
+    // The watch set drops the models of the failed build that the cache does not use.
     if (job->failed_)
     {
-        root->ClearBuildCache();
+        root->UpdateWatchedModels(nullptr);
         if (root->autoApplyResults_)
             root->lastBuildFailed_ = true;
         else
@@ -1110,6 +1127,8 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     root->cachedMinComponentVolumeFraction_ = job->minComponentVolumeFraction_;
     root->cachedSourceModels_ = job->sourceModels_;
     root->cachedSourceMaterials_ = job->sourceMaterials_;
+    // The watch set now follows the stored cache.
+    root->UpdateWatchedModels(nullptr);
 
     if (root->autoApplyResults_)
     {
@@ -1270,7 +1289,7 @@ bool CsgRoot::BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& ro
     for (Node* child : node_->GetChildren())
     {
         // A child without a parent is in removal.
-        if (!child || !child->IsEnabled() || !child->GetParent())
+        if (!child || !child->IsEnabled() || !child->GetParent() || child == removedChild_)
             continue;
 
         // A child with its own root builds on its own.

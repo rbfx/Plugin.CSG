@@ -248,9 +248,8 @@ private:
     /// Collect the operands from the direct children of the node. Return false if there are no operands.
     bool BuildOperands(ea::vector<BrushStep>& operands, const Matrix3x4& rootFrame, StaticModel* tempModel,
         ea::vector<SharedPtr<Model>>& sourceModels, ea::vector<ResourceRefList>& sourceMaterials);
-    /// Listen for a reload of the base model and of the operand models. Stop to listen for other models.
-    void WatchModels(Model* baseModel, const ea::vector<BrushStep>& operands);
-    void UnwatchModels();
+    /// Listen for a reload of each model of the cache and of the build job. Stop to listen for other models.
+    void UpdateWatchedModels(const BuildJob* job);
     void HandleModelReloaded(StringHash eventType, VariantMap& eventData);
     void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
     void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
@@ -309,6 +308,10 @@ private:
     ea::vector<WeakPtr<CsgBrush>> brushes_;
     /// Models that the root listens to for a reload.
     ea::vector<WeakPtr<Model>> watchedModels_;
+    /// Model that sends the reload event that the root handles now.
+    Model* reloadingModel_{};
+    /// Child node that leaves the root now. The scene sends the removal event before the parent changes.
+    Node* removedChild_{};
 
     unsigned ignoreChildDirtyFrame_{};
 };
