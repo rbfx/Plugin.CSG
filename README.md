@@ -260,6 +260,20 @@ Drag a model (`.mdl`) from the resource browser into the scene view. The active 
 
 During the drag, the scene shows a preview. The preview brush of the "add" case is disabled, so the CSG result does not change and does not rebuild until the drop. A move out of the view removes the preview.
 
+### Textures and materials
+
+Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.dds`, `.bmp`, `.webp`, `.ktx`) from the resource browser onto the scene view. The selected brushes get the material.
+
+- A brush is selected: slot 0 of the attribute "Materials" of each selected brush gets the material. A model brush and a procedural brush work the same way. The other slots stay. Hold Shift to set all slots. One undo step restores all materials.
+- A texture: the addon makes a material for the texture, then assigns it. The material file goes next to the texture file, with the same base name and the extension `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.material` in the same resource directory. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten.
+- A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
+- Only a CSG root is selected, with no brush: the drop does nothing. A tooltip shows "Select a brush to assign a material".
+- No selected brush and no root: the stock editor handlers take the drop, as before.
+
+During the drag, the tooltip shows "Material: <name>". A material shows as a live preview on the brushes. A texture shows the preview only if its material file exists. The addon makes the file when you release the button.
+
+The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the texture projection. See "UV projection".
+
 ### Manual check list
 
 The editor has no test harness for addons. Do these checks by hand:
@@ -311,6 +325,12 @@ The editor has no test harness for addons. Do these checks by hand:
 45. Add a second box next to the first one with the same material, "UV Mode" `Root` and the same "UV Scale". The texture continues over the joint with no step.
 46. Move the first box along X. The texture stays in place in the world. Set "UV Scale" to 2. The texture is half the size. Change "UV Offset". The texture slides.
 47. Add a `CsgBrush` with a model. Its "UV Mode" is `Local` and the texture looks as before. Set `Root`. The texture changes to the world projection.
+48. Select a brush. Drag a `.material` from the resource browser to the view. The tooltip shows "Material: <name>" and the brush shows the material. Release. Undo restores the old material. Redo sets it again.
+49. Drag a material onto a procedural box with Shift held. All six slots get the material. Without Shift only slot 0 gets it.
+50. Select two brushes. Drop a material. Both get it. One undo step restores both.
+51. Drag a `.png` that has no `.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
+52. Select only a CSG root. Drag a material to the view. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
+53. Select a plain node with a `StaticModel`. Drag a material onto the model. The stock editor assigns the material, as before.
 
 ## How to try the sample scene
 
