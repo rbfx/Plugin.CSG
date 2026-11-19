@@ -30,6 +30,8 @@ set (SOURCE_FILES
     CsgBoxBrush.h
     CsgSphereBrush.h
     CsgCylinderBrush.h
+    CsgRingBrush.cpp
+    CsgRingBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h

@@ -8,6 +8,7 @@
 #include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgCylinderBrush.h"
+#include "Urho3D/CSG/CsgRingBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
@@ -4325,6 +4326,418 @@ TEST_CASE("CsgCylinderBrush generates the model fast", "[root][procedural]")
     fine.heightSegments_ = 64;
     const double fineMs = measure(fine);
     WARN("Cylinder generation and model build: default " << defaultMs << " ms, 128x64 " << fineMs << " ms");
+    // A sanitizer build is much slower, so it gets a wider limit.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    const double slowFactor = 10.0;
+#else
+    const double slowFactor = 1.0;
+#endif
+    CHECK(defaultMs < 5.0 * slowFactor);
+    CHECK(fineMs < 50.0 * slowFactor);
+}
+
+namespace
+{
+
+/// Add a procedural ring brush under the node of the root.
+CsgRingBrush* AddProceduralRing(CsgRoot* root, const ea::string& name, const CsgRingParams& params, CsgOperation op,
+    const Vector3& position = Vector3::ZERO)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<CsgRingBrush>();
+    brush->SetParams(params);
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Add the model of a generated ring to the resource cache.
+void AddGeneratedRingModel(Context* context, const ea::string& name, const CsgRingParams& params)
+{
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateRing(params, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+}
+
+/// Return the exact volume of a ring polyhedron with a circular tube section and the tube angle 0.
+/// It is sin(step) times the integral of the radial coordinate over the section polygon (shoelace formula).
+double RingPolyhedronVolume(unsigned segments, unsigned tubeSegments, double radius, double tube, double arcDegrees)
+{
+    const double pi = 3.14159265358979323846;
+    double integral = 0.0;
+    for (unsigned j = 0; j < tubeSegments; ++j)
+    {
+        const double a0 = 2.0 * pi * j / tubeSegments;
+        const double a1 = 2.0 * pi * (j + 1) / tubeSegments;
+        const double x0 = radius + tube * std::cos(a0);
+        const double x1 = radius + tube * std::cos(a1);
+        integral += (x0 + x1) * (x0 * tube * std::sin(a1) - x1 * tube * std::sin(a0)) / 6.0;
+    }
+    return segments * std::sin(arcDegrees * pi / 180.0 / segments) * integral;
+}
+
+} // namespace
+
+TEST_CASE("CsgRingBrush is an operand with the polyhedron volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A ring alone gives the volume of the polyhedron")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgRingParams params;
+        params.radius_ = 1.0f;
+        params.tubeRadius_ = Vector2(0.3f, 0.3f);
+        CsgRingBrush* brush = AddProceduralRing(root, "Ring", params, CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(RingPolyhedronVolume(32, 12, 1.0, 0.3, 360.0)).epsilon(3e-3));
+    }
+
+    SECTION("An arc with end caps is closed and gives the volume of the polyhedron")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Arc");
+        CsgRingParams params;
+        params.radius_ = 1.0f;
+        params.tubeRadius_ = Vector2(0.3f, 0.3f);
+        params.arc_ = 180.0f;
+        AddProceduralRing(root, "Ring", params, CsgOperation::Union);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(RingPolyhedronVolume(32, 12, 1.0, 0.3, 180.0)).epsilon(3e-3));
+    }
+
+    SECTION("A subtract ring cuts the box and gives the same output as a model brush")
+    {
+        // The base box is the cube from -1 to 1. The ring crosses its side faces.
+        CsgRoot* root = MakeBoxRoot(scene, "Procedural");
+        CsgRingParams params;
+        params.radius_ = 1.0f;
+        params.tubeRadius_ = Vector2(0.3f, 0.25f);
+        AddProceduralRing(root, "Cut", params, CsgOperation::DifferenceAB, Vector3(0.0f, 0.1f, 0.0f));
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.1);
+        CHECK(errors.GetCount() == 0);
+
+        AddGeneratedRingModel(context, "Csg/GeneratedRing.mdl", params);
+        CsgRoot* expected = MakeBoxRoot(scene, "Model");
+        Node* cutNode = expected->GetNode()->CreateChild("Cut");
+        cutNode->SetPosition(Vector3(0.0f, 0.1f, 0.0f));
+        auto* cut = cutNode->CreateComponent<CsgBrush>();
+        cut->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/GeneratedRing.mdl"));
+        cut->SetOperation(CsgOperation::DifferenceAB);
+        BuildFully(expected, workQueue);
+        CheckSameOutput(root, expected);
+    }
+
+    SECTION("A ring united with a rotated box folds without a failure")
+    {
+        CsgRoot* united = MakeEmptyBaseRoot(scene, "United");
+        AddProceduralBox(united, "Box", Vector3::ZERO, Vector3(2.0f, 1.0f, 1.0f), CsgOperation::Union)
+            ->GetNode()->SetRotation(Quaternion(30.0f, Vector3(0.3f, 1.0f, 0.2f)));
+        CsgRingParams params;
+        params.radius_ = 0.8f;
+        params.tubeRadius_ = Vector2(0.3f, 0.2f);
+        params.tubeAngle_ = 45.0f;
+        params.tubeSegments_ = 4;
+        AddProceduralRing(united, "Ring", params, CsgOperation::Union, Vector3(0.7f, 0.1f, 0.2f));
+        BuildFully(united, workQueue);
+        CHECK(!united->GetLastBuildFailed());
+        CHECK(united->GetLastBuildStats().valid_);
+        CHECK(united->GetLastBuildStats().closed_);
+        CHECK(united->GetLastBuildStats().foldSteps_ == 2);
+        CHECK(united->GetLastBuildStats().volume_ > 2.0);
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgRingBrush* brush = AddProceduralRing(root, "Ring", CsgRingParams{}, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRingBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgRingBrush* third = AddProceduralRing(root, "Third", CsgRingParams{}, CsgOperation::Union, Vector3(1.2f, 0.0f, 0.0f));
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    double volume = root->GetLastBuildStats().volume_;
+
+    // The attribute path: SetAttribute and ApplyAttributes. The value is clamped.
+    Component* component = third;
+    CHECK(component->SetAttribute("Tube Radius", Vector2(0.3f, 0.3f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetTubeRadius() == Vector2(0.3f, 0.3f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.01);
+    volume = root->GetLastBuildStats().volume_;
+
+    CHECK(component->SetAttribute("Segments", 8));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSegments() == 8);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ < volume);
+
+    CHECK(component->SetAttribute("Tube Segments", 4));
+    CHECK(component->SetAttribute("Tube Angle", 45.0f));
+    CHECK(component->SetAttribute("Radius", 0.7f));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetTubeSegments() == 4);
+    CHECK(third->GetTubeAngle() == 45.0f);
+    CHECK(third->GetRadius() == 0.7f);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Arc", 120.0f));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetArc() == 120.0f);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Smooth Normals", false));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(!third->GetSmoothNormals());
+    CHECK(!component->GetAttribute("Smooth Normals").GetBool());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Radius", -1.0f));
+    CHECK(component->SetAttribute("Tube Radius", Vector2(1e9f, -1.0f)));
+    CHECK(component->SetAttribute("Segments", 1000));
+    CHECK(component->SetAttribute("Tube Segments", 0));
+    CHECK(component->SetAttribute("Arc", 1000.0f));
+    CHECK(component->SetAttribute("Tube Angle", -1000.0f));
+    component->ApplyAttributes();
+    CHECK(third->GetRadius() == CsgRingParams::MinRadius);
+    CHECK(third->GetTubeRadius().x_ == Catch::Approx(CsgRingParams::MinRadius * CsgRingParams::MaxInnerFraction));
+    CHECK(third->GetTubeRadius().y_ == CsgRingParams::MinTubeRadius);
+    CHECK(third->GetSegments() == 128);
+    CHECK(third->GetTubeSegments() == 3);
+    CHECK(third->GetArc() == 360.0f);
+    CHECK(third->GetTubeAngle() == -180.0f);
+    CHECK(component->GetAttribute("Segments").GetInt() == 128);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRingBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgRingParams params;
+    params.radius_ = 1.0f;
+    params.tubeRadius_ = Vector2(0.3f, 0.2f);
+    params.segments_ = 10;
+    params.tubeSegments_ = 7;
+    params.arc_ = 200.0f;
+    params.tubeAngle_ = -30.0f;
+    params.smoothNormals_ = false;
+    CsgRingBrush* ring = AddProceduralRing(root, "Ring", params, CsgOperation::DifferenceAB, Vector3(0.0f, 0.1f, 0.0f));
+    BuildFully(root, workQueue);
+    const double volume = root->GetLastBuildStats().volume_;
+    CHECK(volume < 8.0);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild("Root");
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    Node* loadedNode = loadedRootNode->GetChild("Ring");
+    REQUIRE(loadedNode);
+    auto* loadedRing = loadedNode->GetComponent<CsgRingBrush>();
+    REQUIRE(loadedRing);
+    CHECK(loadedRing->GetOperation() == CsgOperation::DifferenceAB);
+    const CsgRingParams& loadedParams = loadedRing->GetParams();
+    CHECK(loadedParams.radius_ == ring->GetRadius());
+    CHECK(loadedParams.tubeRadius_ == ring->GetTubeRadius());
+    CHECK(loadedParams.segments_ == 10);
+    CHECK(loadedParams.tubeSegments_ == 7);
+    CHECK(loadedParams.arc_ == 200.0f);
+    CHECK(loadedParams.tubeAngle_ == -30.0f);
+    CHECK(!loadedParams.smoothNormals_);
+
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(loadedRoot->GetLastBuildStats().volume_ == Catch::Approx(volume).epsilon(1e-9));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRingBrush has six material slots and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    context->RegisterSubsystem<VirtualFileSystem>();
+    const char* const materialNames[6] = {"Materials/Outer.xml", "Materials/Inner.xml", "Materials/Top.xml",
+        "Materials/Bottom.xml", "Materials/Start.xml", "Materials/End.xml"};
+    for (const char* name : materialNames)
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+    const ResourceRefList sixMaterials(Material::GetTypeStatic(),
+        {materialNames[0], materialNames[1], materialNames[2], materialNames[3], materialNames[4], materialNames[5]});
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("The attributes are the ones of a brush without Model")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgRingBrush* ring = AddProceduralRing(root, "Ring", CsgRingParams{}, CsgOperation::DifferenceAB);
+        Component* component = ring;
+        CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 6);
+        CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
+        for (const AttributeInfo& info : *component->GetAttributes())
+            CHECK(info.name_ != "Model");
+        CHECK(component->GetAttribute("Radius").GetFloat() == 0.5f);
+        CHECK(component->GetAttribute("Tube Radius").GetVector2() == Vector2(0.15f, 0.15f));
+        CHECK(component->GetAttribute("Segments").GetInt() == 32);
+        CHECK(component->GetAttribute("Tube Segments").GetInt() == 12);
+        CHECK(component->GetAttribute("Arc").GetFloat() == 360.0f);
+        CHECK(component->GetAttribute("Tube Angle").GetFloat() == 0.0f);
+        CHECK(component->GetAttribute("Smooth Normals").GetBool());
+
+        ring->SetMaterials(ResourceRefList(
+            Material::GetTypeStatic(), ea::vector<ea::string>(9u, ea::string("Materials/Top.xml"))));
+        CHECK(ring->GetMaterialsAttr().names_.size() == 6);
+        ring->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Top.xml"}));
+        CHECK(ring->GetMaterialsAttr().names_.size() == 6);
+        CHECK(ring->GetMaterialsAttr().names_[0] == "Materials/Top.xml");
+        CHECK(ring->GetMaterialsAttr().names_[5].empty());
+    }
+
+    SECTION("The material of slot 3 reaches the bottom triangles")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgRingBrush* ring = AddProceduralRing(root, "Ring", CsgRingParams{}, CsgOperation::Union);
+        ring->SetMaterials(sixMaterials);
+        BuildFully(root, workQueue);
+        const Model* output = GetOutput(root)->GetModel();
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        REQUIRE(output->GetNumGeometries() == names.size());
+        const ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY);
+        // The output geometry whose triangles all lie in the bottom half and face down has the bottom material.
+        unsigned numBottom = 0;
+        for (unsigned i = 0; i < output->GetNumGeometries(); ++i)
+        {
+            bool all = true;
+            unsigned count = 0;
+            for (const CsgPolygon& polygon : polygons)
+            {
+                if ((polygon.shared_ & 0xFFFFu) != i)
+                    continue;
+                ++count;
+                for (const ModelVertex& vertex : polygon.vertices_)
+                    all = all && vertex.GetPosition().y_ <= 1e-5f && vertex.GetNormal().y_ < 0.0f;
+            }
+            if (count > 0 && all)
+            {
+                CHECK(names[i] == "Materials/Bottom.xml");
+                ++numBottom;
+            }
+        }
+        CHECK(numBottom == 1);
+        // A full ring has no caps: the materials of the caps are not in the output.
+        CHECK(ea::find(names.begin(), names.end(), "Materials/Start.xml") == names.end());
+        CHECK(ea::find(names.begin(), names.end(), "Materials/End.xml") == names.end());
+        for (unsigned i = 0; i < 4; ++i)
+            CHECK(ea::find(names.begin(), names.end(), materialNames[i]) != names.end());
+    }
+
+    SECTION("An arc has the cap materials")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgRingParams params;
+        params.arc_ = 90.0f;
+        AddProceduralRing(root, "Ring", params, CsgOperation::Union)->SetMaterials(sixMaterials);
+        BuildFully(root, workQueue);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        for (const char* name : materialNames)
+            CHECK(ea::find(names.begin(), names.end(), name) != names.end());
+        CHECK(!root->GetLastBuildFailed());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRingBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto measure = [&](const CsgRingParams& params)
+    {
+        // The best of several runs. The limits are generous, so a loaded CI machine does not fail.
+        double best = 1e9;
+        for (unsigned run = 0; run < 5; ++run)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            CsgShapeMesh mesh;
+            const bool generated = CsgGenerateRing(params, mesh);
+            SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+            const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - start;
+            REQUIRE(generated);
+            REQUIRE(model);
+            best = ea::min(best, elapsed.count());
+        }
+        return best;
+    };
+
+    const double defaultMs = measure(CsgRingParams{});
+    CsgRingParams fine;
+    fine.segments_ = 128;
+    fine.tubeSegments_ = 64;
+    const double fineMs = measure(fine);
+    WARN("Ring generation and model build: default " << defaultMs << " ms, 128x64 " << fineMs << " ms");
     // A sanitizer build is much slower, so it gets a wider limit.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
     const double slowFactor = 10.0;
