@@ -1711,13 +1711,14 @@ class ErrorCounter : public Object
     URHO3D_OBJECT(ErrorCounter, Object);
 
 public:
-    explicit ErrorCounter(Context* context)
+    explicit ErrorCounter(Context* context, int minLevel = LOG_ERROR)
         : Object(context)
+        , minLevel_(minLevel)
     {
         SubscribeToEvent(E_LOGMESSAGE,
             [this](StringHash, VariantMap& eventData)
             {
-                if (eventData[LogMessage::P_LEVEL].GetInt() >= LOG_ERROR)
+                if (eventData[LogMessage::P_LEVEL].GetInt() >= minLevel_)
                     ++count_;
             });
     }
@@ -1725,6 +1726,7 @@ public:
     unsigned GetCount() const { return count_; }
 
 private:
+    int minLevel_;
     unsigned count_{};
 };
 
@@ -4191,6 +4193,7 @@ TEST_CASE("CsgCylinderBrush has three material slots and no Model attribute", "[
         Material::GetTypeStatic(), {"Materials/Box.xml", "Materials/Top.xml", "Materials/Bottom.xml"});
 
     ErrorCounter errors(context);
+    ErrorCounter warnings(context, LOG_WARNING);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
@@ -4281,6 +4284,15 @@ TEST_CASE("CsgCylinderBrush has three material slots and no Model attribute", "[
         CHECK(ea::find(topNames.begin(), topNames.end(), "Materials/Top.xml") == topNames.end());
         CHECK(ea::find(topNames.begin(), topNames.end(), "Materials/Bottom.xml") != topNames.end());
         CHECK(!topRoot->GetLastBuildFailed());
+        // The result has no empty geometry. The free slot is not a geometry of the output.
+        const Model* topModel = GetOutput(topRoot)->GetModel();
+        REQUIRE(topModel);
+        for (unsigned i = 0; i < topModel->GetNumGeometries(); ++i)
+        {
+            REQUIRE(topModel->GetNumGeometryLodLevels(i) > 0);
+            CHECK(topModel->GetGeometry(i, 0)->GetIndexCount() > 0);
+        }
+        CHECK(warnings.GetCount() == 0);
     }
 
     SECTION("A subtract cylinder gives its materials to the cut faces")
