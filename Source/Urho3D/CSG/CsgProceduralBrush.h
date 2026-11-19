@@ -5,6 +5,7 @@
 #pragma once
 
 #include "Urho3D/CSG/CsgBrush.h"
+#include "Urho3D/CSG/CsgShapeProtocol.h"
 #include "Urho3D/CSG/_Plugin.h"
 
 namespace Urho3D
@@ -52,6 +53,18 @@ public:
     /// Draw the generated model in the color of the operation.
     void DrawDebugGeometry(DebugRenderer* debug, bool depthTest) override;
 
+    /// Fill the list with the handles of the shape. The old content goes. The positions are in the local space of the brush.
+    /// The default gives no handle. A shape with handles gives the ids that its header lists.
+    virtual void GetHandles(ea::vector<CsgShapeHandle>& handles) const { handles.clear(); }
+    /// Move handles by the TOTAL local delta from the drag start. The call is stateless.
+    /// It applies the delta to the current parameters, so the caller restores the parameters before each call.
+    /// A handle id that is repeated counts once. The handles apply in the given order.
+    /// Return false and keep the parameters if an id is not known, the delta is not finite,
+    /// the result is not valid or the parameters do not change.
+    /// Otherwise set the parameters with the clamping setter (one `MarkDirty`) and return true.
+    /// The default has no handle and returns false.
+    virtual bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) { return false; }
+
 protected:
     /// Clamp the parameters to the valid range. A value that is not finite gets its default value.
     virtual void SanitizeParameters() {}
@@ -59,6 +72,12 @@ protected:
     virtual bool GenerateMesh(CsgShapeMesh& mesh) const = 0;
     /// Return the number of material slots. It is fixed for a shape type. Slot i is face group i of the mesh.
     virtual unsigned GetNumMaterialSlots() const { return 1; }
+
+    /// Prepare the input of `MoveHandles`: copy the ids without repeats, in the given order.
+    /// Return false if the list is empty or the delta is not finite.
+    static bool PrepareHandleMove(const ea::vector<unsigned>& ids, const Vector3& delta, ea::vector<unsigned>& unique);
+    /// Return true if all components are finite.
+    static bool IsFinite(const Vector3& value);
 
     /// Sanitize the parameters, mark the mesh dirty and request a rebuild of the root.
     /// A typed setter calls this after it changes a parameter.
@@ -68,6 +87,11 @@ protected:
     void OnNodeSet(Node* previousNode, Node* currentNode) override;
 
 private:
+    /// Answer `E_CSGSHAPEQUERYHANDLES`. The data map gets the result.
+    void HandleQueryHandles(StringHash eventType, VariantMap& eventData);
+    /// Answer `E_CSGSHAPEMOVEHANDLES`. The data map gets the result.
+    void HandleMoveHandles(StringHash eventType, VariantMap& eventData);
+
     /// Resize the "Materials" attribute to the number of material slots. The existing names stay.
     void UpdateMaterialSlots();
 

@@ -8,6 +8,10 @@
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/IO/Log.h>
 
+#include <EASTL/algorithm.h>
+
+#include <cmath>
+
 namespace Urho3D
 {
 
@@ -15,6 +19,8 @@ CsgProceduralBrush::CsgProceduralBrush(Context* context)
     : CsgBrush(context)
 {
     uvMode_ = CsgUvMode::Root;
+    SubscribeToEvent(this, E_CSGSHAPEQUERYHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleQueryHandles));
+    SubscribeToEvent(this, E_CSGSHAPEMOVEHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleMoveHandles));
 }
 
 CsgProceduralBrush::~CsgProceduralBrush() = default;
@@ -67,6 +73,79 @@ void CsgProceduralBrush::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)
     Color wireColor = GetOperationColor(static_cast<int>(GetOperation()));
     wireColor.a_ = 0.4f;
     DrawDebugGeometryInternal(debug, depthTest, GetShapeModel(), wireColor);
+}
+
+bool CsgProceduralBrush::IsFinite(const Vector3& value)
+{
+    return std::isfinite(value.x_) && std::isfinite(value.y_) && std::isfinite(value.z_);
+}
+
+bool CsgProceduralBrush::PrepareHandleMove(
+    const ea::vector<unsigned>& ids, const Vector3& delta, ea::vector<unsigned>& unique)
+{
+    unique.clear();
+    if (ids.empty() || !IsFinite(delta))
+        return false;
+    for (const unsigned id : ids)
+    {
+        if (ea::find(unique.begin(), unique.end(), id) == unique.end())
+            unique.push_back(id);
+    }
+    return true;
+}
+
+void CsgProceduralBrush::HandleQueryHandles(StringHash eventType, VariantMap& eventData)
+{
+    using namespace CsgShapeQueryHandles;
+    using namespace CsgShapeProtocol;
+
+    VariantVector list;
+    const bool valid = IsShapeValid();
+    if (valid)
+    {
+        ea::vector<CsgShapeHandle> handles;
+        GetHandles(handles);
+        for (const CsgShapeHandle& handle : handles)
+        {
+            VariantMap entry;
+            entry[HandleIdKey] = static_cast<int>(handle.id_);
+            entry[HandleNameKey] = handle.name_;
+            entry[HandleKindKey] = static_cast<int>(handle.kind_);
+            entry[HandlePositionKey] = handle.position_;
+            entry[HandleAxisKey] = handle.axis_;
+            list.push_back(Variant(entry));
+        }
+    }
+    eventData[P_VERSION] = Version;
+    eventData[P_VALID] = valid;
+    eventData[P_HANDLES] = list;
+}
+
+void CsgProceduralBrush::HandleMoveHandles(StringHash eventType, VariantMap& eventData)
+{
+    using namespace CsgShapeMoveHandles;
+
+    bool accepted = false;
+    const auto indices = eventData.find(P_INDICES);
+    const auto delta = eventData.find(P_DELTA);
+    if (indices != eventData.end() && delta != eventData.end() && indices->second.GetType() == VAR_VARIANTVECTOR
+        && delta->second.GetType() == VAR_VECTOR3)
+    {
+        ea::vector<unsigned> ids;
+        bool idsValid = true;
+        for (const Variant& value : indices->second.GetVariantVector())
+        {
+            if (value.GetType() != VAR_INT || value.GetInt() < 0)
+            {
+                idsValid = false;
+                break;
+            }
+            ids.push_back(static_cast<unsigned>(value.GetInt()));
+        }
+        if (idsValid)
+            accepted = MoveHandles(ids, delta->second.GetVector3());
+    }
+    eventData[P_ACCEPTED] = accepted;
 }
 
 void CsgProceduralBrush::OnParametersChanged()

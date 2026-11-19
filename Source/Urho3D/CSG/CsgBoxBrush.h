@@ -44,6 +44,17 @@ public:
     void SetParams(const CsgBoxParams& params);
     const CsgBoxParams& GetParams() const { return params_; }
 
+    /// Handles: ids 0 to 7 are the corners (points). Ids 20 to 25 are the faces (axes), in the order
+    /// -X, +X, -Y, +Y, -Z, +Z. The id is 20 plus the face group index. The ids are a file contract.
+    /// A face handle is at the mean of the 4 corner positions. Its axis is the nominal outward axis.
+    void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// A corner handle adds delta / size to the corner. A face handle moves its 4 corners along the axis by
+    /// dot(delta, axis) / size. If a corner is in two given handles, both handles move it.
+    /// A move that makes the box not valid returns false.
+    bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+
+    static constexpr unsigned FirstFaceHandle = 20;
+
 protected:
     void SanitizeParameters() override;
     bool GenerateMesh(CsgShapeMesh& mesh) const override;

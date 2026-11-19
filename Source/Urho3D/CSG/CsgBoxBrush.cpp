@@ -14,6 +14,31 @@ namespace
 const char* const CornerAttributeNames[8] = {
     "Corner 0", "Corner 1", "Corner 2", "Corner 3", "Corner 4", "Corner 5", "Corner 6", "Corner 7"};
 
+/// The axis of the nominal face. The face order is -X, +X, -Y, +Y, -Z, +Z.
+Vector3 GetFaceAxis(unsigned face)
+{
+    Vector3 axis;
+    axis.MutableData()[face / 2] = face % 2 ? 1.0f : -1.0f;
+    return axis;
+}
+
+/// Return true if the corner is on the nominal face.
+bool IsCornerOnFace(unsigned corner, unsigned face)
+{
+    return ((corner >> (face / 2)) & 1u) == (face % 2);
+}
+
+ea::string GetCornerName(unsigned corner)
+{
+    ea::string name = "Corner";
+    name += corner & 1u ? " +X" : " -X";
+    name += corner & 2u ? "+Y" : "-Y";
+    name += corner & 4u ? "+Z" : "-Z";
+    return name;
+}
+
+const char* const FaceNames[6] = {"Face -X", "Face +X", "Face -Y", "Face +Y", "Face -Z", "Face +Z"};
+
 } // namespace
 
 CsgBoxBrush::CsgBoxBrush(Context* context)
@@ -64,6 +89,82 @@ void CsgBoxBrush::SetParams(const CsgBoxParams& params)
 
     params_ = sanitized;
     OnParametersChanged();
+}
+
+void CsgBoxBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
+{
+    handles.clear();
+    for (unsigned corner = 0; corner < 8; ++corner)
+    {
+        CsgShapeHandle handle;
+        handle.id_ = corner;
+        handle.name_ = GetCornerName(corner);
+        handle.kind_ = CsgShapeHandleKind::Point;
+        handle.position_ = params_.size_ * params_.corners_[corner];
+        handles.push_back(handle);
+    }
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        Vector3 sum;
+        for (unsigned corner = 0; corner < 8; ++corner)
+        {
+            if (IsCornerOnFace(corner, face))
+                sum += params_.size_ * params_.corners_[corner];
+        }
+        CsgShapeHandle handle;
+        handle.id_ = FirstFaceHandle + face;
+        handle.name_ = FaceNames[face];
+        handle.kind_ = CsgShapeHandleKind::Axis;
+        handle.position_ = sum / 4.0f;
+        handle.axis_ = GetFaceAxis(face);
+        handles.push_back(handle);
+    }
+}
+
+bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
+{
+    ea::vector<unsigned> unique;
+    if (!PrepareHandleMove(ids, localDelta, unique))
+        return false;
+
+    const Vector3 size = VectorMax(params_.size_, Vector3::ONE * CsgBoxParams::MinSize);
+    CsgBoxParams params = params_;
+    for (const unsigned id : unique)
+    {
+        if (id < 8)
+        {
+            params.corners_[id] += localDelta / size;
+        }
+        else if (id >= FirstFaceHandle && id < FirstFaceHandle + 6)
+        {
+            const unsigned face = id - FirstFaceHandle;
+            const Vector3 axis = GetFaceAxis(face);
+            const float distance = localDelta.DotProduct(axis);
+            for (unsigned corner = 0; corner < 8; ++corner)
+            {
+                if (IsCornerOnFace(corner, face))
+                    params.corners_[corner] += axis * distance / size;
+            }
+        }
+        else
+            return false;
+    }
+
+    // A value that is not finite (an overflow) is not accepted. The sanitizer would replace it.
+    for (const Vector3& corner : params.corners_)
+    {
+        if (!IsFinite(corner))
+            return false;
+    }
+    CsgSanitizeBoxParams(params);
+    if (params.corners_ == params_.corners_)
+        return false;
+    CsgShapeMesh mesh;
+    if (!CsgGenerateBox(params, mesh))
+        return false;
+
+    SetParams(params);
+    return true;
 }
 
 void CsgBoxBrush::SanitizeParameters() { CsgSanitizeBoxParams(params_); }
