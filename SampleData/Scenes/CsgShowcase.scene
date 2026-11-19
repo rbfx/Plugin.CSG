@@ -141,11 +141,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="42" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="18">
@@ -174,11 +169,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="52" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -210,11 +200,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="63" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -255,11 +240,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="82" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="56">
@@ -288,11 +268,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Sphere.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="89" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -324,11 +299,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Sphere.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="96" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -369,11 +339,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="115" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="93">
@@ -402,11 +367,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="126" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -438,11 +398,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="137" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -483,11 +438,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="160" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="145">
@@ -516,11 +466,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Sphere.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="175" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -552,11 +497,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Sphere.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="190" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -597,11 +537,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="233" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="230">
@@ -630,11 +565,6 @@
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
-							</attributes>
-						</component>
-						<component _id="239" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/CheckboardProperties.xml" />
 							</attributes>
 						</component>
 					</components>
@@ -667,11 +597,6 @@
 								<attribute name="Materials" type="ResourceRefList" value="Material;Materials/Stone.xml" />
 							</attributes>
 						</component>
-						<component _id="245" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;Materials/Stone.xml;Materials/CheckboardProperties.xml" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="242">
@@ -692,6 +617,10 @@
 				</node>
 			</nodes>
 		</node>
+		<!-- CSG migration note: each "CSG Tree" root below has a brush with child brushes.
+			A CsgRoot uses only its direct children as operands, so the child brushes have no effect now.
+			An exact flatten is not possible: the parent brush has a scale that is not uniform and the child brushes are rotated,
+			so the composed transform has shear. A node transform cannot keep shear. The trees need a new design or a baked model. -->
 		<node _id="429">
 			<attributes>
 				<attribute name="Position" type="Vector3" value="-4 0 4" />
@@ -706,11 +635,6 @@
 						<component _id="281" _typeName="CsgRoot">
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
-							</attributes>
-						</component>
-						<component _id="284" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;;;" />
 							</attributes>
 						</component>
 					</components>
@@ -770,11 +694,6 @@
 						<component _id="363" _typeName="CsgRoot">
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
-							</attributes>
-						</component>
-						<component _id="364" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;;;" />
 							</attributes>
 						</component>
 					</components>
@@ -838,11 +757,6 @@
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 							</attributes>
 						</component>
-						<component _id="373" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="401">
@@ -903,11 +817,6 @@
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 							</attributes>
 						</component>
-						<component _id="384" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;;;" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="414">
@@ -960,6 +869,10 @@
 				</node>
 			</nodes>
 		</node>
+		<!-- CSG migration note: each "CSG Tree" root below has a brush with child brushes.
+			A CsgRoot uses only its direct children as operands, so the child brushes have no effect now.
+			An exact flatten is not possible: the parent brush has a scale that is not uniform and the child brushes are rotated,
+			so the composed transform has shear. A node transform cannot keep shear. The trees need a new design or a baked model. -->
 		<node _id="430">
 			<attributes>
 				<attribute name="Position" type="Vector3" value="-4 0 8" />
@@ -974,11 +887,6 @@
 						<component _id="396" _typeName="CsgRoot">
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
-							</attributes>
-						</component>
-						<component _id="397" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;;" />
 							</attributes>
 						</component>
 					</components>
@@ -1039,11 +947,6 @@
 						<component _id="403" _typeName="CsgRoot">
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
-							</attributes>
-						</component>
-						<component _id="404" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;" />
 							</attributes>
 						</component>
 					</components>
@@ -1107,11 +1010,6 @@
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
 							</attributes>
 						</component>
-						<component _id="413" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;;;" />
-							</attributes>
-						</component>
 					</components>
 					<nodes>
 						<node _id="449">
@@ -1170,11 +1068,6 @@
 						<component _id="423" _typeName="CsgRoot">
 							<attributes>
 								<attribute name="Model" type="ResourceRef" value="Model;Models/Box.mdl" />
-							</attributes>
-						</component>
-						<component _id="424" _typeName="StaticModel">
-							<attributes>
-								<attribute name="Material" type="ResourceRefList" value="Material;;" />
 							</attributes>
 						</component>
 					</components>
