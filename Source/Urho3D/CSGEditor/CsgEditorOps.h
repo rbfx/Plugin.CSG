@@ -83,6 +83,71 @@ int CycleOperation(Context* context, int current, int step);
 /// Set the model of the brush. Return false if the brush has no attribute "Model".
 bool SetBrushModel(Node* brush, const ea::string& modelName);
 
+/// Set the material of one slot of the brush through the attribute "Materials". The other slots stay.
+/// Work with a model brush and a procedural brush. An empty list grows to one slot for slot 0.
+/// Return false with no log if the node has no brush or the slot is not valid.
+bool SetBrushMaterial(Node* brush, const ea::string& materialName, unsigned slot);
+/// Set the material of all slots of the brush. Return false with no log if the node has no brush.
+bool SetAllBrushMaterialSlots(Node* brush, const ea::string& materialName);
+
+/// Return true if the resource name has the extension of a texture that the engine loads as Texture2D.
+bool IsTextureResourceName(const ea::string& resourceName);
+/// Return the name of the material for the texture: the texture name with the extension ".material".
+ea::string GetTextureMaterialName(const ea::string& textureResourceName);
+/// Make the material file for the texture next to the texture file. Return the material resource name.
+/// An existing material file is reused and never changed. The material uses the technique "Techniques/LitOpaque.xml",
+/// the shader define PBR and the texture as the albedo (diffuse) texture.
+/// Log one error and return an empty string if the texture is not in a mounted directory or the file cannot be written.
+ea::string EnsureTextureMaterial(Context* context, const ea::string& textureResourceName);
+
+/// The kind of a drag and drop payload for the scene view.
+enum class DropPayloadKind
+{
+    Other,
+    Model,
+    Material,
+    Texture,
+};
+
+/// The selection of the scene view when a drop starts.
+struct DropSelection
+{
+    /// The active node is a brush with the attribute "Model".
+    bool activeIsModelBrush_{};
+    /// The active node is a brush.
+    bool activeIsBrush_{};
+    /// The active node is a root, or the result node of a root.
+    bool activeIsRoot_{};
+    /// At least one selected node is a brush.
+    bool anySelectedBrush_{};
+};
+
+/// What the addon does with a drop.
+enum class DropAction
+{
+    /// The addon does not take the drop. The stock handlers take it.
+    None,
+    NewBrush,
+    ReplaceModel,
+    /// Set the material of the selected brushes.
+    AssignMaterial,
+    /// Make a material for the texture and set it on the selected brushes.
+    AssignTexture,
+    /// The addon takes the drop and shows a hint. The scene does not change.
+    HintSelectBrush,
+};
+
+/// The result of DecideDrop.
+struct DropDecision
+{
+    DropAction action_{DropAction::None};
+    /// Set all material slots, not slot 0 only.
+    bool allSlots_{};
+};
+
+/// Decide what to do with a drop. The function is pure. Shift sets all material slots.
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift);
+
 /// Return the direct children with an enabled CsgBrush, in child order.
 ea::vector<Node*> GetOperands(Node* rootNode);
 /// Return the direct children with a CsgBrush, enabled or not, in child order.

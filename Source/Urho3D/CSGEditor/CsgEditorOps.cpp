@@ -6,7 +6,14 @@
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/ObjectReflection.h>
+#include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
+#include <Urho3D/IO/File.h>
+#include <Urho3D/IO/FileSystem.h>
+#include <Urho3D/IO/Log.h>
+#include <Urho3D/Resource/ResourceCache.h>
+#include <Urho3D/Resource/XMLElement.h>
+#include <Urho3D/Resource/XMLFile.h>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
 
@@ -236,6 +243,140 @@ bool SetBrushModel(Node* brush, const ea::string& modelName)
         return false;
     component->ApplyAttributes();
     return true;
+}
+
+namespace
+{
+
+/// Read the list of the attribute "Materials". Return false if the brush has none.
+bool ReadMaterialList(Component* component, ResourceRefList& list)
+{
+    if (!component)
+        return false;
+    const Variant value = component->GetAttribute("Materials");
+    if (value.GetType() != VAR_RESOURCEREFLIST)
+        return false;
+    list = value.GetResourceRefList();
+    list.type_ = Material::GetTypeStatic();
+    return true;
+}
+
+bool WriteMaterialList(Component* component, const ResourceRefList& list)
+{
+    if (!component->SetAttribute("Materials", list))
+        return false;
+    component->ApplyAttributes();
+    return true;
+}
+
+} // namespace
+
+bool SetBrushMaterial(Node* brush, const ea::string& materialName, unsigned slot)
+{
+    Component* component = GetBrushComponent(brush);
+    ResourceRefList list;
+    if (!ReadMaterialList(component, list))
+        return false;
+    if (list.names_.empty() && slot == 0)
+        list.names_.resize(1);
+    if (slot >= list.names_.size())
+        return false;
+    list.names_[slot] = materialName;
+    return WriteMaterialList(component, list);
+}
+
+bool SetAllBrushMaterialSlots(Node* brush, const ea::string& materialName)
+{
+    Component* component = GetBrushComponent(brush);
+    ResourceRefList list;
+    if (!ReadMaterialList(component, list))
+        return false;
+    if (list.names_.empty())
+        list.names_.resize(1);
+    for (ea::string& name : list.names_)
+        name = materialName;
+    return WriteMaterialList(component, list);
+}
+
+bool IsTextureResourceName(const ea::string& resourceName)
+{
+    const ea::string extension = GetExtension(resourceName);
+    for (const char* known : {".png", ".jpg", ".jpeg", ".tga", ".dds", ".bmp", ".webp", ".ktx"})
+    {
+        if (extension == known)
+            return true;
+    }
+    return false;
+}
+
+ea::string GetTextureMaterialName(const ea::string& textureResourceName)
+{
+    return ReplaceExtension(textureResourceName, ".material");
+}
+
+ea::string EnsureTextureMaterial(Context* context, const ea::string& textureResourceName)
+{
+    auto cache = context ? context->GetSubsystem<ResourceCache>() : nullptr;
+    if (!cache)
+        return EMPTY_STRING;
+
+    const ea::string materialName = GetTextureMaterialName(textureResourceName);
+    // An existing material is never changed.
+    if (cache->Exists(materialName))
+        return materialName;
+
+    // The file name of the texture shows the writable directory. A package has no file name.
+    const ea::string textureFile = cache->GetResourceFileName(textureResourceName);
+    if (textureFile.empty())
+    {
+        URHO3D_LOGERROR("Cannot make a material: texture \"{}\" is not in a resource directory", textureResourceName);
+        return EMPTY_STRING;
+    }
+
+    XMLFile xml(context);
+    XMLElement root = xml.CreateRoot("material");
+    root.CreateChild("technique").SetAttribute("name", "Techniques/LitOpaque.xml");
+    XMLElement shader = root.CreateChild("shader");
+    shader.SetAttribute("vsdefines", "PBR");
+    shader.SetAttribute("psdefines", "PBR");
+    XMLElement texture = root.CreateChild("texture");
+    texture.SetAttribute("slot", "Albedo");
+    texture.SetAttribute("name", textureResourceName);
+
+    const ea::string materialFile = ReplaceExtension(textureFile, ".material");
+    File file(context, materialFile, FILE_WRITE);
+    if (!file.IsOpen() || !xml.Save(file))
+    {
+        URHO3D_LOGERROR("Cannot write the material file \"{}\"", materialFile);
+        return EMPTY_STRING;
+    }
+    return materialName;
+}
+
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift)
+{
+    DropDecision result;
+    switch (kind)
+    {
+    case DropPayloadKind::Model:
+        if (selection.activeIsModelBrush_)
+            result.action_ = DropAction::ReplaceModel;
+        else if (!selection.activeIsBrush_ && selection.activeIsRoot_)
+            result.action_ = DropAction::NewBrush;
+        break;
+    case DropPayloadKind::Material:
+    case DropPayloadKind::Texture:
+        if (selection.anySelectedBrush_)
+        {
+            result.action_ = kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
+            result.allSlots_ = shift;
+        }
+        else if (selection.activeIsRoot_)
+            result.action_ = DropAction::HintSelectBrush;
+        break;
+    case DropPayloadKind::Other: break;
+    }
+    return result;
 }
 
 ea::vector<Node*> GetAllBrushChildren(Node* rootNode)

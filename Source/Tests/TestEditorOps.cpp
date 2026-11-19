@@ -18,10 +18,12 @@
 #include <Urho3D/Core/WorkQueue.h>
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Graphics/Graphics.h>
+#include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
+#include <Urho3D/IO/FileSystem.h>
 #include <Urho3D/IO/IOEvents.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/IO/VirtualFileSystem.h>
@@ -30,6 +32,12 @@
 #include <Urho3D/Scene/Scene.h>
 
 #include <catch2/catch_amalgamated.hpp>
+
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+#include <chrono>
 
 using namespace Urho3D;
 
@@ -42,6 +50,7 @@ SharedPtr<Context> MakeContext(bool withCsg)
     context->RegisterSubsystem<Log>();
     context->RegisterSubsystem<Time>();
     context->RegisterSubsystem<WorkQueue>();
+    context->RegisterSubsystem<FileSystem>();
     context->RegisterSubsystem<VirtualFileSystem>();
     context->RegisterSubsystem<ResourceCache>();
     RegisterSceneLibrary(context);
@@ -646,4 +655,221 @@ TEST_CASE("No brush preset is available without CSG", "[editorops][procedural]")
     auto plain = MakeContext(false);
     for (const CsgBrushPreset& preset : GetBrushPresets())
         CHECK_FALSE(IsBrushPresetAvailable(plain, preset));
+}
+
+namespace
+{
+
+ea::vector<ea::string> GetMaterialNames(Node* brushNode)
+{
+    return FindBrushComponent(brushNode)->GetAttribute("Materials").GetResourceRefList().names_;
+}
+
+/// A temporary directory that the virtual file system mounts. The destructor removes it.
+struct TempResourceDir
+{
+    explicit TempResourceDir(Context* context)
+    {
+        static unsigned counter = 0;
+        path_ = std::filesystem::temp_directory_path()
+            / ("rbfx-csg-material-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(counter++));
+        std::filesystem::create_directories(path_ / "Textures");
+        context->GetSubsystem<VirtualFileSystem>()->MountDir(ea::string(path_.string().c_str()) + "/");
+    }
+    ~TempResourceDir()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+
+    void WriteFile(const char* relativeName, const char* text) const
+    {
+        std::ofstream stream(path_ / relativeName, std::ios::binary);
+        stream << text;
+    }
+
+    std::string ReadFile(const char* relativeName) const
+    {
+        std::ifstream stream(path_ / relativeName, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    }
+
+    std::filesystem::path path_;
+};
+
+} // namespace
+
+TEST_CASE("SetBrushMaterial sets one slot of a procedural brush and keeps the others", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO);
+    REQUIRE(boxNode);
+    REQUIRE(GetMaterialNames(boxNode).size() == 6);
+
+    CHECK(SetBrushMaterial(boxNode, "Materials/B.xml", 3));
+    CHECK(SetBrushMaterial(boxNode, "Materials/A.xml", 0));
+    const ea::vector<ea::string> names = GetMaterialNames(boxNode);
+    REQUIRE(names.size() == 6);
+    CHECK(names[0] == "Materials/A.xml");
+    CHECK(names[3] == "Materials/B.xml");
+    CHECK(names[1].empty());
+    CHECK(names[5].empty());
+    CHECK(FindBrushComponent(boxNode)->GetAttribute("Materials").GetResourceRefList().type_ == Material::GetTypeStatic());
+
+    CHECK(SetAllBrushMaterialSlots(boxNode, "Materials/All.xml"));
+    for (const ea::string& name : GetMaterialNames(boxNode))
+        CHECK(name == "Materials/All.xml");
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("SetBrushMaterial works on a model brush", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* brushNode = AddBrushNode(rootNode, "Csg/BoxB.mdl", 0, Vector3::ZERO);
+    REQUIRE(brushNode);
+    Component* brush = FindBrushComponent(brushNode);
+    brush->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Old0.xml", "Materials/Old1.xml", ""}));
+    brush->ApplyAttributes();
+    const unsigned numSlots = GetMaterialNames(brushNode).size();
+    REQUIRE(numSlots >= 1);
+
+    CHECK(SetBrushMaterial(brushNode, "Materials/New.xml", 0));
+    CHECK(GetMaterialNames(brushNode)[0] == "Materials/New.xml");
+    if (numSlots > 1)
+        CHECK(GetMaterialNames(brushNode)[1] == "Materials/Old1.xml");
+
+    CHECK(SetAllBrushMaterialSlots(brushNode, "Materials/All.xml"));
+    CHECK(GetMaterialNames(brushNode).size() == numSlots);
+    for (const ea::string& name : GetMaterialNames(brushNode))
+        CHECK(name == "Materials/All.xml");
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("SetBrushMaterial rejects a slot out of range and a node without a brush", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO);
+    REQUIRE(boxNode);
+    const ea::vector<ea::string> before = GetMaterialNames(boxNode);
+
+    CHECK_FALSE(SetBrushMaterial(boxNode, "Materials/A.xml", 6));
+    CHECK_FALSE(SetBrushMaterial(boxNode, "Materials/A.xml", 1000));
+    CHECK(GetMaterialNames(boxNode) == before);
+
+    Node* plain = f.scene->CreateChild("Plain");
+    CHECK_FALSE(SetBrushMaterial(plain, "Materials/A.xml", 0));
+    CHECK_FALSE(SetAllBrushMaterialSlots(plain, "Materials/A.xml"));
+    CHECK_FALSE(SetBrushMaterial(rootNode, "Materials/A.xml", 0));
+    CHECK_FALSE(SetAllBrushMaterialSlots(rootNode, "Materials/A.xml"));
+    CHECK_FALSE(SetBrushMaterial(nullptr, "Materials/A.xml", 0));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("A material of a brush reaches the CSG result", "[editorops][material]")
+{
+    Fixture f;
+    // The fold uses only materials that the cache has.
+    auto material = MakeShared<Material>(f.context);
+    material->SetName("Materials/Brick.xml");
+    f.context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3(0.0f, 5.0f, 0.0f));
+    REQUIRE(boxNode);
+    CHECK(SetAllBrushMaterialSlots(boxNode, "Materials/Brick.xml"));
+    RunFrames(f.scene, 60);
+
+    const ea::vector<ea::string>& names = rootNode->GetComponent<CsgRoot>()->GetResultModel()->GetMaterialsAttr().names_;
+    CHECK(ea::find(names.begin(), names.end(), ea::string("Materials/Brick.xml")) != names.end());
+}
+
+TEST_CASE("Texture names and material names", "[editorops][material]")
+{
+    for (const char* name : {"Textures/A.png", "a/b.JPG", "x.jpeg", "x.tga", "x.dds", "x.bmp", "x.webp", "x.ktx"})
+        CHECK(IsTextureResourceName(name));
+    for (const char* name : {"Textures/A.material", "x.mdl", "x", "x.png.txt", ""})
+        CHECK_FALSE(IsTextureResourceName(name));
+    CHECK(GetTextureMaterialName("Textures/Wall/Brick.png") == "Textures/Wall/Brick.material");
+}
+
+TEST_CASE("EnsureTextureMaterial writes the material next to the texture", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    TempResourceDir dir(f.context);
+    dir.WriteFile("Textures/Brick.png", "not a real image");
+
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.material");
+    const std::string text = dir.ReadFile("Textures/Brick.material");
+    CHECK(text.find("Techniques/LitOpaque.xml") != std::string::npos);
+    CHECK(text.find("slot=\"Albedo\"") != std::string::npos);
+    CHECK(text.find("name=\"Textures/Brick.png\"") != std::string::npos);
+    CHECK(errors.GetCount() == 0);
+
+    // An existing material stays as it is.
+    dir.WriteFile("Textures/Brick.material", "keep me");
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Brick.png") == "Textures/Brick.material");
+    CHECK(dir.ReadFile("Textures/Brick.material") == "keep me");
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("EnsureTextureMaterial logs one error for a texture outside a resource directory", "[editorops][material]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    TempResourceDir dir(f.context);
+
+    CHECK(EnsureTextureMaterial(f.context, "Textures/Missing.png").empty());
+    CHECK(errors.GetCount() == 1);
+    CHECK_FALSE(std::filesystem::exists(dir.path_ / "Textures/Missing.material"));
+}
+
+TEST_CASE("DecideDrop maps payload, selection and Shift to an action", "[editorops][material]")
+{
+    DropSelection none;
+    DropSelection model;
+    model.activeIsModelBrush_ = model.activeIsBrush_ = model.anySelectedBrush_ = true;
+    DropSelection procedural;
+    procedural.activeIsBrush_ = procedural.anySelectedBrush_ = true;
+    DropSelection root;
+    root.activeIsRoot_ = true;
+    DropSelection other;
+
+    // Models keep the rules of the model drop. Shift does not matter.
+    for (const bool shift : {false, true})
+    {
+        CHECK(DecideDrop(DropPayloadKind::Model, model, shift).action_ == DropAction::ReplaceModel);
+        CHECK(DecideDrop(DropPayloadKind::Model, procedural, shift).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Model, root, shift).action_ == DropAction::NewBrush);
+        CHECK(DecideDrop(DropPayloadKind::Model, other, shift).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Model, none, shift).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Other, model, shift).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Other, root, shift).action_ == DropAction::None);
+    }
+
+    for (const DropSelection* brush : {&model, &procedural})
+    {
+        CHECK(DecideDrop(DropPayloadKind::Material, *brush, false).action_ == DropAction::AssignMaterial);
+        CHECK_FALSE(DecideDrop(DropPayloadKind::Material, *brush, false).allSlots_);
+        CHECK(DecideDrop(DropPayloadKind::Material, *brush, true).allSlots_);
+        CHECK(DecideDrop(DropPayloadKind::Texture, *brush, false).action_ == DropAction::AssignTexture);
+        CHECK(DecideDrop(DropPayloadKind::Texture, *brush, true).allSlots_);
+    }
+
+    // A root with no selected brush shows a hint. Another selection leaves the drop to the stock handlers.
+    CHECK(DecideDrop(DropPayloadKind::Material, root, false).action_ == DropAction::HintSelectBrush);
+    CHECK(DecideDrop(DropPayloadKind::Texture, root, true).action_ == DropAction::HintSelectBrush);
+    CHECK(DecideDrop(DropPayloadKind::Material, other, false).action_ == DropAction::None);
+    CHECK(DecideDrop(DropPayloadKind::Texture, none, false).action_ == DropAction::None);
+
+    // A selected brush that is not the active node still counts.
+    DropSelection mixed = root;
+    mixed.anySelectedBrush_ = true;
+    CHECK(DecideDrop(DropPayloadKind::Material, mixed, false).action_ == DropAction::AssignMaterial);
 }
