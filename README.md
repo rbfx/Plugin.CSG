@@ -138,6 +138,31 @@ The ids are a file contract.
 | Ring | 2 | Axial tube radius (axis +Y). |
 | Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
 
+### Pick event (provenance)
+
+Each face of the result knows the brush that made it. The editor uses this to select a brush with a click.
+A subtract brush has no surface of its own, but the faces that it cuts point back to it.
+
+- `CsgPolygon::source_` is the node ID of the brush that made the polygon. 0 is the base model or an unknown source.
+  Each split, clip, snap and rescale of a polygon keeps it.
+- `CsgTriangulatedModel::Geometry::triangleSources_` has one source for each triangle of `indexData_`.
+- After each build the worker makes a pick table: three node space corners and one source for each triangle.
+  The table belongs to the applied result. A queued or dropped result does not change it.
+- The brush fingerprint compares the node ID. A new brush node with the same model and transform folds again.
+
+The header `Source/Urho3D/CSG/CsgRootProtocol.h` has the event. It needs only the Urho3D core types.
+The addon sends it with `root->SendEvent(...)`. The root answers on itself, also when it is disabled.
+
+- `E_CSGROOTPICK`. In: `P_ORIGIN` (Vector3, world), `P_DIRECTION` (Vector3, world, any length)
+  and `P_MAXDISTANCE` (float, optional, default 1e9).
+  Out: `P_VERSION` (int, 1), `P_HIT` (bool), `P_SOURCE` (unsigned node ID), `P_POSITION` (Vector3, world),
+  `P_NORMAL` (unit Vector3, world, front face normal) and `P_DISTANCE` (float, world units).
+
+The pick tests all triangles (no BVH). Only front faces count. The nearest hit wins.
+The root moves the ray into the space of the result node, so a scaled or rotated root gives world values.
+No applied build result, a zero direction or no front face hit gives `P_HIT` false.
+In C++ the same function is `CsgRoot::Pick`.
+
 ## UV projection
 
 Each `CsgBrush` has three UV attributes. They come after "Materials" in the inspector.
