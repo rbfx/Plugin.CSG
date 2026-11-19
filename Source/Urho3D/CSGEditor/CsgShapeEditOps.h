@@ -69,6 +69,31 @@ ShapeAttributeSnapshot SnapshotShapeAttributes(Component* component);
 /// Return false and change nothing if all values are already equal.
 bool RestoreShapeAttributes(Component* component, const ShapeAttributeSnapshot& snapshot);
 
+/// The attributes of a brush and the position of its node. An undo step keeps two of them.
+struct ShapeEditState
+{
+    ShapeAttributeSnapshot attributes_;
+    Vector3 nodePosition_;
+
+    bool operator==(const ShapeEditState& rhs) const
+    {
+        return attributes_ == rhs.attributes_ && nodePosition_ == rhs.nodePosition_;
+    }
+    bool operator!=(const ShapeEditState& rhs) const { return !(*this == rhs); }
+};
+
+/// Return the attributes of the component and the local position of its node.
+ShapeEditState CaptureShapeEditState(Component* component);
+/// Set the attributes (one ApplyAttributes call) and the local position of the node.
+/// Return false and change nothing if the state is already the current one.
+bool RestoreShapeEditState(Component* component, const ShapeEditState& state);
+
+/// Move the shape parameters so the shape is centered around the origin of the node. It uses the event
+/// E_CSGSHAPERECENTER. Then it moves the node by `node->GetTransform() * offset`, so the world shape stays.
+/// Only the local transform of the node changes. Return false and change nothing if the brush
+/// does not answer, the shape is already centered, or the new parameters are not valid.
+bool RecenterShapePivot(Component* brush);
+
 /// Apply one frame of a handle drag. Restore the start snapshot, then move by the total delta.
 /// A zero delta is the start shape. It is accepted with no move call.
 /// A refused move applies the last accepted delta again, so the shape keeps the last valid state.

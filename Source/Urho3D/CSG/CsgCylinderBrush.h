@@ -80,6 +80,8 @@ public:
     /// The bulge grows by dot(delta, axis) divided by the mean X radius.
     /// The sanitizer clamps the result. A shape that is not valid, or no change, returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+    /// The center is the midpoint of the two end centers. Both centers move by -center.
+    bool Recenter(Vector3& localOffset) override;
 
 protected:
     void SanitizeParameters() override;

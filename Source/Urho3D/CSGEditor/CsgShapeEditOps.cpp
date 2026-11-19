@@ -142,6 +142,49 @@ bool RestoreShapeAttributes(Component* component, const ShapeAttributeSnapshot& 
     return true;
 }
 
+ShapeEditState CaptureShapeEditState(Component* component)
+{
+    ShapeEditState result;
+    result.attributes_ = SnapshotShapeAttributes(component);
+    if (component && component->GetNode())
+        result.nodePosition_ = component->GetNode()->GetPosition();
+    return result;
+}
+
+bool RestoreShapeEditState(Component* component, const ShapeEditState& state)
+{
+    if (!component)
+        return false;
+    bool changed = RestoreShapeAttributes(component, state.attributes_);
+    Node* node = component->GetNode();
+    if (node && node->GetPosition() != state.nodePosition_)
+    {
+        node->SetPosition(state.nodePosition_);
+        changed = true;
+    }
+    return changed;
+}
+
+bool RecenterShapePivot(Component* brush)
+{
+    Node* node = brush ? brush->GetNode() : nullptr;
+    if (!IsShapeBrush(brush) || !node)
+        return false;
+
+    using namespace CsgShapeRecenter;
+    VariantMap& eventData = brush->GetEventDataMap();
+    eventData[P_ACCEPTED] = false;
+    eventData[P_OFFSET] = Vector3::ZERO;
+    brush->SendEvent(E_CSGSHAPERECENTER, eventData);
+    if (!eventData[P_ACCEPTED].GetBool())
+        return false;
+
+    // The shape moved by -offset in the local space. The node moves by its own local transform of the offset.
+    const Vector3 offset = eventData[P_OFFSET].GetVector3();
+    node->SetPosition(node->GetTransform() * offset);
+    return true;
+}
+
 bool ApplyShapeHandleDrag(Component* brush, const ShapeAttributeSnapshot& start, const ea::vector<unsigned>& ids,
     const Vector3& delta, ea::optional<Vector3>& acceptedDelta)
 {

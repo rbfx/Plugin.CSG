@@ -12,6 +12,7 @@
 #include "Urho3D/CSG/CsgShapeProtocol.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
+#include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 #include "TestGeneratedBrush.h"
 
 #include <Urho3D/Core/Context.h>
@@ -20,6 +21,7 @@
 #include <Urho3D/Graphics/Graphics.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/Octree.h>
+#include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/IO/IOEvents.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/Resource/ResourceCache.h>
@@ -371,7 +373,7 @@ TEST_CASE("The handle events round trip through a brush component in a scene", "
     {
         const VariantMap data = Query(f.brush);
         REQUIRE(data.contains(CsgShapeQueryHandles::P_VERSION));
-        CHECK(data.at(CsgShapeQueryHandles::P_VERSION).GetInt() == 1);
+        CHECK(data.at(CsgShapeQueryHandles::P_VERSION).GetInt() == 2);
         CHECK(data.at(CsgShapeQueryHandles::P_VALID).GetBool());
         const VariantVector& list = data.at(CsgShapeQueryHandles::P_HANDLES).GetVariantVector();
         const auto handles = f.Handles();
@@ -695,5 +697,274 @@ TEST_CASE("Ring handle moves", "[shapes][handles]")
 
     CHECK_FALSE(f.brush->MoveHandles({4}, Vector3(0.1f, 0.0f, 0.0f)));
     CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(INFINITY, 0.0f, 0.0f)));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// Return the 8 world positions of the box corners.
+ea::array<Vector3, 8> WorldCorners(const CsgBoxBrush* brush)
+{
+    ea::array<Vector3, 8> result;
+    for (unsigned i = 0; i < 8; ++i)
+        result[i] = brush->GetNode()->LocalToWorld(brush->GetSize() * brush->GetCorner(i));
+    return result;
+}
+
+Vector3 SendRecenter(Component* brush, bool& accepted)
+{
+    using namespace CsgShapeRecenter;
+    VariantMap& data = brush->GetEventDataMap();
+    data[P_ACCEPTED] = false;
+    data[P_OFFSET] = Vector3(7.0f, 7.0f, 7.0f);
+    brush->SendEvent(E_CSGSHAPERECENTER, data);
+    accepted = data[P_ACCEPTED].GetBool();
+    return data[P_OFFSET].GetVector3();
+}
+
+/// Recenter a box after a face move. The node moves by the editor operation. Check the world corners.
+void CheckBoxRecenter(HandleFixture<CsgBoxBrush>& f)
+{
+    const auto before = WorldCorners(f.brush);
+    REQUIRE(f.brush->GetShapeModel() != nullptr);
+
+    REQUIRE(RecenterShapePivot(f.brush));
+    const auto after = WorldCorners(f.brush);
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(IsNear(before[i], after[i], 1e-4f));
+
+    // The box is centered now: the mean of the local positions is zero.
+    Vector3 mean;
+    for (unsigned i = 0; i < 8; ++i)
+        mean += f.brush->GetSize() * f.brush->GetCorner(i);
+    CHECK(IsNear(mean / 8.0f, Vector3::ZERO, 1e-5f));
+    CHECK(f.brush->GetShapeModel() != nullptr);
+    CHECK_FALSE(RecenterShapePivot(f.brush));
+}
+
+} // namespace
+
+TEST_CASE("Box recenter keeps the world corners", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    f.brush->SetSize(Vector3(2.0f, 1.0f, 4.0f));
+    // The +X face moves by 1.5 in the local space: the center goes to x = 0.75.
+    REQUIRE(f.brush->MoveHandles({21}, Vector3(1.5f, 0.0f, 0.0f)));
+    const Vector3 expected(0.75f, 0.0f, 0.0f);
+    Node* node = f.brush->GetNode();
+
+    SECTION("Offset and event round trip")
+    {
+        const CsgBoxParams old = f.brush->GetParams();
+        bool accepted = false;
+        const Vector3 offset = SendRecenter(f.brush, accepted);
+        CHECK(accepted);
+        CHECK(IsNear(offset, expected, 1e-5f));
+        CHECK(f.brush->GetParams().size_ == old.size_);
+        // Centered: the corners go by -offset / size.
+        CHECK(IsNear(f.brush->GetCorner(1), old.corners_[1] - expected / old.size_, 1e-6f));
+        // The second call has nothing to do and leaves the offset at zero.
+        const CsgBoxParams centered = f.brush->GetParams();
+        const Vector3 second = SendRecenter(f.brush, accepted);
+        CHECK_FALSE(accepted);
+        CHECK(second == Vector3::ZERO);
+        CHECK(f.brush->GetParams().corners_ == centered.corners_);
+    }
+
+    SECTION("Identity node")
+    {
+        CheckBoxRecenter(f);
+        CHECK(IsNear(node->GetPosition(), expected, 1e-5f));
+    }
+
+    SECTION("Rotated node")
+    {
+        node->SetPosition(Vector3(1.0f, 2.0f, 3.0f));
+        node->SetRotation(Quaternion(30.0f, 50.0f, 70.0f));
+        CheckBoxRecenter(f);
+        CHECK(IsNear(node->GetPosition(), Vector3(1.0f, 2.0f, 3.0f) + node->GetRotation() * expected, 1e-4f));
+    }
+
+    SECTION("Node scale")
+    {
+        node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+        node->SetRotation(Quaternion(20.0f, Vector3::UP));
+        CheckBoxRecenter(f);
+        CHECK(IsNear(node->GetPosition(), node->GetRotation() * (Vector3(1.0f, 2.0f, 3.0f) * expected), 1e-4f));
+    }
+
+    SECTION("Rotated and scaled parent")
+    {
+        Node* parent = f.scene->CreateChild("Parent");
+        parent->SetScale(Vector3(2.0f, 1.0f, 1.0f));
+        parent->SetRotation(Quaternion(40.0f, Vector3(1.0f, 1.0f, 0.0f)));
+        parent->SetPosition(Vector3(5.0f, -1.0f, 2.0f));
+        node->SetParent(parent);
+        node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+        node->SetRotation(Quaternion(25.0f, Vector3::FORWARD));
+        CheckBoxRecenter(f);
+    }
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Box recenter keeps the shape valid and tilted boxes work", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    // A tilted box: the top corners go along X.
+    CsgBoxParams params;
+    for (unsigned i : {4u, 5u, 6u, 7u})
+        params.corners_[i] += Vector3(0.3f, 0.0f, 0.2f);
+    params.corners_[7] += Vector3(0.0f, 0.2f, 0.0f);
+    f.brush->SetParams(params);
+    f.brush->GetNode()->SetRotation(Quaternion(15.0f, 25.0f, 35.0f));
+    f.brush->GetNode()->SetPosition(Vector3(1.0f, 1.0f, 1.0f));
+    const auto before = WorldCorners(f.brush);
+    Vector3 expected;
+    for (unsigned i = 0; i < 8; ++i)
+        expected += params.size_ * params.corners_[i];
+    expected /= 8.0f;
+
+    bool accepted = false;
+    const Vector3 offset = SendRecenter(f.brush, accepted);
+    REQUIRE(accepted);
+    CHECK(IsNear(offset, expected, 1e-5f));
+    f.brush->GetNode()->SetPosition(f.brush->GetNode()->GetTransform() * offset);
+    const auto after = WorldCorners(f.brush);
+    for (unsigned i = 0; i < 8; ++i)
+        CHECK(IsNear(before[i], after[i], 1e-4f));
+    CHECK(f.brush->IsShapeValid());
+
+    SECTION("A shape that is not valid returns false and keeps the parameters")
+    {
+        // The box has an off center and it is not valid: the corners 0 and 4 are on the wrong side.
+        CsgBoxParams bad;
+        bad.corners_[4] = Vector3(-0.5f, -0.5f, -0.5f);
+        bad.corners_[0] = Vector3(-0.5f, -0.5f, 0.5f);
+        for (Vector3& corner : bad.corners_)
+            corner += Vector3(1.0f, 0.0f, 0.0f);
+        f.brush->SetParams(bad);
+        REQUIRE_FALSE(f.brush->IsShapeValid());
+        const CsgBoxParams old = f.brush->GetParams();
+        const Vector3 position = f.brush->GetNode()->GetPosition();
+        SendRecenter(f.brush, accepted);
+        CHECK_FALSE(accepted);
+        CHECK(f.brush->GetParams().corners_ == old.corners_);
+        CHECK_FALSE(RecenterShapePivot(f.brush));
+        CHECK(f.brush->GetNode()->GetPosition() == position);
+    }
+
+    SECTION("A tiny center is not a recenter")
+    {
+        CsgBoxParams tiny;
+        tiny.corners_[7] += Vector3(1e-8f, 0.0f, 0.0f);
+        f.brush->SetParams(tiny);
+        const CsgBoxParams old = f.brush->GetParams();
+        SendRecenter(f.brush, accepted);
+        CHECK_FALSE(accepted);
+        CHECK(f.brush->GetParams().corners_ == old.corners_);
+    }
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Cylinder recenter", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    Node* node = f.brush->GetNode();
+    node->SetRotation(Quaternion(20.0f, 30.0f, 40.0f));
+    node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    node->SetPosition(Vector3(0.0f, 1.0f, 0.0f));
+
+    // A tilted cylinder: both centers move off the origin.
+    CsgCylinderParams params = f.brush->GetParams();
+    params.bottomCenter_ = Vector3(1.0f, 0.0f, 0.5f);
+    params.topCenter_ = Vector3(2.0f, 2.0f, 0.5f);
+    f.brush->SetParams(params);
+    const Vector3 expected(1.5f, 1.0f, 0.5f);
+    const Vector3 bottomWorld = node->LocalToWorld(f.brush->GetParams().bottomCenter_);
+    const Vector3 topWorld = node->LocalToWorld(f.brush->GetParams().topCenter_);
+    const float radius = f.brush->GetParams().bottomRadius_.x_;
+
+    bool accepted = false;
+    const Vector3 offset = SendRecenter(f.brush, accepted);
+    REQUIRE(accepted);
+    CHECK(IsNear(offset, expected, 1e-5f));
+    node->SetPosition(node->GetTransform() * offset);
+    CHECK(IsNear(node->LocalToWorld(f.brush->GetParams().bottomCenter_), bottomWorld, 1e-4f));
+    CHECK(IsNear(node->LocalToWorld(f.brush->GetParams().topCenter_), topWorld, 1e-4f));
+    CHECK(f.brush->GetParams().bottomRadius_.x_ == radius);
+    CHECK(IsNear(f.brush->GetParams().bottomCenter_ + f.brush->GetParams().topCenter_, Vector3::ZERO, 1e-5f));
+
+    SendRecenter(f.brush, accepted);
+    CHECK_FALSE(accepted);
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Sphere and ring recenter return false", "[shapes][handles][recenter]")
+{
+    bool accepted = true;
+    {
+        HandleFixture<CsgSphereBrush> f;
+        const Variant before = f.brush->GetAttribute("Radius");
+        Vector3 offset(1.0f, 1.0f, 1.0f);
+        CHECK_FALSE(f.brush->Recenter(offset));
+        SendRecenter(f.brush, accepted);
+        CHECK_FALSE(accepted);
+        CHECK(f.brush->GetAttribute("Radius") == before);
+        CHECK_FALSE(RecenterShapePivot(f.brush));
+    }
+    {
+        HandleFixture<CsgRingBrush> f;
+        SendRecenter(f.brush, accepted);
+        CHECK_FALSE(accepted);
+        CHECK_FALSE(RecenterShapePivot(f.brush));
+    }
+}
+
+TEST_CASE("The fold in a root is the same after a recenter", "[shapes][handles][recenter][root]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    auto* workQueue = f.context->GetSubsystem<WorkQueue>();
+    auto* time = f.context->GetSubsystem<Time>();
+    SharedPtr<Model> base = MakeTestBoxModel(f.context, Vector3::ONE);
+    base->SetName("Csg/Base.mdl");
+    f.context->GetSubsystem<ResourceCache>()->AddManualResource(base);
+
+    Node* rootNode = f.scene->CreateChild("Root");
+    rootNode->SetScale(Vector3(2.0f, 1.0f, 1.0f));
+    rootNode->SetRotation(Quaternion(30.0f, Vector3(1.0f, 1.0f, 0.0f)));
+    auto* root = rootNode->CreateComponent<CsgRoot>();
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/Base.mdl"));
+    root->SetDeferredDelaySec(0.0f);
+    Node* brushNode = f.brush->GetNode();
+    brushNode->SetParent(rootNode);
+    brushNode->SetScale(Vector3(0.5f, 1.0f, 2.0f));
+    brushNode->SetRotation(Quaternion(20.0f, Vector3::UP));
+    brushNode->SetPosition(Vector3(0.5f, 0.2f, 0.1f));
+
+    const auto run = [&]
+    {
+        for (unsigned i = 0; i < 60; ++i)
+        {
+            workQueue->CompleteAll();
+            time->BeginFrame(1.0f / 60.0f);
+            f.scene->Update(1.0f / 60.0f);
+            time->EndFrame();
+        }
+    };
+    run();
+    REQUIRE(f.brush->MoveHandles({21}, Vector3(1.0f, 0.0f, 0.0f)));
+    run();
+    REQUIRE(root->GetLastBuildStats().valid_);
+    const double volumeBefore = root->GetLastBuildStats().volume_;
+    const BoundingBox boundsBefore = root->GetResultModel()->GetModel()->GetBoundingBox();
+
+    REQUIRE(RecenterShapePivot(f.brush));
+    run();
+    REQUIRE(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(volumeBefore).epsilon(1e-3));
+    const BoundingBox boundsAfter = root->GetResultModel()->GetModel()->GetBoundingBox();
+    CHECK(IsNear(boundsAfter.min_, boundsBefore.min_, 1e-2f));
+    CHECK(IsNear(boundsAfter.max_, boundsBefore.max_, 1e-2f));
     CHECK(f.errors.GetCount() == 0);
 }

@@ -52,6 +52,8 @@ public:
     /// dot(delta, axis) / size. If a corner is in two given handles, both handles move it.
     /// A move that makes the box not valid returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
+    /// The center is the mean of the 8 positions Size * Corner. Each corner moves by -center / Size.
+    bool Recenter(Vector3& localOffset) override;
 
     static constexpr unsigned FirstFaceHandle = 20;
 

@@ -167,6 +167,34 @@ bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& lo
     return true;
 }
 
+bool CsgBoxBrush::Recenter(Vector3& localOffset)
+{
+    Vector3 center;
+    for (unsigned corner = 0; corner < 8; ++corner)
+        center += params_.size_ * params_.corners_[corner];
+    center /= 8.0f;
+    if (!IsFinite(center) || center.Length() < 1e-6f)
+        return false;
+
+    const Vector3 size = VectorMax(params_.size_, Vector3::ONE * CsgBoxParams::MinSize);
+    CsgBoxParams params = params_;
+    for (Vector3& corner : params.corners_)
+        corner -= center / size;
+
+    // The sanitizer must not change the result, and the shape must stay valid.
+    const CsgBoxParams wanted = params;
+    CsgSanitizeBoxParams(params);
+    if (params.corners_ != wanted.corners_)
+        return false;
+    CsgShapeMesh mesh;
+    if (!CsgGenerateBox(params, mesh))
+        return false;
+
+    SetParams(params);
+    localOffset = center;
+    return true;
+}
+
 void CsgBoxBrush::SanitizeParameters() { CsgSanitizeBoxParams(params_); }
 
 bool CsgBoxBrush::GenerateMesh(CsgShapeMesh& mesh) const { return CsgGenerateBox(params_, mesh); }

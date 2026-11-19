@@ -64,6 +64,12 @@ public:
     /// Otherwise set the parameters with the clamping setter (one `MarkDirty`) and return true.
     /// The default has no handle and returns false.
     virtual bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) { return false; }
+    /// Move the parameters so the shape is centered around the origin of the brush.
+    /// Set `localOffset` to the amount in the local space that the center was away from the origin.
+    /// Return false and keep the parameters if there is nothing to do or the new parameters are not valid.
+    /// Otherwise set the parameters with the clamping setter (one `MarkDirty`) and return true.
+    /// The default returns false.
+    virtual bool Recenter(Vector3& localOffset) { return false; }
 
 protected:
     /// Clamp the parameters to the valid range. A value that is not finite gets its default value.
@@ -91,6 +97,8 @@ private:
     void HandleQueryHandles(StringHash eventType, VariantMap& eventData);
     /// Answer `E_CSGSHAPEMOVEHANDLES`. The data map gets the result.
     void HandleMoveHandles(StringHash eventType, VariantMap& eventData);
+    /// Answer `E_CSGSHAPERECENTER`. The data map gets the result.
+    void HandleRecenter(StringHash eventType, VariantMap& eventData);
 
     /// Resize the "Materials" attribute to the number of material slots. The existing names stay.
     void UpdateMaterialSlots();

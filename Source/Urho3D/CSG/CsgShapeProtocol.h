@@ -47,7 +47,8 @@ namespace CsgShapeProtocol
 {
 
 /// The version of the protocol.
-inline constexpr int Version = 1;
+/// Version 2 adds `E_CSGSHAPERECENTER`. The handle ids do not change.
+inline constexpr int Version = 2;
 
 /// The keys of the VariantMap of one handle in `P_HANDLES`.
 /// @{
@@ -82,6 +83,18 @@ URHO3D_EVENT(E_CSGSHAPEMOVEHANDLES, CsgShapeMoveHandles)
     URHO3D_PARAM(P_INDICES, Indices); // VariantVector
     URHO3D_PARAM(P_DELTA, Delta); // Vector3
     URHO3D_PARAM(P_ACCEPTED, Accepted); // bool
+}
+
+/// Move the shape parameters so the shape is centered around the origin of the brush.
+/// The shape in the local space moves by -P_OFFSET. The caller moves the node so the world shape stays.
+/// Out: P_ACCEPTED (bool) and P_OFFSET (Vector3).
+/// P_OFFSET is the amount in the local space of the brush that the shape center was away from the origin.
+/// P_ACCEPTED is false if the shape is already centered, is always centered, or the new parameters are not valid.
+/// Then the parameters stay as they are. The handle ids do not change.
+URHO3D_EVENT(E_CSGSHAPERECENTER, CsgShapeRecenter)
+{
+    URHO3D_PARAM(P_ACCEPTED, Accepted); // bool
+    URHO3D_PARAM(P_OFFSET, Offset); // Vector3
 }
 
 } // namespace Urho3D

@@ -232,6 +232,30 @@ bool CsgCylinderBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector
     return true;
 }
 
+bool CsgCylinderBrush::Recenter(Vector3& localOffset)
+{
+    const Vector3 center = (params_.bottomCenter_ + params_.topCenter_) * 0.5f;
+    if (!IsFinite(center) || center.Length() < 1e-6f)
+        return false;
+
+    CsgCylinderParams params = params_;
+    params.bottomCenter_ -= center;
+    params.topCenter_ -= center;
+
+    // The sanitizer must not change the result, and the shape must stay valid.
+    const CsgCylinderParams wanted = params;
+    CsgSanitizeCylinderParams(params);
+    if (params.bottomCenter_ != wanted.bottomCenter_ || params.topCenter_ != wanted.topCenter_)
+        return false;
+    CsgShapeMesh mesh;
+    if (!CsgGenerateCylinder(params, mesh))
+        return false;
+
+    SetParams(params);
+    localOffset = center;
+    return true;
+}
+
 void CsgCylinderBrush::SanitizeParameters() { CsgSanitizeCylinderParams(params_); }
 
 bool CsgCylinderBrush::GenerateMesh(CsgShapeMesh& mesh) const { return CsgGenerateCylinder(params_, mesh); }

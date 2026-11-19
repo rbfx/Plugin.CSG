@@ -21,6 +21,7 @@ CsgProceduralBrush::CsgProceduralBrush(Context* context)
     uvMode_ = CsgUvMode::Root;
     SubscribeToEvent(this, E_CSGSHAPEQUERYHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleQueryHandles));
     SubscribeToEvent(this, E_CSGSHAPEMOVEHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleMoveHandles));
+    SubscribeToEvent(this, E_CSGSHAPERECENTER, URHO3D_HANDLER(CsgProceduralBrush, HandleRecenter));
 }
 
 CsgProceduralBrush::~CsgProceduralBrush() = default;
@@ -146,6 +147,16 @@ void CsgProceduralBrush::HandleMoveHandles(StringHash eventType, VariantMap& eve
             accepted = MoveHandles(ids, delta->second.GetVector3());
     }
     eventData[P_ACCEPTED] = accepted;
+}
+
+void CsgProceduralBrush::HandleRecenter(StringHash eventType, VariantMap& eventData)
+{
+    using namespace CsgShapeRecenter;
+
+    Vector3 offset;
+    const bool accepted = Recenter(offset);
+    eventData[P_ACCEPTED] = accepted;
+    eventData[P_OFFSET] = accepted ? offset : Vector3::ZERO;
 }
 
 void CsgProceduralBrush::OnParametersChanged()
