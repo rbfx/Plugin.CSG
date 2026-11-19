@@ -360,4 +360,68 @@ PLUGIN_RBFXCSG_API void CsgSanitizeStairsParams(CsgStairsParams& params);
 /// positive or the float positions merge in a triangle (very small steps far from the origin).
 PLUGIN_RBFXCSG_API bool CsgGenerateStairs(const CsgStairsParams& params, CsgShapeMesh& mesh);
 
+/// The parameters of a procedural arch: an annular sector of an ellipse in the XY plane, extruded along Z.
+///
+/// The arch is symmetric about +Y. Its angles go from 90 - arc / 2 to 90 + arc / 2 degrees, measured from +X.
+/// The point at the angle t on the outer curve is (radius.x cos t, radius.y sin t). The inner curve uses the
+/// inner radius `radius - thickness`, per axis. The origin of the curves is the center: an arc of 180 degrees
+/// stands on the plane y = center.y, as a door top. The extrusion is z in [-depth / 2, depth / 2] around the center.
+struct CsgArchParams
+{
+    static constexpr float MinRadius = 0.01f;
+    static constexpr float MaxRadius = 16384.0f;
+    static constexpr float MinThickness = 0.005f;
+    /// An inner radius component below this value makes the arch a filled sector.
+    static constexpr float MinInnerRadius = 0.001f;
+    static constexpr float MinDepth = 0.001f;
+    static constexpr float MaxDepth = 16384.0f;
+    static constexpr float MinArc = 1.0f;
+    static constexpr float MaxArc = 180.0f;
+    static constexpr int MinSegments = 3;
+    static constexpr int MaxSegments = 128;
+
+    /// The outer radius along X and along Y.
+    Vector2 radius_{1.0f, 1.0f};
+    /// The wall thickness. The inner radius is `radius - thickness` per axis.
+    float thickness_{0.25f};
+    /// The extrusion along Z.
+    float depth_{1.0f};
+    /// The sweep of the arch in degrees.
+    float arc_{180.0f};
+    /// The number of divisions of the arc.
+    int segments_{16};
+    /// The center of the curves in the local space of the brush.
+    Vector3 center_{Vector3::ZERO};
+};
+
+/// Clamp each radius to [0.01, 16384], the thickness to [0.005, max(radius.x, radius.y)], the depth to
+/// [0.001, 16384], the arc to [1, 180], the segments to [3, 128] and each center component to [-16384, 16384].
+/// A value that is not finite gets its default value.
+PLUGIN_RBFXCSG_API void CsgSanitizeArchParams(CsgArchParams& params);
+
+/// Return the inner radius of sanitized parameters: `radius - thickness` per axis.
+/// If a component is below `MinInnerRadius`, return (0, 0): the arch is a filled sector.
+PLUGIN_RBFXCSG_API Vector2 CsgGetArchInnerRadius(const CsgArchParams& params);
+
+/// Generate an arch.
+///
+/// The mesh has one position table: the segments + 1 outer points at the front (+Z), the same at the back (-Z),
+/// then the inner points at the front and at the back. A filled sector has the apex (the center) at the front
+/// and at the back instead of the inner points.
+/// The front and the back are strips of one quad (two triangles) for each segment between the inner and the outer
+/// points. A filled sector has a fan from the apex. The ends are quads in the planes of the end angles.
+///
+/// Face groups, in this order and with these slots (the order is a file contract):
+/// 0 the outer curved face, 1 the inner curved face, 2 the front (+Z), 3 the back (-Z), 4 the two ends.
+/// A filled sector has no inner face. Its slot stays free.
+/// The curved faces have smooth normals: the analytic normal of the ellipse. The other faces are flat.
+/// UV 0 of a curved face is (arc length along the curve, -z). UV 0 of a flat face is a planar projection
+/// in shape units, relative to the center. UV 1 is equal to UV 0.
+///
+/// The function uses a sanitized copy of the parameters. See `CsgSanitizeArchParams`.
+/// Return false if the shape is not valid. Then `mesh` is empty. A shape is not valid if the volume is not
+/// positive, a quad of the front has no diagonal that gives two triangles with a positive area (a very thin wall
+/// of a flat ellipse), or the float positions merge in a triangle (a very small arch far from the origin).
+PLUGIN_RBFXCSG_API bool CsgGenerateArch(const CsgArchParams& params, CsgShapeMesh& mesh);
+
 } // namespace Urho3D

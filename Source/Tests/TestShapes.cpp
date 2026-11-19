@@ -2396,3 +2396,227 @@ TEST_CASE("CsgSanitizeStairsParams clamps the range and CsgGenerateStairs refuse
     REQUIRE(CsgGenerateStairs(far, mesh));
     CHECK(IsExactlyClosed(mesh));
 }
+
+namespace
+{
+
+/// Return the area of the front polygon of the arch with the shoelace formula, from the parameters.
+/// The polygon is the outer points from the start angle to the end angle, then the inner points back
+/// (or the apex for a filled sector). It is independent of the generator.
+double ArchShoelaceArea(const CsgArchParams& p, const Vector2& inner)
+{
+    ea::vector<ea::pair<double, double>> polygon;
+    const double pi = 3.14159265358979323846;
+    const auto angle = [&](unsigned k) { return (90.0 - p.arc_ / 2.0 + static_cast<double>(p.arc_) * k / p.segments_) * pi / 180.0; };
+    for (int k = 0; k <= p.segments_; ++k)
+        polygon.emplace_back(p.radius_.x_ * std::cos(angle(k)), p.radius_.y_ * std::sin(angle(k)));
+    if (inner == Vector2::ZERO)
+        polygon.emplace_back(0.0, 0.0);
+    else
+    {
+        for (int k = p.segments_; k >= 0; --k)
+            polygon.emplace_back(inner.x_ * std::cos(angle(k)), inner.y_ * std::sin(angle(k)));
+    }
+    double area = 0.0;
+    for (unsigned i = 0; i < polygon.size(); ++i)
+    {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size()];
+        area += a.first * b.second - b.first * a.second;
+    }
+    return area / 2.0;
+}
+
+ea::vector<CsgArchParams> MakeArchVariants()
+{
+    ea::vector<CsgArchParams> result;
+    for (const float arc : {1.0f, 90.0f, 180.0f})
+    {
+        for (const int segments : {3, 16, 128})
+        {
+            for (const Vector2& radius : {Vector2(1.0f, 1.0f), Vector2(2.0f, 0.5f), Vector2(0.01f, 0.01f),
+                     Vector2(16384.0f, 16384.0f)})
+            {
+                // 0.005 is the thinnest wall, 0.25 the default, the radius gives a filled sector.
+                for (const float thickness : {0.005f, 0.25f, ea::max(radius.x_, radius.y_)})
+                {
+                    CsgArchParams params;
+                    params.arc_ = arc;
+                    params.segments_ = segments;
+                    params.radius_ = radius;
+                    params.thickness_ = thickness;
+                    params.depth_ = radius.x_ > 100.0f ? 1000.0f : 0.5f;
+                    params.center_ = segments == 16 ? Vector3(1.0f, -2.0f, 3.0f) : Vector3::ZERO;
+                    result.push_back(params);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+} // namespace
+
+TEST_CASE("CsgGenerateArch gives a closed mesh with the shoelace volume over the extremes", "[shapes][procedural]")
+{
+    for (const CsgArchParams& raw : MakeArchVariants())
+    {
+        CsgArchParams params = raw;
+        CsgSanitizeArchParams(params);
+        const Vector2 inner = CsgGetArchInnerRadius(params);
+        const bool filled = inner == Vector2::ZERO;
+        INFO("Arc " << params.arc_ << " segments " << params.segments_ << " radius " << params.radius_.ToString().c_str()
+                    << " thickness " << params.thickness_);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateArch(params, mesh));
+        const unsigned n = params.segments_;
+        CHECK(mesh.indices_.size() == 3 * (filled ? 4 * n + 4 : 8 * n + 4));
+        CHECK(CountDistinctPositionBits(mesh) == (filled ? 2 * n + 4 : 4 * n + 4));
+        CheckShapeMeshRules(mesh, n <= 16 && params.radius_.x_ > 0.1f);
+        CHECK(GroupSlots(mesh) == (filled ? ea::vector<unsigned>{0, 2, 3, 4} : ea::vector<unsigned>{0, 1, 2, 3, 4}));
+
+        // The volume is the shoelace area of the front polygon times the depth.
+        const double area = ArchShoelaceArea(params, inner);
+        // The float positions round by up to half a float step of the radius. Over the two curves of the
+        // length of about arc * radius this changes the area by about arc * radius * step.
+        const double maxRadius = ea::max(params.radius_.x_, params.radius_.y_);
+        const double floatStep = maxRadius * std::numeric_limits<float>::epsilon();
+        const double rounding = 2.0 * (params.arc_ * 3.14159265358979323846 / 180.0 + 2.0) * maxRadius * floatStep;
+        CHECK(VolumeAround(mesh, params.center_)
+            == Catch::Approx(area * params.depth_).epsilon(1e-4).margin(rounding * params.depth_));
+        // The analytic area of the elliptic annular sector is (rx ry - irx iry) / 2 * arc, plus the two end
+        // triangles with the origin: the inner and the outer point of an end are not on one ray through the origin
+        // if the inner radius is not proportional. The polygon area of one segment is (ab / 2) sin(d) instead of
+        // (ab / 2) d, so the error is about the sector area times d^2 / 6.
+        const double pi = 3.14159265358979323846;
+        const double arcRad = params.arc_ * pi / 180.0;
+        const double a0 = (90.0 - params.arc_ / 2.0) * pi / 180.0;
+        const double a1 = (90.0 + params.arc_ / 2.0) * pi / 180.0;
+        const double rx = params.radius_.x_, ry = params.radius_.y_, irx = inner.x_, iry = inner.y_;
+        const double sector = (rx * ry - irx * iry) / 2.0 * arcRad;
+        // The end terms of the shoelace sum: cross(outer end, inner end) + cross(inner start, outer start).
+        const double ends = 0.5
+            * ((rx * std::cos(a1)) * (iry * std::sin(a1)) - (irx * std::cos(a1)) * (ry * std::sin(a1))
+                + (irx * std::cos(a0)) * (ry * std::sin(a0)) - (rx * std::cos(a0)) * (iry * std::sin(a0)));
+        const double analytic = sector + ends;
+        const double step = arcRad / n;
+        CHECK(area == Catch::Approx(analytic).margin(sector * step * step / 6.0 * 1.1 + 1e-9 * rx * ry));
+        CHECK(area <= analytic * (1.0 + 1e-9));
+    }
+}
+
+TEST_CASE("CsgGenerateArch faces point outward and the curved normals follow the ellipse", "[shapes][procedural]")
+{
+    for (const float thickness : {0.25f, 1.0f})
+    {
+        CsgArchParams params;
+        params.radius_ = Vector2(1.5f, 1.0f);
+        params.thickness_ = thickness;
+        params.arc_ = 120.0f;
+        params.segments_ = 8;
+        params.center_ = Vector3(0.5f, 1.0f, -2.0f);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateArch(params, mesh));
+        const Vector2 inner = CsgGetArchInnerRadius(params);
+        CHECK((thickness == 1.0f) == (inner == Vector2::ZERO));
+
+        for (const Vector3& n : GroupTriangleNormals(mesh, 2))
+            CHECK(n.Equals(Vector3::FORWARD, 1e-5f));
+        for (const Vector3& n : GroupTriangleNormals(mesh, 3))
+            CHECK(n.Equals(Vector3::BACK, 1e-5f));
+
+        for (const CsgShapeGroup& group : mesh.groups_)
+        {
+            for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; i += 3)
+            {
+                const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+                const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+                const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+                const Vector3 n = (p1 - p0).CrossProduct(p2 - p0).Normalized();
+                Vector3 radial = (p0 + p1 + p2) / 3.0f - params.center_;
+                radial.z_ = 0.0f;
+                // The curved faces: the outer normal points away from the center, the inner toward it.
+                if (group.slot_ == 0)
+                    CHECK(n.DotProduct(radial) > 0.0f);
+                if (group.slot_ == 1)
+                    CHECK(n.DotProduct(radial) < 0.0f);
+                if (group.slot_ == 4)
+                {
+                    // The end at the start angle (x > 0) faces a smaller angle, the other end a larger one.
+                    const float angle = (radial.x_ > 0.0f ? 30.0f : 150.0f) * 3.14159265f / 180.0f;
+                    const Vector3 away = radial.x_ > 0.0f ? Vector3(std::sin(angle), -std::cos(angle), 0.0f)
+                                                          : Vector3(-std::sin(angle), std::cos(angle), 0.0f);
+                    CHECK(n.DotProduct(away) > 0.5f);
+                    CHECK(Abs(n.z_) < 1e-5f);
+                }
+                if (group.slot_ == 0 || group.slot_ == 1)
+                {
+                    const Vector2 r = group.slot_ == 0 ? params.radius_ : inner;
+                    for (unsigned k = 0; k < 3; ++k)
+                    {
+                        const ModelVertex& v = mesh.vertices_[mesh.indices_[i + k]];
+                        const Vector3 local = v.GetPosition() - params.center_;
+                        // The gradient of the ellipse: (x / rx^2, y / ry^2).
+                        Vector3 expected = Vector3(local.x_ / (r.x_ * r.x_), local.y_ / (r.y_ * r.y_), 0.0f).Normalized();
+                        if (group.slot_ == 1)
+                            expected = -expected;
+                        CHECK(v.GetNormal().Equals(expected, 1e-4f));
+                    }
+                }
+            }
+        }
+        CheckShapeModelLayout(mesh, 5);
+    }
+}
+
+TEST_CASE("CsgSanitizeArchParams clamps the range and CsgGenerateArch refuses merged positions", "[shapes][procedural]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CsgArchParams params;
+    params.radius_ = Vector2(nan, 1e9f);
+    params.thickness_ = 1e9f;
+    params.depth_ = -1.0f;
+    params.arc_ = 1000.0f;
+    params.segments_ = 1;
+    params.center_ = Vector3(nan, 1e9f, 0.0f);
+    CsgSanitizeArchParams(params);
+    CHECK(params.radius_ == Vector2(1.0f, CsgArchParams::MaxRadius));
+    CHECK(params.thickness_ == CsgArchParams::MaxRadius);
+    CHECK(params.depth_ == CsgArchParams::MinDepth);
+    CHECK(params.arc_ == CsgArchParams::MaxArc);
+    CHECK(params.segments_ == 3);
+    CHECK(params.center_ == Vector3(0.0f, CsgMaxShapeCenter, 0.0f));
+    params.arc_ = -5.0f;
+    params.segments_ = 500;
+    params.thickness_ = nan;
+    params.radius_ = Vector2(0.0f, 0.1f);
+    CsgSanitizeArchParams(params);
+    CHECK(params.arc_ == CsgArchParams::MinArc);
+    CHECK(params.segments_ == 128);
+    CHECK(params.radius_ == Vector2(CsgArchParams::MinRadius, 0.1f));
+    // The default thickness is above the largest radius, so it is clamped to it.
+    CHECK(params.thickness_ == 0.1f);
+    CHECK(CsgGetArchInnerRadius(params) == Vector2::ZERO);
+
+    // One inner component below 0.001 makes a filled sector.
+    CsgArchParams wide;
+    wide.radius_ = Vector2(1.0f, 2.0f);
+    wide.thickness_ = 1.0f;
+    CHECK(CsgGetArchInnerRadius(wide) == Vector2::ZERO);
+    wide.thickness_ = 0.5f;
+    CHECK(CsgGetArchInnerRadius(wide) == Vector2(0.5f, 1.5f));
+
+    // A tiny arch far from the origin merges its float positions: it is not valid.
+    CsgArchParams far;
+    far.radius_ = Vector2(0.01f, 0.01f);
+    far.thickness_ = 0.005f;
+    far.depth_ = 0.001f;
+    far.arc_ = 1.0f;
+    far.segments_ = 128;
+    far.center_ = Vector3(16384.0f, 16384.0f, 16384.0f);
+    CsgShapeMesh mesh;
+    CHECK_FALSE(CsgGenerateArch(far, mesh));
+    CHECK(mesh.vertices_.empty());
+    CHECK(mesh.indices_.empty());
+    CHECK(mesh.groups_.empty());
+}

@@ -1239,4 +1239,229 @@ bool CsgGenerateStairs(const CsgStairsParams& params, CsgShapeMesh& mesh)
     return writer.Finish();
 }
 
+void CsgSanitizeArchParams(CsgArchParams& params)
+{
+    const CsgArchParams defaults;
+    params.radius_ = Vector2(
+        SanitizeValue(params.radius_.x_, CsgArchParams::MinRadius, CsgArchParams::MaxRadius, defaults.radius_.x_),
+        SanitizeValue(params.radius_.y_, CsgArchParams::MinRadius, CsgArchParams::MaxRadius, defaults.radius_.y_));
+    const float maxThickness = ea::max(params.radius_.x_, params.radius_.y_);
+    params.thickness_ = Clamp(
+        SanitizeValue(params.thickness_, CsgArchParams::MinThickness, CsgArchParams::MaxRadius, defaults.thickness_),
+        CsgArchParams::MinThickness, maxThickness);
+    params.depth_ = SanitizeValue(params.depth_, CsgArchParams::MinDepth, CsgArchParams::MaxDepth, defaults.depth_);
+    params.arc_ = SanitizeValue(params.arc_, CsgArchParams::MinArc, CsgArchParams::MaxArc, defaults.arc_);
+    params.segments_ = Clamp(params.segments_, CsgArchParams::MinSegments, CsgArchParams::MaxSegments);
+    params.center_ = SanitizeCenter(params.center_);
+}
+
+Vector2 CsgGetArchInnerRadius(const CsgArchParams& params)
+{
+    const Vector2 inner = params.radius_ - Vector2(params.thickness_, params.thickness_);
+    if (inner.x_ < CsgArchParams::MinInnerRadius || inner.y_ < CsgArchParams::MinInnerRadius)
+        return Vector2::ZERO;
+    return inner;
+}
+
+namespace
+{
+
+/// Return the cosine and the sine of the angle in degrees. A multiple of 90 degrees gives exact values.
+void CosSinDegrees(double degrees, double& c, double& s)
+{
+    const double quarter = degrees / 90.0;
+    if (quarter == std::floor(quarter))
+    {
+        const long q = ((static_cast<long>(quarter) % 4) + 4) % 4;
+        const double cosTable[4] = {1.0, 0.0, -1.0, 0.0};
+        const double sinTable[4] = {0.0, 1.0, 0.0, -1.0};
+        c = cosTable[q];
+        s = sinTable[q];
+        return;
+    }
+    c = std::cos(degrees * (M_PI / 180.0));
+    s = std::sin(degrees * (M_PI / 180.0));
+}
+
+/// Return the z component of (b - a) x (c - a) in doubles.
+double CrossZ(const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    const double abx = static_cast<double>(b.x_) - a.x_, aby = static_cast<double>(b.y_) - a.y_;
+    const double acx = static_cast<double>(c.x_) - a.x_, acy = static_cast<double>(c.y_) - a.y_;
+    return abx * acy - aby * acx;
+}
+
+} // namespace
+
+bool CsgGenerateArch(const CsgArchParams& params, CsgShapeMesh& mesh)
+{
+    CsgArchParams sanitized = params;
+    CsgSanitizeArchParams(sanitized);
+    const unsigned segments = static_cast<unsigned>(sanitized.segments_);
+    const unsigned numPoints = segments + 1;
+    const double rx = sanitized.radius_.x_;
+    const double ry = sanitized.radius_.y_;
+    const Vector2 inner = CsgGetArchInnerRadius(sanitized);
+    const bool filled = inner == Vector2::ZERO;
+    const double irx = inner.x_;
+    const double iry = inner.y_;
+    const float hd = sanitized.depth_ * 0.5f;
+    const Vector3& c = sanitized.center_;
+    const double startAngle = 90.0 - sanitized.arc_ * 0.5;
+
+    ea::vector<double> cosTable(numPoints);
+    ea::vector<double> sinTable(numPoints);
+    for (unsigned k = 0; k < numPoints; ++k)
+        CosSinDegrees(startAngle + static_cast<double>(sanitized.arc_) * k / segments, cosTable[k], sinTable[k]);
+
+    // Each vertex copies its position from this table, so the shared positions are bit-identical.
+    const unsigned outerFront = 0;
+    const unsigned outerBack = numPoints;
+    const unsigned innerFront = 2 * numPoints;
+    const unsigned innerBack = filled ? innerFront + 1 : 3 * numPoints;
+    ea::vector<Vector3> positions(filled ? 2 * numPoints + 2 : 4 * numPoints);
+    for (unsigned k = 0; k < numPoints; ++k)
+    {
+        const float x = static_cast<float>(rx * cosTable[k]);
+        const float y = static_cast<float>(ry * sinTable[k]);
+        positions[outerFront + k] = c + Vector3(x, y, hd);
+        positions[outerBack + k] = c + Vector3(x, y, -hd);
+        if (!filled)
+        {
+            const float ix = static_cast<float>(irx * cosTable[k]);
+            const float iy = static_cast<float>(iry * sinTable[k]);
+            positions[innerFront + k] = c + Vector3(ix, iy, hd);
+            positions[innerBack + k] = c + Vector3(ix, iy, -hd);
+        }
+    }
+    if (filled)
+    {
+        positions[innerFront] = c + Vector3(0.0f, 0.0f, hd);
+        positions[innerBack] = c + Vector3(0.0f, 0.0f, -hd);
+    }
+    // The inner point k. A filled sector has the apex for each k.
+    const auto innerF = [&](unsigned k) { return filled ? innerFront : innerFront + k; };
+    const auto innerB = [&](unsigned k) { return filled ? innerBack : innerBack + k; };
+
+    ShapeMeshWriter writer(mesh, positions, c);
+    const unsigned numTriangles = segments * (filled ? 4 : 8) + 4;
+    mesh.vertices_.reserve(3 * numTriangles);
+    mesh.indices_.reserve(3 * numTriangles);
+
+    // A corner of a curved face: the smooth normal of the ellipse, U along the curve, V along -Z.
+    const auto curvedCorner = [&](unsigned index, double a, double b, unsigned k, float arcLength, bool outward)
+    {
+        ShapeCorner corner;
+        corner.index_ = index;
+        corner.uv_ = Vector2(arcLength, -(positions[index].z_ - c.z_));
+        // The normal of the ellipse is (b cos t, a sin t). The tangent is (-a sin t, b cos t). Both use doubles,
+        // so a small radius still gives a unit vector.
+        const double nx = b * cosTable[k], ny = a * sinTable[k];
+        const double length = std::sqrt(nx * nx + ny * ny);
+        const Vector3 normal(static_cast<float>(nx / length), static_cast<float>(ny / length), 0.0f);
+        corner.normal_ = outward ? normal : -normal;
+        const double tx = -a * sinTable[k], ty = b * cosTable[k];
+        const double tangentLength = std::sqrt(tx * tx + ty * ty);
+        corner.tangentDir_ = Vector3(static_cast<float>(tx / tangentLength), static_cast<float>(ty / tangentLength), 0.0f);
+        corner.vDir_ = Vector3::BACK;
+        return corner;
+    };
+    const auto curvedFace = [&](unsigned front, unsigned back, double a, double b, bool outward)
+    {
+        float arcLength = 0.0f;
+        for (unsigned k = 0; k < segments; ++k)
+        {
+            const Vector3 chord = positions[front + k + 1] - positions[front + k];
+            const float nextLength = arcLength + Vector2(chord.x_, chord.y_).Length();
+            const ShapeCorner b0 = curvedCorner(back + k, a, b, k, arcLength, outward);
+            const ShapeCorner b1 = curvedCorner(back + k + 1, a, b, k + 1, nextLength, outward);
+            const ShapeCorner f1 = curvedCorner(front + k + 1, a, b, k + 1, nextLength, outward);
+            const ShapeCorner f0 = curvedCorner(front + k, a, b, k, arcLength, outward);
+            if (outward)
+            {
+                writer.Triangle(b0, b1, f1);
+                writer.Triangle(b0, f1, f0);
+            }
+            else
+            {
+                writer.Triangle(f0, f1, b1);
+                writer.Triangle(f0, b1, b0);
+            }
+            arcLength = nextLength;
+        }
+    };
+
+    writer.BeginGroup();
+    curvedFace(outerFront, outerBack, rx, ry, true);
+    writer.EndGroup(0);
+
+    if (!filled)
+    {
+        writer.BeginGroup();
+        curvedFace(innerFront, innerBack, irx, iry, false);
+        writer.EndGroup(1);
+    }
+
+    // The front and the back. Each quad (inner k, outer k, outer k + 1, inner k + 1) uses the first diagonal
+    // that gives two triangles with a positive area in the XY plane.
+    ea::vector<bool> firstDiagonal(segments, true);
+    if (!filled)
+    {
+        for (unsigned k = 0; k < segments; ++k)
+        {
+            const Vector3& i0 = positions[innerF(k)];
+            const Vector3& o0 = positions[outerFront + k];
+            const Vector3& o1 = positions[outerFront + k + 1];
+            const Vector3& i1 = positions[innerF(k + 1)];
+            if (CrossZ(i0, o0, o1) > 0.0 && CrossZ(i0, o1, i1) > 0.0)
+                firstDiagonal[k] = true;
+            else if (CrossZ(i0, o0, i1) > 0.0 && CrossZ(o0, o1, i1) > 0.0)
+                firstDiagonal[k] = false;
+            else
+                writer.Fail();
+        }
+    }
+    const FaceFrame frontFrame{Vector3::RIGHT, Vector3::UP};
+    const FaceFrame backFrame{Vector3::LEFT, Vector3::UP};
+    writer.BeginGroup();
+    for (unsigned k = 0; k < segments; ++k)
+    {
+        if (filled)
+            writer.FlatTriangle(innerFront, outerFront + k, outerFront + k + 1, frontFrame);
+        else if (firstDiagonal[k])
+            writer.FlatQuad(innerF(k), outerFront + k, outerFront + k + 1, innerF(k + 1), frontFrame);
+        else
+            writer.FlatQuad(outerFront + k, outerFront + k + 1, innerF(k + 1), innerF(k), frontFrame);
+    }
+    writer.EndGroup(2);
+
+    writer.BeginGroup();
+    for (unsigned k = 0; k < segments; ++k)
+    {
+        if (filled)
+            writer.FlatTriangle(innerBack, outerBack + k + 1, outerBack + k, backFrame);
+        else if (firstDiagonal[k])
+            writer.FlatQuad(innerB(k), innerB(k + 1), outerBack + k + 1, outerBack + k, backFrame);
+        else
+            writer.FlatQuad(outerBack + k, innerB(k), innerB(k + 1), outerBack + k + 1, backFrame);
+    }
+    writer.EndGroup(3);
+
+    // The ends. The start end faces the direction of a smaller angle, the end faces a larger angle.
+    writer.BeginGroup();
+    {
+        const Vector3 radial = positions[outerFront] - positions[innerF(0)];
+        const Vector3 normal = radial.CrossProduct(Vector3::FORWARD).NormalizedOrDefault(Vector3::DOWN);
+        writer.FlatQuad(innerF(0), innerB(0), outerBack, outerFront, MakeFaceFrame(normal, radial.Normalized()));
+    }
+    {
+        const Vector3 radial = positions[outerFront + segments] - positions[innerF(segments)];
+        const Vector3 normal = Vector3::FORWARD.CrossProduct(radial).NormalizedOrDefault(Vector3::DOWN);
+        writer.FlatQuad(innerB(segments), innerF(segments), outerFront + segments, outerBack + segments,
+            MakeFaceFrame(normal, radial.Normalized()));
+    }
+    writer.EndGroup(4);
+    return writer.Finish();
+}
+
 } // namespace Urho3D
