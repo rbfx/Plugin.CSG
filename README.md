@@ -135,6 +135,17 @@ The toolbar has the same commands. The toolbar "add" buttons put the brush at th
 - "Add brush" selects the new brush. One undo step removes the brush, and the new root too.
 - An operation change is one undo step. The root rebuilds at once.
 - The operation keys do nothing if no brush is selected.
+- A new brush has a world scale of about 1. Its local scale is the inverse of the root world scale.
+
+### Drop a model
+
+Drag a model (`.mdl`) from the resource browser into the scene view. The active selected node selects the case:
+
+- A CSG root, or its result node: the drop adds a union brush with the model under the root, at the hit point. Hold Shift at drop time to add a subtract brush (`DifferenceAB`). The new brush is selected. One undo step removes it.
+- A brush: the drop sets the model of all selected brushes. The brushes stay at their positions. One undo step restores the old models.
+- Any other node, or no selection: the stock editor behavior. The editor adds a plain node with a `StaticModel`.
+
+During the drag, the scene shows a preview. The preview brush of the "add" case does not change the CSG result until the drop. A move out of the view removes the preview.
 
 ### Manual check list
 
@@ -149,7 +160,16 @@ The editor has no test harness for addons. Do these checks by hand:
 7. Push Ctrl+Z three times. The scene goes back to the state of step 4, step 3 and then an empty scene.
 8. Click in a text field of the inspector. Type "123b". The text field gets the characters. No brush is added and no operation changes.
 9. Select a node without CSG. Push 1. Nothing changes.
-10. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
+10. Select the root. Drag a model into the view. A preview of the model moves with the cursor. Drop it. A new union brush appears at the cursor and is selected.
+11. Select the root. Drag a model and hold Shift at the drop. The new brush cuts the result.
+12. Select the root. Drag a model, then move the cursor out of the view and release. No brush stays in the scene.
+13. Select one brush. Drag a different model into the view. The brush shape changes during the drag. Drop it. Push Ctrl+Z. The old model comes back.
+14. Select two brushes. Drop a model. Both brushes change. One Ctrl+Z restores both.
+15. Select a brush. Drag a model out of the view again and release. The old model comes back.
+16. Select a node without CSG. Drop a model. The editor adds a plain node with the model, as before.
+17. Select the root. Drop a material or a prefab. The stock behavior applies.
+18. Select a root with the scale (72, 1, 82). Push B. The new brush has about the size of the box model, not 72 units.
+19. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
 
 ## How to try the sample scene
 

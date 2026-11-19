@@ -223,6 +223,49 @@ TEST_CASE("AddBrushNode appends and keeps the world position", "[editorops]")
     CHECK(plain->GetNumChildren() == 0);
 }
 
+TEST_CASE("AddBrushNode gives the brush a world scale of 1", "[editorops]")
+{
+    Fixture f;
+    AddBox(f.context, "Csg/Unit.mdl", Vector3::ONE * 0.5f);
+    auto* model = f.context->GetSubsystem<ResourceCache>()->GetResource<Model>("Csg/Unit.mdl");
+    REQUIRE(model);
+
+    const auto worldBoxSize = [&](Node* node) { return model->GetBoundingBox().Transformed(node->GetWorldTransform()).Size(); };
+
+    SECTION("Root with no rotation")
+    {
+        Node* rootNode = f.MakeRoot();
+        rootNode->SetScale(Vector3(72.0f, 1.0f, 82.0f));
+        Node* brush = AddBrushNode(rootNode, "Csg/Unit.mdl", 0, Vector3(3.0f, 1.0f, -2.0f));
+        REQUIRE(brush);
+        CHECK(brush->GetWorldPosition().Equals(Vector3(3.0f, 1.0f, -2.0f), 1e-3f));
+        CHECK(brush->GetWorldScale().Equals(Vector3::ONE, 1e-4f));
+        CHECK(worldBoxSize(brush).Equals(Vector3::ONE, 1e-4f));
+    }
+
+    SECTION("Root with a rotation")
+    {
+        Node* rootNode = f.MakeRoot();
+        rootNode->SetScale(Vector3(72.0f, 1.0f, 82.0f));
+        rootNode->SetRotation(Quaternion(90.0f, Vector3::UP));
+        Node* brush = AddBrushNode(rootNode, "Csg/Unit.mdl", 0, Vector3(3.0f, 1.0f, -2.0f));
+        REQUIRE(brush);
+        CHECK(brush->GetWorldPosition().Equals(Vector3(3.0f, 1.0f, -2.0f), 1e-3f));
+        CHECK(brush->GetWorldScale().Equals(Vector3::ONE, 1e-4f));
+        CHECK(brush->GetWorldRotation().Equivalent(rootNode->GetWorldRotation(), 1e-4f));
+        CHECK(worldBoxSize(brush).Equals(Vector3::ONE, 1e-3f));
+    }
+
+    SECTION("Root with a zero scale component")
+    {
+        Node* rootNode = f.MakeRoot();
+        rootNode->SetScale(Vector3(2.0f, 0.0f, 4.0f));
+        Node* brush = AddBrushNode(rootNode, "Csg/Unit.mdl", 0, Vector3::ZERO);
+        REQUIRE(brush);
+        CHECK(brush->GetScale().Equals(Vector3(0.5f, 1.0f, 0.25f), 1e-6f));
+    }
+}
+
 TEST_CASE("Operation functions use the attribute enum names", "[editorops]")
 {
     Fixture f;

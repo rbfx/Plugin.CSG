@@ -13,10 +13,15 @@
 #include <Urho3D/Core/Format.h>
 #include <Urho3D/Graphics/Camera.h>
 #include <Urho3D/Graphics/Drawable.h>
+#include <Urho3D/Graphics/Material.h>
+#include <Urho3D/Graphics/Model.h>
+#include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/IO/Log.h>
+#include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
 #include <Urho3D/Scene/Scene.h>
+#include <Urho3D/SystemUI/DragDropPayload.h>
 #include <Urho3D/SystemUI/SystemUI.h>
 #include <Urho3D/SystemUI/Widgets.h>
 #include <Urho3D/Utility/SceneRendererToTexture.h>
@@ -70,13 +75,15 @@ const EditorHotkey* GetOperationHotkey(const ea::string& name)
     return nullptr;
 }
 
-/// Return the nearest hit point of the ray in the scene.
-ea::optional<Vector3> QueryHitPoint(Scene* scene, const Ray& ray)
+/// Return the nearest hit point of the ray in the scene. The query skips the excluded node and its children.
+ea::optional<Vector3> QueryHitPoint(Scene* scene, const Ray& ray, Node* excluded = nullptr)
 {
     ea::optional<Vector3> result;
     float bestDistance = M_INFINITY;
     for (const RayQueryResult& hit : QueryGeometriesFromScene(scene, ray))
     {
+        if (excluded && hit.node_ && (hit.node_ == excluded || hit.node_->IsChildOf(excluded)))
+            continue;
         if (hit.distance_ < bestDistance)
         {
             bestDistance = hit.distance_;
@@ -84,6 +91,16 @@ ea::optional<Vector3> QueryHitPoint(Scene* scene, const Ray& ray)
         }
     }
     return result;
+}
+
+/// Return the first resource of the payload if it is a Model.
+const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
+{
+    const auto resourcePayload = dynamic_cast<ResourceDragDropPayload*>(payload);
+    if (!resourcePayload || resourcePayload->resources_.empty())
+        return nullptr;
+    const ResourceFileDescriptor& desc = resourcePayload->resources_[0];
+    return desc.HasObjectType<Model>() ? &desc : nullptr;
 }
 
 } // namespace
@@ -284,6 +301,191 @@ bool CsgEditorAddon::RenderToolbar()
 
     Widgets::ToolbarSeparator();
     return true;
+}
+
+CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const
+{
+    if (!IsAvailable() || page.IsSimulationActive() || !GetModelResource(payload))
+        return DropMode::None;
+
+    Node* activeNode = page.selection_.GetActiveNode();
+    if (!activeNode)
+        return DropMode::None;
+    if (IsBrushNode(activeNode))
+        return DropMode::ReplaceModel;
+    // The result node of a root is a temporary child. It maps to the root.
+    if (IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent())))
+        return DropMode::NewBrush;
+    return DropMode::None;
+}
+
+bool CsgEditorAddon::IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const
+{
+    // The tab gives the drop to the first addon by input priority that supports it.
+    // A false result here gives the drop to the stock handlers.
+    return GetDropMode(page, payload) != DropMode::None;
+}
+
+void CsgEditorAddon::BeginDragDrop(SceneViewPage& page, DragDropPayload* payload)
+{
+    ResetDrop();
+
+    const ResourceFileDescriptor* desc = GetModelResource(payload);
+    if (!desc)
+        return;
+
+    dropMode_ = GetDropMode(page, payload);
+    dropPage_ = &page;
+    Node* activeNode = page.selection_.GetActiveNode();
+
+    if (dropMode_ == DropMode::ReplaceModel)
+    {
+        // The live preview sets the model now. CancelDragDrop restores the old models.
+        for (Node* brushNode : GetSelectedBrushes(page))
+        {
+            Component* component = brushNode->GetComponent(BrushType);
+            if (!component)
+                continue;
+            const Variant oldValue = component->GetAttribute("Model");
+            if (!SetBrushModel(brushNode, desc->resourceName_))
+                continue;
+            dropComponents_.emplace_back(component);
+            dropOldModels_.push_back(oldValue);
+            dropNewModel_ = component->GetAttribute("Model");
+        }
+    }
+    else if (dropMode_ == DropMode::NewBrush)
+    {
+        Node* rootNode = FindActiveRoot(activeNode);
+        const int operation = FindOperation(UnionName);
+        if (!rootNode || operation < 0)
+            return;
+
+        // The builder must exist before the brush. Then one undo step removes the brush.
+        dropActionBuilder_ = ea::make_unique<CreateNodeActionBuilder>(page.scene_, AttributeScopeHint::Node);
+        dropBrush_ = AddBrushNode(rootNode, desc->resourceName_, operation, rootNode->GetWorldPosition());
+        if (!dropBrush_)
+        {
+            dropActionBuilder_ = nullptr;
+            return;
+        }
+
+        // The brush is disabled during the drag, so the CSG result does not change.
+        // If the result contains the brush, the cursor ray hits the brush and the brush moves to the camera.
+        // A temporary StaticModel shows the brush shape instead.
+        SetBrushEnabled(dropBrush_, false);
+        auto cache = GetSubsystem<ResourceCache>();
+        if (auto model = cache->GetResource<Model>(desc->resourceName_))
+        {
+            auto preview = dropBrush_->CreateComponent<StaticModel>();
+            preview->SetTemporary(true);
+            preview->SetModel(model);
+            preview->ApplyMaterialList();
+            if (auto defaultMaterial = cache->GetResource<Material>("Materials/DefaultWhite.xml"))
+            {
+                for (unsigned i = 0; i < preview->GetNumGeometries(); ++i)
+                {
+                    if (!preview->GetMaterial(i))
+                        preview->SetMaterial(i, defaultMaterial);
+                }
+            }
+            dropPreview_ = preview;
+        }
+        UpdateDropBrushPosition();
+    }
+}
+
+void CsgEditorAddon::UpdateDropBrushPosition()
+{
+    if (!dropPage_ || !dropBrush_)
+        return;
+
+    Node* rootNode = dropBrush_->GetParent();
+    if (const auto hitPoint = QueryHitPoint(dropPage_->scene_, dropPage_->cameraRay_, dropBrush_))
+        dropBrush_->SetWorldPosition(*hitPoint);
+    else if (rootNode)
+        dropBrush_->SetWorldPosition(rootNode->GetWorldPosition());
+}
+
+void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
+{
+    if (dropMode_ == DropMode::NewBrush)
+        UpdateDropBrushPosition();
+}
+
+void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
+{
+    if (dropMode_ == DropMode::ReplaceModel && dropPage_)
+    {
+        ea::vector<Component*> components;
+        VariantVector oldValues;
+        VariantVector newValues;
+        for (unsigned index = 0; index < dropComponents_.size(); ++index)
+        {
+            if (Component* component = dropComponents_[index])
+            {
+                components.push_back(component);
+                oldValues.push_back(dropOldModels_[index]);
+                newValues.push_back(dropNewModel_);
+            }
+        }
+        if (!components.empty())
+            owner_->PushAction<ChangeComponentAttributesAction>(dropPage_->scene_.Get(), "Model", components, oldValues, newValues);
+    }
+    else if (dropMode_ == DropMode::NewBrush && dropBrush_ && dropActionBuilder_)
+    {
+        if (dropPreview_)
+            dropPreview_->Remove();
+
+        // Shift at drop time makes a subtract brush.
+        const int difference = FindOperation(DifferenceName);
+        if (ui::IsKeyDown(KEY_SHIFT) && difference >= 0)
+            SetOperation(dropBrush_, difference);
+        SetBrushEnabled(dropBrush_, true);
+
+        if (dropPage_)
+        {
+            dropPage_->selection_.Clear();
+            dropPage_->selection_.SetSelected(dropBrush_, true);
+        }
+
+        owner_->PushAction(dropActionBuilder_->Build(dropBrush_));
+    }
+
+    ResetDrop();
+}
+
+void CsgEditorAddon::CancelDragDrop()
+{
+    if (dropMode_ == DropMode::ReplaceModel)
+    {
+        for (unsigned index = 0; index < dropComponents_.size(); ++index)
+        {
+            if (Component* component = dropComponents_[index])
+            {
+                component->SetAttribute("Model", dropOldModels_[index]);
+                component->ApplyAttributes();
+            }
+        }
+    }
+    else if (dropMode_ == DropMode::NewBrush && dropBrush_)
+    {
+        dropBrush_->Remove();
+    }
+
+    ResetDrop();
+}
+
+void CsgEditorAddon::ResetDrop()
+{
+    dropMode_ = DropMode::None;
+    dropPage_ = nullptr;
+    dropBrush_ = nullptr;
+    dropPreview_ = nullptr;
+    dropActionBuilder_ = nullptr;
+    dropComponents_.clear();
+    dropOldModels_.clear();
+    dropNewModel_ = Variant::EMPTY;
 }
 
 bool CsgEditorAddon::RenderTabContextMenu()

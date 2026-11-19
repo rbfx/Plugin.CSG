@@ -80,6 +80,12 @@ Node* AddBrushNode(Node* rootNode, const ea::string& modelName, int operation, c
     }
     // The world position is correct for a root with any transform.
     node->SetWorldPosition(worldPosition);
+    // The inverse of the root world scale gives the brush a world scale of about 1.
+    // The local rotation stays identity, so the root scale cancels.
+    // A rotated root with a non-uniform scale can shear the brush when the brush rotates later.
+    const Vector3 rootScale = rootNode->GetWorldScale();
+    const auto inverse = [](float value) { return Abs(value) > M_EPSILON ? 1.0f / value : 1.0f; };
+    node->SetScale(Vector3(inverse(rootScale.x_), inverse(rootScale.y_), inverse(rootScale.z_)));
     brush->SetAttribute("Model", MakeModelRef(modelName));
     brush->SetAttribute("Operation", operation);
     brush->ApplyAttributes();
@@ -177,6 +183,15 @@ bool MoveOperand(Node* rootNode, unsigned fromIndex, unsigned toIndex)
     // ReorderChild sends no event. The event makes the root rebuild.
     rootNode->ReorderChild(brushes[fromIndex], realIndex);
     GetRootComponent(rootNode)->SendEvent(rebuildEvent);
+    return true;
+}
+
+bool SetBrushEnabled(Node* brush, bool enabled)
+{
+    Component* component = GetBrushComponent(brush);
+    if (!component)
+        return false;
+    component->SetEnabled(enabled);
     return true;
 }
 

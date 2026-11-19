@@ -30,6 +30,7 @@ bool IsRootNode(Node* node);
 /// Create a child node "CSG" with a CsgRoot at the world position.
 Node* CreateRootNode(Node* parent, const Vector3& worldPosition);
 /// Create a child node "Brush" at the end of the operand list. The model name may be empty.
+/// The local scale is the inverse of the root world scale. The brush world scale is about 1.
 Node* AddBrushNode(Node* rootNode, const ea::string& modelName, int operation, const Vector3& worldPosition);
 
 /// Return the operation of the brush, or -1 if the node has no brush.
@@ -51,6 +52,8 @@ ea::vector<Node*> GetAllBrushChildren(Node* rootNode);
 
 /// Move a brush child. The indices count the brush children only. The root rebuilds after the move.
 bool MoveOperand(Node* rootNode, unsigned fromIndex, unsigned toIndex);
+/// Set the enabled state of the CsgBrush component. The root rebuilds after the change.
+bool SetBrushEnabled(Node* brush, bool enabled);
 /// Toggle the enabled state of the CsgBrush component.
 bool ToggleBrushEnabled(Node* brush);
 
