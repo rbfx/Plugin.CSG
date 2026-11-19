@@ -7,6 +7,7 @@
 #include "Urho3D/CSG/CsgShapeProtocol.h"
 
 #include <Urho3D/Core/Variant.h>
+#include <Urho3D/Math/Ray.h>
 #include <Urho3D/Math/Vector2.h>
 #include <Urho3D/Math/Vector3.h>
 
@@ -74,6 +75,36 @@ bool RestoreShapeAttributes(Component* component, const ShapeAttributeSnapshot& 
 /// Update `acceptedDelta` and return true if the delta is accepted.
 bool ApplyShapeHandleDrag(Component* brush, const ShapeAttributeSnapshot& start, const ea::vector<unsigned>& ids,
     const Vector3& delta, ea::optional<Vector3>& acceptedDelta);
+
+/// The result of a pick of the root result.
+struct PickResult
+{
+    /// True if the ray hits a front face of the applied result.
+    bool hit_{};
+    /// The node ID of the brush that made the face. 0 is the base model or an unknown source.
+    unsigned source_{};
+    /// The hit position and the unit normal in world space.
+    Vector3 position_;
+    Vector3 normal_;
+};
+
+/// Pick the result of the root component with the world ray. It uses the event E_CSGROOTPICK.
+/// A null root or a root that does not answer gives no hit.
+PickResult PickRootSource(Component* root, const Ray& worldRay);
+
+/// Choose the face handle for a hit on the face of a brush. The point and the normal are in the local
+/// space of the brush. The normal is a unit vector. Only Axis handles count.
+/// An Axis handle matches if |dot(axis, normal)| > 0.9. The sign does not matter: a subtract brush
+/// seen from inside has a flipped normal. Among the matches, the handle with the smallest
+/// |dot(point - handle.position, axis)| wins. A tie goes to the lower id. No match gives none.
+/// A sphere has no face. Its radius handle on an axis matches an axis-aligned normal by the same rule.
+ea::optional<unsigned> ChooseFaceHandle(
+    const ea::vector<ShapeHandle>& handles, const Vector3& localPoint, const Vector3& localNormal);
+
+/// Convert a world hit on the brush node to its local space and call ChooseFaceHandle.
+/// The normal uses the direction transform and is normalized again. A zero normal gives none.
+ea::optional<unsigned> ChooseFaceHandleForWorldHit(
+    const Node* brushNode, const ea::vector<ShapeHandle>& handles, const Vector3& worldPoint, const Vector3& worldNormal);
 
 /// Return the index in `points` of the nearest visible point in the radius, or none.
 /// The nearest point wins. Screen distances within HandlePickTieEpsilon are a tie.

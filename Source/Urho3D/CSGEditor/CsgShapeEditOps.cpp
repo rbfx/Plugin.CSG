@@ -4,6 +4,8 @@
 
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 
+#include "Urho3D/CSG/CsgRootProtocol.h"
+
 #include <Urho3D/Core/Attribute.h>
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
@@ -252,6 +254,65 @@ Vector3 SnapHandleDelta(const Vector3& start, const Vector3& delta, const Vector
     const float startCoord = start.DotProduct(unitAxis);
     const float targetCoord = SnapToGrid(startCoord + delta.DotProduct(unitAxis), step);
     return unitAxis * (targetCoord - startCoord);
+}
+
+PickResult PickRootSource(Component* root, const Ray& worldRay)
+{
+    PickResult result;
+    if (!root)
+        return result;
+
+    using namespace CsgRootPick;
+    VariantMap& eventData = root->GetEventDataMap();
+    eventData[P_ORIGIN] = worldRay.origin_;
+    eventData[P_DIRECTION] = worldRay.direction_;
+    eventData[P_VERSION] = 0;
+    eventData[P_HIT] = false;
+    root->SendEvent(E_CSGROOTPICK, eventData);
+
+    // A root that does not answer keeps version 0.
+    if (eventData[P_VERSION].GetInt() == 0 || !eventData[P_HIT].GetBool())
+        return result;
+    result.hit_ = true;
+    result.source_ = eventData[P_SOURCE].GetUInt();
+    result.position_ = eventData[P_POSITION].GetVector3();
+    result.normal_ = eventData[P_NORMAL].GetVector3();
+    return result;
+}
+
+ea::optional<unsigned> ChooseFaceHandle(
+    const ea::vector<ShapeHandle>& handles, const Vector3& localPoint, const Vector3& localNormal)
+{
+    constexpr float minAlignment = 0.9f;
+    ea::optional<unsigned> best;
+    float bestDistance = M_INFINITY;
+    for (const ShapeHandle& handle : handles)
+    {
+        if (handle.kind_ != CsgShapeHandleKind::Axis)
+            continue;
+        if (Abs(handle.axis_.DotProduct(localNormal)) <= minAlignment)
+            continue;
+        const float distance = Abs((localPoint - handle.position_).DotProduct(handle.axis_));
+        if (distance < bestDistance || (distance == bestDistance && handle.id_ < *best))
+        {
+            best = handle.id_;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+ea::optional<unsigned> ChooseFaceHandleForWorldHit(
+    const Node* brushNode, const ea::vector<ShapeHandle>& handles, const Vector3& worldPoint, const Vector3& worldNormal)
+{
+    if (!brushNode)
+        return ea::nullopt;
+    const Vector3 localPoint = brushNode->WorldToLocal(worldPoint);
+    Vector3 localNormal = brushNode->WorldToLocal(Vector4(worldNormal, 0.0f));
+    if (localNormal.LengthSquared() <= 0.0f)
+        return ea::nullopt;
+    localNormal.Normalize();
+    return ChooseFaceHandle(handles, localPoint, localNormal);
 }
 
 } // namespace Urho3D

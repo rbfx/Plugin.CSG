@@ -1220,3 +1220,145 @@ TEST_CASE("PickNearestHandle gives an overlap to the nearer handle", "[editorops
     };
     CHECK(PickNearestHandle(sameDepth, Vector2(100.0f, 100.0f), 10.0f) == 1u);
 }
+
+namespace
+{
+
+/// The handles of a brush node of the type, in the local space.
+template <class T> ea::vector<ShapeHandle> HandlesOf(Fixture& f)
+{
+    return QueryShapeHandles(AddShapeBrush<T>(f)).handles_;
+}
+
+} // namespace
+
+TEST_CASE("ChooseFaceHandle picks the box face of the normal", "[editorops][pick]")
+{
+    Fixture f;
+    const ea::vector<ShapeHandle> handles = HandlesOf<CsgBoxBrush>(f);
+    REQUIRE(handles.size() == 14);
+
+    // The face ids are 20 to 25: -X, +X, -Y, +Y, -Z, +Z.
+    const Vector3 normals[6] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        const Vector3 point = normals[face] * 0.5f;
+        const auto chosen = ChooseFaceHandle(handles, point, normals[face]);
+        REQUIRE(chosen);
+        CHECK(*chosen == 20 + face);
+        // A flipped normal picks the same face: a subtract brush seen from inside.
+        const auto flipped = ChooseFaceHandle(handles, point, -normals[face]);
+        REQUIRE(flipped);
+        CHECK(*flipped == 20 + face);
+    }
+
+    // A point near a deformed face: the nearer of the two parallel faces wins.
+    CHECK(*ChooseFaceHandle(handles, Vector3(0.45f, 0.1f, 0.1f), Vector3(1, 0, 0)) == 21);
+    CHECK(*ChooseFaceHandle(handles, Vector3(-0.3f, 0.1f, 0.1f), Vector3(1, 0, 0)) == 20);
+    // A slight tilt below the limit still matches.
+    CHECK(*ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3(1, 0.3f, 0).Normalized()) == 21);
+
+    // A 45 degree normal and a zero normal match nothing. No handles give none.
+    CHECK_FALSE(ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3(1, 1, 0).Normalized()));
+    CHECK_FALSE(ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3::ZERO));
+    CHECK_FALSE(ChooseFaceHandle({}, Vector3::ZERO, Vector3(1, 0, 0)));
+}
+
+TEST_CASE("ChooseFaceHandle uses only axis handles and breaks ties by the lower id", "[editorops][pick]")
+{
+    ShapeHandle point;
+    point.id_ = 1;
+    point.kind_ = CsgShapeHandleKind::Point;
+    point.position_ = Vector3(1, 0, 0);
+    ShapeHandle a;
+    a.id_ = 9;
+    a.kind_ = CsgShapeHandleKind::Axis;
+    a.position_ = Vector3(1, 0, 0);
+    a.axis_ = Vector3(1, 0, 0);
+    ShapeHandle b = a;
+    b.id_ = 4;
+    CHECK(ChooseFaceHandle({point, a, b}, Vector3(1, 0, 0), Vector3(1, 0, 0)) == 4u);
+    CHECK(ChooseFaceHandle({b, a}, Vector3(1, 0, 0), Vector3(1, 0, 0)) == 4u);
+    CHECK_FALSE(ChooseFaceHandle({point}, Vector3(1, 0, 0), Vector3(1, 0, 0)));
+}
+
+TEST_CASE("ChooseFaceHandle gives the radius handle of a sphere for an axis normal", "[editorops][pick]")
+{
+    Fixture f;
+    const ea::vector<ShapeHandle> handles = HandlesOf<CsgSphereBrush>(f);
+    REQUIRE(handles.size() == 6);
+    CHECK(*ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3(1, 0, 0)) == 0);
+    CHECK(*ChooseFaceHandle(handles, Vector3(-0.5f, 0, 0), Vector3(-1, 0, 0)) == 1);
+    CHECK(*ChooseFaceHandle(handles, Vector3(0, 0, 0.5f), Vector3(0, 0, 1)) == 4);
+    CHECK_FALSE(ChooseFaceHandle(handles, Vector3(0.35f, 0.35f, 0), Vector3(1, 1, 0).Normalized()));
+}
+
+TEST_CASE("ChooseFaceHandleForWorldHit gives the same face for a rotated and scaled brush", "[editorops][pick]")
+{
+    Fixture f;
+    auto* box = AddShapeBrush<CsgBoxBrush>(f);
+    const ea::vector<ShapeHandle> handles = QueryShapeHandles(box).handles_;
+    Node* node = box->GetNode();
+    node->SetWorldPosition(Vector3(3, -2, 1));
+    node->SetWorldRotation(Quaternion(35.0f, Vector3(1, 2, 0.5f)));
+    node->SetWorldScale(Vector3(2.0f, 0.5f, 3.0f));
+
+    const Vector3 localPoints[3] = {{0.5f, 0.1f, 0.2f}, {0.1f, -0.5f, 0.2f}, {0.1f, 0.2f, 0.5f}};
+    const Vector3 localNormals[3] = {{1, 0, 0}, {0, -1, 0}, {0, 0, 1}};
+    const unsigned expected[3] = {21, 22, 25};
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        const auto local = ChooseFaceHandle(handles, localPoints[i], localNormals[i]);
+        REQUIRE(local);
+        CHECK(*local == expected[i]);
+        const Vector3 worldPoint = node->LocalToWorld(localPoints[i]);
+        const Vector3 worldNormal = (node->GetWorldRotation() * localNormals[i]).Normalized();
+        CHECK(ChooseFaceHandleForWorldHit(node, handles, worldPoint, worldNormal) == local);
+    }
+    CHECK_FALSE(ChooseFaceHandleForWorldHit(nullptr, handles, Vector3::ZERO, Vector3(1, 0, 0)));
+    CHECK_FALSE(ChooseFaceHandleForWorldHit(node, handles, Vector3::ZERO, Vector3::ZERO));
+}
+
+TEST_CASE("PickRootSource finds the subtract brush through the cavity", "[editorops][pick]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    const int diff = f.FindOperation("DifferenceAB");
+    Node* cut = AddBrushNodeOfType(rootNode, "CsgBoxBrush", diff, Vector3(0.0f, 0.0f, 1.0f));
+    REQUIRE(cut);
+    cut->SetScale(Vector3(0.5f, 0.5f, 0.5f));
+    RunFrames(f.scene, 60);
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    REQUIRE(root);
+
+    // A ray into the cavity hits the floor. The floor is a face of the subtract brush.
+    const PickResult cavity = PickRootSource(root, Ray(Vector3(0, 0, 5), Vector3(0, 0, -1)));
+    REQUIRE(cavity.hit_);
+    CHECK(cavity.source_ == cut->GetID());
+    CHECK(cavity.position_.Equals(Vector3(0, 0, 0.5f), 1e-3f));
+    CHECK(cavity.normal_.Equals(Vector3(0, 0, 1), 1e-3f));
+
+    // The face handle of the floor is the -Z face of the brush.
+    const auto handles = QueryShapeHandles(cut->GetComponent<CsgBoxBrush>()).handles_;
+    CHECK(ChooseFaceHandleForWorldHit(cut, handles, cavity.position_, cavity.normal_) == 24u);
+
+    // A ray on the rim hits the base.
+    const PickResult rim = PickRootSource(root, Ray(Vector3(0.8f, 0.8f, 5), Vector3(0, 0, -1)));
+    REQUIRE(rim.hit_);
+    CHECK(rim.source_ == 0);
+
+    // A miss, a null root and a component that is not a root give no hit.
+    CHECK_FALSE(PickRootSource(root, Ray(Vector3(5, 5, 5), Vector3(0, 0, 1))).hit_);
+    CHECK_FALSE(PickRootSource(nullptr, Ray(Vector3(0, 0, 5), Vector3(0, 0, -1))).hit_);
+    CHECK_FALSE(PickRootSource(cut->GetComponent<CsgBoxBrush>(), Ray(Vector3(0, 0, 5), Vector3(0, 0, -1))).hit_);
+
+    // A removed brush: the baked face id can point to a node that is gone.
+    const unsigned cutId = cut->GetID();
+    cut->Remove();
+    CHECK(f.scene->GetNode(cutId) == nullptr);
+    const PickResult stale = PickRootSource(root, Ray(Vector3(0, 0, 5), Vector3(0, 0, -1)));
+    if (stale.hit_ && stale.source_ != 0)
+        CHECK(f.scene->GetNode(stale.source_) == nullptr);
+    CHECK(errors.GetCount() == 0);
+}
