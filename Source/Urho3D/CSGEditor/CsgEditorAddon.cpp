@@ -181,15 +181,36 @@ ea::optional<Vector3> QueryHitPoint(Scene* scene, const Ray& ray, Node* excluded
     return result;
 }
 
-/// Return the first resource of the payload if it is a Model.
-const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
+/// Return the first resource of the payload, or null.
+const ResourceFileDescriptor* GetFirstResource(DragDropPayload* payload)
 {
     const auto resourcePayload = dynamic_cast<ResourceDragDropPayload*>(payload);
     if (!resourcePayload || resourcePayload->resources_.empty())
         return nullptr;
-    const ResourceFileDescriptor& desc = resourcePayload->resources_[0];
-    return desc.HasObjectType<Model>() ? &desc : nullptr;
+    return &resourcePayload->resources_[0];
 }
+
+DropPayloadKind GetPayloadKind(const ResourceFileDescriptor* desc)
+{
+    if (!desc)
+        return DropPayloadKind::Other;
+    if (desc->HasObjectType<Model>())
+        return DropPayloadKind::Model;
+    if (desc->HasObjectType<Material>())
+        return DropPayloadKind::Material;
+    if (IsTextureResourceName(desc->resourceName_))
+        return DropPayloadKind::Texture;
+    return DropPayloadKind::Other;
+}
+
+/// Return the first resource of the payload if it is a Model.
+const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
+{
+    const ResourceFileDescriptor* desc = GetFirstResource(payload);
+    return GetPayloadKind(desc) == DropPayloadKind::Model ? desc : nullptr;
+}
+
+bool IsShiftDown() { return ui::IsKeyDown(KEY_LSHIFT) || ui::IsKeyDown(KEY_RSHIFT); }
 
 } // namespace
 
@@ -542,20 +563,57 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
 
 CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const
 {
-    if (!IsAvailable() || page.IsSimulationActive() || !GetModelResource(payload))
+    const DropPayloadKind kind = GetPayloadKind(GetFirstResource(payload));
+    if (!IsAvailable() || page.IsSimulationActive() || kind == DropPayloadKind::Other)
         return DropMode::None;
 
+    DropSelection selection;
     Node* activeNode = page.selection_.GetActiveNode();
-    if (!activeNode)
-        return DropMode::None;
-    if (IsModelBrushNode(activeNode))
-        return DropMode::ReplaceModel;
-    if (IsBrushNode(activeNode))
-        return DropMode::None;
-    // The result node of a root is a temporary child. It maps to the root.
-    if (IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent())))
-        return DropMode::NewBrush;
+    if (activeNode)
+    {
+        selection.activeIsModelBrush_ = IsModelBrushNode(activeNode);
+        selection.activeIsBrush_ = IsBrushNode(activeNode);
+        // The result node of a root is a temporary child. It maps to the root.
+        selection.activeIsRoot_ = IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent()));
+    }
+    selection.anySelectedBrush_ = !GetSelectedBrushes(page).empty();
+
+    switch (DecideDrop(kind, selection, IsShiftDown()).action_)
+    {
+    case DropAction::NewBrush: return DropMode::NewBrush;
+    case DropAction::ReplaceModel: return DropMode::ReplaceModel;
+    case DropAction::AssignMaterial: return DropMode::AssignMaterial;
+    case DropAction::AssignTexture: return DropMode::AssignTexture;
+    case DropAction::HintSelectBrush: return DropMode::Hint;
+    case DropAction::None: break;
+    }
     return DropMode::None;
+}
+
+void CsgEditorAddon::ApplyDropMaterial(const ea::string& materialName, bool allSlots)
+{
+    for (Component* component : dropComponents_)
+    {
+        if (!component || !component->GetNode())
+            continue;
+        if (allSlots)
+            SetAllBrushMaterialSlots(component->GetNode(), materialName);
+        else
+            SetBrushMaterial(component->GetNode(), materialName, 0);
+    }
+}
+
+void CsgEditorAddon::RestoreDropMaterials()
+{
+    for (unsigned index = 0; index < dropComponents_.size() && index < dropOldMaterials_.size(); ++index)
+    {
+        if (Component* component = dropComponents_[index])
+        {
+            component->SetAttribute("Materials", dropOldMaterials_[index]);
+            component->ApplyAttributes();
+        }
+    }
+    dropPreviewApplied_ = false;
 }
 
 bool CsgEditorAddon::IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const
@@ -569,13 +627,39 @@ void CsgEditorAddon::BeginDragDrop(SceneViewPage& page, DragDropPayload* payload
 {
     ResetDrop();
 
-    const ResourceFileDescriptor* desc = GetModelResource(payload);
+    const ResourceFileDescriptor* desc = GetFirstResource(payload);
     if (!desc)
         return;
 
     dropMode_ = GetDropMode(page, payload);
     dropPage_ = &page;
     Node* activeNode = page.selection_.GetActiveNode();
+
+    if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
+    {
+        // A material gives its own name. A texture gives the name of its material file.
+        dropResourceName_ =
+            dropMode_ == DropMode::AssignMaterial ? desc->resourceName_ : GetTextureMaterialName(desc->resourceName_);
+        dropAllSlots_ = IsShiftDown();
+        for (Node* brushNode : GetSelectedBrushes(page))
+        {
+            Component* component = FindBrushComponent(brushNode);
+            if (!component || component->GetAttribute("Materials").GetType() != VAR_RESOURCEREFLIST)
+                continue;
+            dropComponents_.emplace_back(component);
+            dropOldMaterials_.push_back(component->GetAttribute("Materials"));
+        }
+        // The live preview sets the material now. A texture has a preview only if its material file exists.
+        // The drop never makes a file before the user releases the button.
+        if (dropMode_ == DropMode::AssignMaterial || GetSubsystem<ResourceCache>()->Exists(dropResourceName_))
+        {
+            ApplyDropMaterial(dropResourceName_, dropAllSlots_);
+            dropPreviewApplied_ = true;
+        }
+        return;
+    }
+    if (dropMode_ == DropMode::Hint)
+        return;
 
     if (dropMode_ == DropMode::ReplaceModel)
     {
@@ -650,6 +734,20 @@ void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
 {
     if (dropMode_ == DropMode::NewBrush)
         UpdateDropBrushPosition();
+    else if (dropMode_ == DropMode::Hint)
+        ui::SetTooltip("Select a brush to assign a material");
+    else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
+    {
+        ui::SetTooltip("Material: %s%s", dropResourceName_.c_str(), IsShiftDown() ? " (all slots)" : "");
+        // Shift changes the slot mode. The preview follows it.
+        if (dropPreviewApplied_ && IsShiftDown() != dropAllSlots_)
+        {
+            RestoreDropMaterials();
+            dropAllSlots_ = IsShiftDown();
+            ApplyDropMaterial(dropResourceName_, dropAllSlots_);
+            dropPreviewApplied_ = true;
+        }
+    }
 }
 
 void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
@@ -675,6 +773,42 @@ void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
         }
         if (!components.empty())
             owner_->PushAction<ChangeComponentAttributesAction>(scene, "Model", components, oldValues, newValues);
+    }
+    else if ((dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture) && scene)
+    {
+        // The texture case makes its material file now. It reuses an existing file.
+        ea::string materialName = dropResourceName_;
+        if (dropMode_ == DropMode::AssignTexture)
+        {
+            const auto* resource = GetFirstResource(payload);
+            materialName = resource ? EnsureTextureMaterial(context_, resource->resourceName_) : EMPTY_STRING;
+        }
+
+        RestoreDropMaterials();
+        if (!materialName.empty())
+        {
+            ApplyDropMaterial(materialName, IsShiftDown());
+
+            // The action skips a component that is removed or that is not in the scene of the page.
+            // It also skips a component with no change of the materials.
+            ea::vector<Component*> components;
+            VariantVector oldValues;
+            VariantVector newValues;
+            for (unsigned index = 0; index < dropComponents_.size(); ++index)
+            {
+                Component* component = dropComponents_[index];
+                if (!component || !component->GetNode() || component->GetScene() != scene)
+                    continue;
+                const Variant newValue = component->GetAttribute("Materials");
+                if (dropOldMaterials_[index] == newValue)
+                    continue;
+                components.push_back(component);
+                oldValues.push_back(dropOldMaterials_[index]);
+                newValues.push_back(newValue);
+            }
+            if (!components.empty())
+                owner_->PushAction<ChangeComponentAttributesAction>(scene, "Materials", components, oldValues, newValues);
+        }
     }
     else if (dropMode_ == DropMode::NewBrush && dropBrush_ && dropActionBuilder_ && scene
         && dropBrush_->GetParent() && dropBrush_->GetScene() == scene)
@@ -720,6 +854,10 @@ void CsgEditorAddon::CancelDragDrop()
     {
         dropBrush_->Remove();
     }
+    else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
+    {
+        RestoreDropMaterials();
+    }
 
     ResetDrop();
 }
@@ -734,6 +872,10 @@ void CsgEditorAddon::ResetDrop()
     dropComponents_.clear();
     dropOldModels_.clear();
     dropNewModel_ = Variant::EMPTY;
+    dropOldMaterials_.clear();
+    dropResourceName_.clear();
+    dropAllSlots_ = false;
+    dropPreviewApplied_ = false;
 }
 
 void CsgEditorAddon::Render(SceneViewPage& page)

@@ -79,6 +79,11 @@ private:
         None,
         NewBrush,
         ReplaceModel,
+        /// A material or a texture goes to the selected brushes.
+        AssignMaterial,
+        AssignTexture,
+        /// The drop shows a hint and changes nothing.
+        Hint,
     };
 
     bool IsAvailable() const;
@@ -92,6 +97,10 @@ private:
     void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
+    /// Set the material on the brush components of the drop. Slot 0 only, or all slots.
+    void ApplyDropMaterial(const ea::string& materialName, bool allSlots);
+    /// Set the old "Materials" values back on the brush components of the drop.
+    void RestoreDropMaterials();
     /// Move the preview brush to the cursor hit point.
     void UpdateDropBrushPosition();
     /// Clear the drag and drop state. The function does not change the scene.
@@ -125,6 +134,14 @@ private:
     ea::vector<WeakPtr<Component>> dropComponents_;
     VariantVector dropOldModels_;
     Variant dropNewModel_;
+    /// The material case: the old "Materials" values of the components in dropComponents_.
+    VariantVector dropOldMaterials_;
+    /// The material case: the material resource name, or the texture resource name.
+    ea::string dropResourceName_;
+    /// The material case: the preview has this slot mode.
+    bool dropAllSlots_{};
+    /// The material case: the preview material is set on the brushes.
+    bool dropPreviewApplied_{};
 };
 
 } // namespace Urho3D
