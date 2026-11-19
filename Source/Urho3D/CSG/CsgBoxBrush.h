@@ -16,6 +16,9 @@ namespace Urho3D
 /// Attributes: "Size" (each component in [0.001, 16384]) and "Corner 0" to "Corner 7" (each component in [-64, 64]).
 /// Corner index bits: bit 0 is +X, bit 1 is +Y, bit 2 is +Z. The local corner position is Size * Corner.
 /// A corner that goes through the opposite face makes the box not valid. Then the brush gives no operand.
+///
+/// The box has 6 material slots, one for each nominal face, in this order: -X, +X, -Y, +Y, -Z, +Z.
+/// The order is a file contract. An empty slot uses the material of slot 0.
 class PLUGIN_RBFXCSG_API CsgBoxBrush : public CsgProceduralBrush
 {
     URHO3D_OBJECT(CsgBoxBrush, CsgProceduralBrush);
@@ -44,6 +47,7 @@ public:
 protected:
     void SanitizeParameters() override;
     bool GenerateMesh(CsgShapeMesh& mesh) const override;
+    unsigned GetNumMaterialSlots() const override { return 6; }
 
 private:
     CsgBoxParams params_;

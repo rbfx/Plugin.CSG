@@ -86,18 +86,20 @@ void CsgProceduralBrush::OnNodeSet(Node* previousNode, Node* currentNode)
     BaseClassName::OnNodeSet(previousNode, currentNode);
 }
 
-void CsgProceduralBrush::UpdateMaterialSlots()
+void CsgProceduralBrush::SetMaterials(const ResourceRefList& value)
 {
     // SetModel is not used here: it resizes the materials from the "Model" attribute.
-    const unsigned numSlots = GetNumMaterialSlots();
-    const ResourceRefList& materials = GetMaterialsAttr();
-    if (materials.names_.size() == numSlots && materials.type_ == Material::GetTypeStatic())
-        return;
-
-    ResourceRefList resized = materials;
+    ResourceRefList resized = value;
     resized.type_ = Material::GetTypeStatic();
-    resized.names_.resize(numSlots);
-    SetMaterials(resized);
+    resized.names_.resize(GetNumMaterialSlots());
+    BaseClassName::SetMaterials(resized);
+}
+
+void CsgProceduralBrush::UpdateMaterialSlots()
+{
+    const ResourceRefList& materials = GetMaterialsAttr();
+    if (materials.names_.size() != GetNumMaterialSlots() || materials.type_ != Material::GetTypeStatic())
+        SetMaterials(materials);
 }
 
 } // namespace Urho3D

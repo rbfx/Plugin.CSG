@@ -1396,9 +1396,22 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
         // A generated model has no name, so it has no material list file. Empty materials clear the old ones.
         const ResourceRefList& materialsAttr = brush->GetMaterialsAttr();
         if (materialsAttr.names_.empty())
+        {
             staticModel->SetMaterial(nullptr);
-        else
-            staticModel->SetMaterialsAttr(materialsAttr);
+            return true;
+        }
+
+        // An empty or missing slot uses the material of slot 0. This is done before the material names
+        // are compared for the output geometries, so equal faces merge into one output geometry.
+        ResourceRefList resolved(materialsAttr.type_);
+        const unsigned numGeometries = generatedModel->GetNumGeometries();
+        resolved.names_.resize(numGeometries);
+        for (unsigned i = 0; i < numGeometries; ++i)
+        {
+            const bool hasName = i < materialsAttr.names_.size() && !materialsAttr.names_[i].empty();
+            resolved.names_[i] = hasName ? materialsAttr.names_[i] : materialsAttr.names_[0];
+        }
+        staticModel->SetMaterialsAttr(resolved);
         return true;
     }
 

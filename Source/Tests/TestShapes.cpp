@@ -171,6 +171,44 @@ TEST_CASE("CsgBuildModelFromMesh refuses a mesh that is not valid", "[shapes]")
     CsgShapeMesh partialTriangle = MakeHandCubeMesh();
     partialTriangle.indices_.pop_back();
     CHECK(!CsgBuildModelFromMesh(context, partialTriangle));
+
+    CsgShapeMesh emptyGroup = MakeHandCubeMesh();
+    emptyGroup.groups_ = {CsgShapeGroup{0, 30}, CsgShapeGroup{30, 0}, CsgShapeGroup{30, 6}};
+    CHECK(!CsgBuildModelFromMesh(context, emptyGroup));
+
+    CsgShapeMesh outOfRange = MakeHandCubeMesh();
+    outOfRange.groups_ = {CsgShapeGroup{0, 30}, CsgShapeGroup{30, 9}};
+    CHECK(!CsgBuildModelFromMesh(context, outOfRange));
+}
+
+TEST_CASE("CsgBuildModelFromMesh makes one geometry for each face group on shared buffers", "[shapes]")
+{
+    auto context = MakeShared<Context>();
+    CsgShapeMesh mesh = MakeHandCubeMesh();
+    mesh.groups_ = {CsgShapeGroup{0, 12}, CsgShapeGroup{12, 24}};
+
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    REQUIRE(model->GetNumGeometries() == 2);
+    const Geometry* first = model->GetGeometry(0, 0);
+    const Geometry* second = model->GetGeometry(1, 0);
+    CHECK(first->GetIndexBuffer() == second->GetIndexBuffer());
+    CHECK(first->GetVertexBuffer(0) == second->GetVertexBuffer(0));
+    CHECK(first->GetIndexStart() == 0);
+    CHECK(first->GetIndexCount() == 12);
+    CHECK(second->GetIndexStart() == 12);
+    CHECK(second->GetIndexCount() == 24);
+
+    // The polygons of each geometry come from its draw range only.
+    ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(model, Matrix3x4::IDENTITY);
+    REQUIRE(polygons.size() == 12);
+    unsigned secondCount = 0;
+    for (const CsgPolygon& polygon : polygons)
+        secondCount += (polygon.shared_ & 0xFFFFu) == 1 ? 1 : 0;
+    CHECK(secondCount == 8);
+    SharedPtr<CsgSolid> solid = CsgSolid::FromOperand(ea::move(polygons));
+    CHECK(solid->IsClosed());
+    CHECK(solid->Volume() == Catch::Approx(1.0).margin(1e-6));
 }
 
 TEST_CASE("CsgGenerateBox at the defaults gives the unit box with an outward winding", "[shapes]")
@@ -180,6 +218,29 @@ TEST_CASE("CsgGenerateBox at the defaults gives the unit box with an outward win
     REQUIRE(mesh.vertices_.size() == 36);
     REQUIRE(mesh.indices_.size() == 36);
     CHECK(HasNoDegenerateTriangle(mesh));
+
+    // The face groups are -X, +X, -Y, +Y, -Z, +Z. Each group has 2 triangles with a normal along its axis.
+    const Vector3 groupNormals[6] = {
+        Vector3::LEFT, Vector3::RIGHT, Vector3::DOWN, Vector3::UP, Vector3::BACK, Vector3::FORWARD};
+    REQUIRE(mesh.groups_.size() == 6);
+    for (unsigned group = 0; group < 6; ++group)
+    {
+        INFO("Group " << group);
+        CHECK(mesh.groups_[group].indexStart_ == group * 6);
+        CHECK(mesh.groups_[group].indexCount_ == 6);
+        for (unsigned i = 0; i < 6; ++i)
+        {
+            const ModelVertex& vertex = mesh.vertices_[mesh.indices_[group * 6 + i]];
+            CHECK(vertex.GetNormal().Equals(groupNormals[group], 1e-6f));
+        }
+    }
+
+    // The model has one geometry for each face group.
+    auto context = MakeShared<Context>();
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 6);
+    CHECK(CsgBuildPolygonsFromModel(model, Matrix3x4::IDENTITY).size() == 12);
 
     const ea::vector<CsgPolygon> triangles = MeshToPolygons(mesh);
     CHECK(IsEdgeClosed(triangles, 1e-4f));
@@ -268,6 +329,7 @@ TEST_CASE("CsgGenerateBox accepts a moved corner and refuses an inverted box", "
         CHECK(!CsgGenerateBox(params, mesh));
         CHECK(mesh.vertices_.empty());
         CHECK(mesh.indices_.empty());
+        CHECK(mesh.groups_.empty());
     }
 
     SECTION("A mirrored box is not valid")

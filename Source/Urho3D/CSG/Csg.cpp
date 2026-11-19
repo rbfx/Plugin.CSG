@@ -202,10 +202,12 @@ ea::vector<CsgPolygon> CsgBuildPolygonsFromModel(const Model* model, const Matri
         for (const VertexElement& element : *elements)
             elementPointers[(element.semantic_ << 2) + element.index_] = &element;
 
+        // The draw range selects the triangles. Geometries of one model can share one index buffer.
         const unsigned indexCount = geom->GetIndexCount();
-        const unsigned vertexCount = geom->GetVertexCount();
+        const unsigned indexStart = indexData ? geom->GetIndexStart() : geom->GetVertexStart();
+        const unsigned indexEnd = indexStart + indexCount;
 
-        for (unsigned j = 0; j < indexCount; j += 3)
+        for (unsigned j = indexStart; j + 2 < indexEnd; j += 3)
         {
             unsigned i0, i1, i2;
             if (!indexData)
@@ -399,7 +401,8 @@ SharedPtr<Model> CsgBuildModelFromMesh(
     Context* context, const CsgShapeMesh& mesh, const ea::vector<VertexElement>& elements)
 {
     const unsigned vertexCount = mesh.vertices_.size();
-    if (vertexCount == 0 || mesh.indices_.empty() || mesh.indices_.size() % 3 != 0)
+    const unsigned indexCount = mesh.indices_.size();
+    if (vertexCount == 0 || indexCount == 0 || indexCount % 3 != 0)
         return nullptr;
     for (const unsigned index : mesh.indices_)
     {
@@ -407,13 +410,25 @@ SharedPtr<Model> CsgBuildModelFromMesh(
             return nullptr;
     }
 
+    // An empty group list is one group with all indices.
+    ea::vector<CsgShapeGroup> groups = mesh.groups_;
+    if (groups.empty())
+        groups.push_back(CsgShapeGroup{0, indexCount});
+    for (const CsgShapeGroup& group : groups)
+    {
+        if (group.indexCount_ == 0 || group.indexCount_ % 3 != 0 || group.indexStart_ > indexCount
+            || group.indexCount_ > indexCount - group.indexStart_)
+            return nullptr;
+    }
+
     ea::vector<VertexElement> vbElements = elements.empty() ? CsgGetShapeVertexElements() : elements;
     VertexBuffer::UpdateOffsets(vbElements);
 
+    // All groups share the buffers. Each group is one geometry with its own draw range.
     SharedPtr<VertexBuffer> vb;
     SharedPtr<IndexBuffer> ib;
-    SharedPtr<Geometry> geom;
-    if (!BuildGeometryBuffers(context, mesh.vertices_, mesh.indices_, vbElements, vb, ib, geom))
+    SharedPtr<Geometry> firstGeometry;
+    if (!BuildGeometryBuffers(context, mesh.vertices_, mesh.indices_, vbElements, vb, ib, firstGeometry))
         return nullptr;
 
     BoundingBox boundingBox;
@@ -423,8 +438,16 @@ SharedPtr<Model> CsgBuildModelFromMesh(
     auto model = MakeShared<Model>(context);
     model->SetVertexBuffers({vb}, {}, {});
     model->SetIndexBuffers({ib});
-    model->SetNumGeometries(1);
-    model->SetGeometry(0, 0, geom);
+    model->SetNumGeometries(groups.size());
+    for (unsigned i = 0; i < groups.size(); ++i)
+    {
+        SharedPtr<Geometry> geometry = i == 0 ? firstGeometry : MakeShared<Geometry>(context);
+        geometry->SetNumVertexBuffers(1);
+        geometry->SetVertexBuffer(0, vb);
+        geometry->SetIndexBuffer(ib);
+        geometry->SetDrawRange(TRIANGLE_LIST, groups[i].indexStart_, groups[i].indexCount_, 0, vertexCount);
+        model->SetGeometry(i, 0, geometry);
+    }
     model->SetBoundingBox(boundingBox);
     return model;
 }

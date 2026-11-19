@@ -19,7 +19,17 @@ namespace Urho3D
 class Context;
 class Model;
 
-/// The mesh of a procedural shape. The mesh is one geometry: a triangle list.
+/// A face group of a shape mesh: a range of the index list.
+/// One face group gives one geometry of the generated model and one material slot.
+struct CsgShapeGroup
+{
+    /// The first index of the group in `CsgShapeMesh::indices_`.
+    unsigned indexStart_{};
+    /// The number of indices. It is a multiple of 3 and is not zero.
+    unsigned indexCount_{};
+};
+
+/// The mesh of a procedural shape: one vertex list, one index list (a triangle list) and the face groups.
 ///
 /// Mesh rules for a generator:
 /// - A generator builds a table of positions first. Each vertex copies its position from the table.
@@ -28,10 +38,14 @@ class Model;
 /// - The mesh is closed and its signed volume is positive.
 /// - Winding: for the triangle (p0, p1, p2), the cross product (p1 - p0) x (p2 - p0) points out of the solid.
 ///   `CsgPolygon` uses the same rule for its plane.
+/// - The group index is the face id. The group order is a file contract: scenes save the materials by index.
+///   A generator emits no empty group.
+/// An empty `groups_` means one group with all indices.
 struct CsgShapeMesh
 {
     ea::vector<ModelVertex> vertices_;
     ea::vector<unsigned> indices_;
+    ea::vector<CsgShapeGroup> groups_;
 };
 
 /// Return the vertex layout of the generated shapes.
@@ -39,10 +53,11 @@ struct CsgShapeMesh
 /// The same layout lets a generated shape and a CoreData model share one output geometry for one material.
 PLUGIN_RBFXCSG_API const ea::vector<VertexElement>& CsgGetShapeVertexElements();
 
-/// Build a model with one geometry from the mesh. The model has no name and is not in the resource cache.
+/// Build a model from the mesh. The model has no name and is not in the resource cache.
+/// The model has one geometry for each face group. All geometries use one vertex buffer and one index buffer.
 /// The buffers keep a CPU copy, so `CsgBuildPolygonsFromModel` can read the model.
 /// An empty `elements` gives the layout of `CsgGetShapeVertexElements`.
-/// Return null if the mesh is empty or an index is not valid.
+/// Return null if the mesh is empty, an index is not valid or a group is empty or out of range.
 PLUGIN_RBFXCSG_API SharedPtr<Model> CsgBuildModelFromMesh(
     Context* context, const CsgShapeMesh& mesh, const ea::vector<VertexElement>& elements = {});
 
@@ -72,6 +87,7 @@ struct CsgBoxParams
 PLUGIN_RBFXCSG_API void CsgSanitizeBoxParams(CsgBoxParams& params);
 
 /// Generate a box with 12 triangles. Each face is two triangles with a fixed diagonal, from face corner 0 to 2.
+/// Each face is one face group. The group order is -X, +X, -Y, +Y, -Z, +Z (nominal faces).
 ///
 /// The function uses a sanitized copy of the parameters. See `CsgSanitizeBoxParams`.
 /// Moved corners can make a face that is not planar. The two triangles of the face are then a fold.

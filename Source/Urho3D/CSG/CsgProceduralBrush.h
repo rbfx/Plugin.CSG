@@ -20,7 +20,9 @@ struct CsgShapeMesh;
 ///   The readers are the root (through `GetGeneratedModel`) and the debug draw.
 /// - Not valid parameters give a null model. Then the brush gives no operand and logs one warning.
 ///   The brush logs again only after the parameters were valid in between.
-/// - The "Materials" attribute has one entry for each material slot. See `GetNumMaterialSlots`.
+/// - Each face group of the mesh is one geometry of the model and one material slot.
+///   The "Materials" attribute always has one entry for each slot. See `GetNumMaterialSlots`.
+///   An empty slot uses the material of slot 0. Equal materials merge into one output geometry.
 ///
 /// To add a shape: add a generator function in CsgShapes.h and a subclass that calls it.
 class PLUGIN_RBFXCSG_API CsgProceduralBrush : public CsgBrush
@@ -43,6 +45,9 @@ public:
     /// @nobind
     bool GetGeneratedModel(SharedPtr<Model>& model) const override;
 
+    /// Set the materials. The list is resized to the number of material slots. The extra names go.
+    void SetMaterials(const ResourceRefList& value) override;
+
     /// Draw the generated model in the color of the operation.
     void DrawDebugGeometry(DebugRenderer* debug, bool depthTest) override;
 
@@ -51,7 +56,7 @@ protected:
     virtual void SanitizeParameters() {}
     /// Generate the mesh from the parameters. Return false if the parameters are not valid.
     virtual bool GenerateMesh(CsgShapeMesh& mesh) const = 0;
-    /// Return the number of material slots. Each slot is one geometry of the model.
+    /// Return the number of material slots. It is fixed for a shape type. Slot i is face group i of the mesh.
     virtual unsigned GetNumMaterialSlots() const { return 1; }
 
     /// Sanitize the parameters, mark the mesh dirty and request a rebuild of the root.

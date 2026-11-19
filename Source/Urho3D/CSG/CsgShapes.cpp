@@ -43,13 +43,14 @@ struct BoxFace
     Vector3 v_;
 };
 
+/// The faces in the order of the face groups: -X, +X, -Y, +Y, -Z, +Z.
 const BoxFace BoxFaces[6] = {
-    {{1, 3, 7, 5}, Vector3::RIGHT, Vector3::UP, Vector3::FORWARD},
-    {{2, 6, 7, 3}, Vector3::UP, Vector3::FORWARD, Vector3::RIGHT},
-    {{4, 5, 7, 6}, Vector3::FORWARD, Vector3::RIGHT, Vector3::UP},
     {{0, 4, 6, 2}, Vector3::LEFT, Vector3::FORWARD, Vector3::UP},
+    {{1, 3, 7, 5}, Vector3::RIGHT, Vector3::UP, Vector3::FORWARD},
     {{0, 1, 5, 4}, Vector3::DOWN, Vector3::RIGHT, Vector3::FORWARD},
+    {{2, 6, 7, 3}, Vector3::UP, Vector3::FORWARD, Vector3::RIGHT},
     {{0, 2, 3, 1}, Vector3::BACK, Vector3::UP, Vector3::RIGHT},
+    {{4, 5, 7, 6}, Vector3::FORWARD, Vector3::RIGHT, Vector3::UP},
 };
 
 /// The two triangles of a face use the fixed diagonal from face corner 0 to face corner 2.
@@ -119,6 +120,7 @@ bool CsgGenerateBox(const CsgBoxParams& params, CsgShapeMesh& mesh)
 {
     mesh.vertices_.clear();
     mesh.indices_.clear();
+    mesh.groups_.clear();
 
     CsgBoxParams sanitized = params;
     CsgSanitizeBoxParams(sanitized);
@@ -145,6 +147,7 @@ bool CsgGenerateBox(const CsgBoxParams& params, CsgShapeMesh& mesh)
     {
         const BoxFace& face = BoxFaces[faceIndex];
         const Vector2 cellOrigin(cellSize.x_ * (faceIndex % 3), cellSize.y_ * (faceIndex / 3));
+        mesh.groups_.push_back(CsgShapeGroup{static_cast<unsigned>(mesh.indices_.size()), 6u});
 
         for (const auto& triangle : BoxFaceTriangles)
         {
@@ -184,6 +187,7 @@ bool CsgGenerateBox(const CsgBoxParams& params, CsgShapeMesh& mesh)
     {
         mesh.vertices_.clear();
         mesh.indices_.clear();
+        mesh.groups_.clear();
         return false;
     }
     return true;

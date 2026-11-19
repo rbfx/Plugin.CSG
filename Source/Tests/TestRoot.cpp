@@ -3095,45 +3095,125 @@ TEST_CASE("CsgBoxBrush keeps its parameters and the result after a save and a lo
     CHECK(errors.GetCount() == 0);
 }
 
-TEST_CASE("CsgBoxBrush has one material slot and no Model attribute", "[root][procedural]")
+TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribute", "[root][procedural]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
     AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
     // A material needs the file system to load its default resources.
     context->RegisterSubsystem<VirtualFileSystem>();
-    auto material = MakeShared<Material>(context);
-    material->SetName("Materials/Box.xml");
-    context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
 
     // The material logs an error for its missing default technique, so the counter starts after it.
     ErrorCounter errors(context);
     auto scene = MakeShared<Scene>(context);
     scene->CreateComponent<Octree>();
 
-    CsgRoot* root = MakeBoxRoot(scene, "Root");
-    CsgBoxBrush* box =
-        AddProceduralBox(root, "Box", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
+    SECTION("The attributes are the ones of a brush without Model")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::DifferenceAB);
+        Component* component = box;
+        CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 6);
+        CHECK(component->GetAttribute("Is Enabled").GetBool());
+        CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
+        for (const AttributeInfo& info : *component->GetAttributes())
+            CHECK(info.name_ != "Model");
 
-    // The brush has the attributes of a brush without "Model".
-    Component* component = box;
-    CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 1);
-    CHECK(component->GetAttribute("Is Enabled").GetBool());
-    CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
-    for (const AttributeInfo& info : *component->GetAttributes())
-        CHECK(info.name_ != "Model");
+        // A list of another length gets 6 slots. The first names stay.
+        component->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+        component->ApplyAttributes();
+        REQUIRE(box->GetMaterialsAttr().names_.size() == 6);
+        CHECK(box->GetMaterialsAttr().names_[0] == "Materials/Box.xml");
+        CHECK(box->GetMaterialsAttr().names_[5].empty());
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(9u, ea::string("Materials/Top.xml"))));
+        CHECK(box->GetMaterialsAttr().names_.size() == 6);
+    }
 
-    // A material on the brush reaches the cut faces of the result.
-    box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
-    BuildFully(root, workQueue);
-    const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
-    CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
-    CHECK(names.size() == 2);
+    SECTION("A default box gives one output geometry")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(1.0).margin(1e-3));
+    }
 
-    // An apply resizes a longer list to one slot and keeps the first name.
-    component->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml", "Other.xml"}));
-    component->ApplyAttributes();
-    CHECK(box->GetMaterialsAttr().names_.size() == 1);
-    CHECK(box->GetMaterialsAttr().names_[0] == "Materials/Box.xml");
+    SECTION("Six equal materials give one output geometry")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(6u, ea::string("Materials/Box.xml"))));
+        BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+        CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Box.xml"});
+    }
+
+    SECTION("A material on +Y reaches the top face only")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        ResourceRefList materials(Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml"});
+        box->SetMaterials(materials);
+        BuildFully(root, workQueue);
+
+        const Model* output = GetOutput(root)->GetModel();
+        REQUIRE(output->GetNumGeometries() == 2);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        REQUIRE(names.size() == 2);
+        const unsigned topGeometry = names[0] == "Materials/Top.xml" ? 0 : 1;
+        CHECK(names[1 - topGeometry] == "Materials/Box.xml");
+
+        // Each triangle of the top geometry is at y = 0.5. No other triangle is there.
+        unsigned topTriangles = 0;
+        for (const CsgPolygon& polygon : CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY))
+        {
+            bool onTop = true;
+            for (const ModelVertex& vertex : polygon.vertices_)
+                onTop = onTop && Abs(vertex.GetPosition().y_ - 0.5f) < 1e-4f;
+            const bool inTopGeometry = (polygon.shared_ & 0xFFFFu) == topGeometry;
+            CHECK(onTop == inTopGeometry);
+            topTriangles += inTopGeometry ? 1 : 0;
+        }
+        CHECK(topTriangles >= 2);
+    }
+
+    SECTION("A subtract box gives its material to the cut faces")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Root");
+        CsgBoxBrush* box = AddProceduralBox(
+            root, "Box", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+        BuildFully(root, workQueue);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
+        CHECK(names.size() == 2);
+    }
+
+    SECTION("A save and a load keep the six material slots")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        const ResourceRefList materials(
+            Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml", "", ""});
+        box->SetMaterials(materials);
+
+        VectorBuffer buffer;
+        REQUIRE(scene->Save(buffer));
+        auto loaded = MakeShared<Scene>(context);
+        buffer.Seek(0);
+        REQUIRE(loaded->Load(buffer));
+        Node* loadedBoxNode = loaded->GetChild("Root")->GetChild("Box");
+        REQUIRE(loadedBoxNode);
+        auto* loadedBox = loadedBoxNode->GetComponent<CsgBoxBrush>();
+        REQUIRE(loadedBox);
+        CHECK(loadedBox->GetMaterialsAttr().names_ == materials.names_);
+    }
+
     CHECK(errors.GetCount() == 0);
 }
