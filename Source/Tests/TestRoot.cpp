@@ -7022,10 +7022,12 @@ TEST_CASE("CsgRoot answers the stats query event", "[root][stats]")
         CHECK(!clean[P_DIRTY].GetBool());
         CHECK(!clean[P_BUILDING].GetBool());
 
-        root->RequestRebuild();
+        VariantMap requestData;
+        root->SendEvent(StringHash("CsgRequestRebuild"), requestData);
         VariantMap pending;
         root->SendEvent(E_CSGROOTQUERYSTATS, pending);
-        CHECK(pending[P_DIRTY].GetBool());
+        // With delay 0 the job starts at once. Then the root is building, not dirty.
+        CHECK((pending[P_DIRTY].GetBool() || pending[P_BUILDING].GetBool()));
 
         BuildFully(root, workQueue);
         VariantMap done;
