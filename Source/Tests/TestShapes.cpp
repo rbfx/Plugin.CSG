@@ -1825,3 +1825,162 @@ TEST_CASE("CsgGenerateRing keeps the shape valid for the extreme values", "[shap
     REQUIRE(CsgGenerateRing(params, mesh));
     CHECK(mesh.indices_.size() == 3 * (2 * 32 * 12 + 2 * 12));
 }
+
+namespace
+{
+
+/// Count the vertices whose tangent frame does not follow the UV of their triangle.
+/// The tangent must follow +U. The shader bitangent cross(tangent, normal) * w must follow +V.
+/// Return the number of triangles that the check used.
+unsigned CountWrongTangentFrames(const CsgShapeMesh& mesh, unsigned& wrongTangent, unsigned& wrongBitangent)
+{
+    unsigned used = 0;
+    for (unsigned i = 0; i + 2 < mesh.indices_.size(); i += 3)
+    {
+        const ModelVertex* v[3] = {&mesh.vertices_[mesh.indices_[i]], &mesh.vertices_[mesh.indices_[i + 1]],
+            &mesh.vertices_[mesh.indices_[i + 2]]};
+        const Vector3 e1 = v[1]->GetPosition() - v[0]->GetPosition();
+        const Vector3 e2 = v[2]->GetPosition() - v[0]->GetPosition();
+        const float du1 = v[1]->uv_[0].x_ - v[0]->uv_[0].x_;
+        const float dv1 = v[1]->uv_[0].y_ - v[0]->uv_[0].y_;
+        const float du2 = v[2]->uv_[0].x_ - v[0]->uv_[0].x_;
+        const float dv2 = v[2]->uv_[0].y_ - v[0]->uv_[0].y_;
+        const float det = du1 * dv2 - du2 * dv1;
+        if (std::fabs(det) < 1e-6f)
+            continue;
+        ++used;
+        const Vector3 dPdu = (e1 * dv2 - e2 * dv1) / det;
+        const Vector3 dPdv = (e2 * du1 - e1 * du2) / det;
+        for (const ModelVertex* vertex : v)
+        {
+            const Vector3 tangent = vertex->tangent_.ToVector3();
+            const Vector3 bitangent = tangent.CrossProduct(vertex->GetNormal()) * vertex->tangent_.w_;
+            if (tangent.DotProduct(dPdu) <= 0.0f)
+                ++wrongTangent;
+            if (bitangent.DotProduct(dPdv) <= 0.0f)
+                ++wrongBitangent;
+        }
+    }
+    return used;
+}
+
+} // namespace
+
+TEST_CASE("CsgGenerateCylinder and CsgGenerateRing give a tangent frame that follows the UV", "[shapes][procedural]")
+{
+    ea::vector<CsgCylinderParams> cylinders;
+    cylinders.push_back(CsgCylinderParams{});
+    CsgCylinderParams cone;
+    cone.topRadius_ = Vector2::ZERO;
+    cylinders.push_back(cone);
+    CsgCylinderParams swapped;
+    swapped.topCenter_ = Vector3(0.0f, -0.5f, 0.0f);
+    swapped.bottomCenter_ = Vector3(0.0f, 0.5f, 0.0f);
+    cylinders.push_back(swapped);
+    for (const CsgCylinderParams& params : cylinders)
+    {
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateCylinder(params, mesh));
+        unsigned wrongTangent = 0;
+        unsigned wrongBitangent = 0;
+        CHECK(CountWrongTangentFrames(mesh, wrongTangent, wrongBitangent) > 0);
+        CHECK(wrongTangent == 0);
+        CHECK(wrongBitangent == 0);
+    }
+
+    ea::vector<CsgRingParams> rings;
+    rings.push_back(CsgRingParams{});
+    CsgRingParams angled;
+    angled.tubeAngle_ = 30.0f;
+    rings.push_back(angled);
+    CsgRingParams arc;
+    arc.arc_ = 90.0f;
+    rings.push_back(arc);
+    for (const CsgRingParams& params : rings)
+    {
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateRing(params, mesh));
+        unsigned wrongTangent = 0;
+        unsigned wrongBitangent = 0;
+        CHECK(CountWrongTangentFrames(mesh, wrongTangent, wrongBitangent) > 0);
+        CHECK(wrongTangent == 0);
+        CHECK(wrongBitangent == 0);
+    }
+}
+
+TEST_CASE("CsgGenerateCylinder has outward normals for swapped and tilted centers", "[shapes][procedural]")
+{
+    struct Axis
+    {
+        Vector3 bottom_;
+        Vector3 top_;
+    };
+    const Axis axes[] = {
+        {Vector3(0.0f, -1.0f, 0.0f), Vector3(0.0f, 1.0f, 0.0f)},
+        {Vector3(0.0f, 1.0f, 0.0f), Vector3(0.0f, -1.0f, 0.0f)},
+        {Vector3(-0.5f, -1.0f, 0.25f), Vector3(1.5f, 1.0f, -0.75f)},
+        {Vector3(1.5f, 1.0f, -0.75f), Vector3(-0.5f, -1.0f, 0.25f)},
+    };
+    for (const Axis& axis : axes)
+    {
+        for (const unsigned apexMode : {0u, 1u, 2u})
+        {
+            for (const bool smooth : {true, false})
+            {
+                CsgCylinderParams params;
+                params.bottomCenter_ = axis.bottom_;
+                params.topCenter_ = axis.top_;
+                params.segments_ = 16;
+                params.heightSegments_ = 3;
+                params.smoothNormals_ = smooth;
+                if (apexMode == 1)
+                    params.topRadius_ = Vector2::ZERO;
+                if (apexMode == 2)
+                    params.bottomRadius_ = Vector2::ZERO;
+                INFO("Apex mode " << apexMode << " smooth " << smooth << " top y " << axis.top_.y_);
+                CsgShapeMesh mesh;
+                REQUIRE(CsgGenerateCylinder(params, mesh));
+                const float side = axis.top_.y_ >= axis.bottom_.y_ ? 1.0f : -1.0f;
+
+                const CsgShapeGroup& sideGroup = mesh.groups_[0];
+                unsigned apexCorners = 0;
+                for (unsigned i = sideGroup.indexStart_; i < sideGroup.indexStart_ + sideGroup.indexCount_; ++i)
+                {
+                    const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+                    const Vector3 p = vertex.GetPosition();
+                    const Vector3 n = vertex.GetNormal();
+                    const bool atTop = p == axis.top_;
+                    const bool atBottom = p == axis.bottom_;
+                    if (atTop || atBottom)
+                    {
+                        // An apex: the normal points away from the other end along Y.
+                        ++apexCorners;
+                        const float expected = (atTop ? 1.0f : -1.0f) * side;
+                        // A supporting plane at the apex: the other end is behind the normal.
+                        const Vector3 away = atTop ? axis.top_ - axis.bottom_ : axis.bottom_ - axis.top_;
+                        CHECK(n.DotProduct(away) > 0.0f);
+                        // For an upright axis the Y part is also fixed. A sheared cone can face down.
+                        if (axis.top_.x_ == axis.bottom_.x_)
+                            CHECK(n.y_ * expected > 0.0f);
+                        continue;
+                    }
+                    // The outward direction is the part of p - axis point that is across the axis in Y.
+                    const float t = (p.y_ - axis.bottom_.y_) / (axis.top_.y_ - axis.bottom_.y_);
+                    const Vector3 onAxis = axis.bottom_ + (axis.top_ - axis.bottom_) * t;
+                    const Vector3 outward(p.x_ - onAxis.x_, 0.0f, p.z_ - onAxis.z_);
+                    CHECK(n.DotProduct(outward) > 0.0f);
+                }
+                CHECK((apexMode != 0) == (apexCorners > 0));
+
+                for (unsigned g = 1; g < mesh.groups_.size(); ++g)
+                {
+                    const CsgShapeGroup& group = mesh.groups_[g];
+                    // The top cap points along +Y if the top is above. The bottom cap points the other way.
+                    const float expectedY = group.slot_ == 1 ? side : -side;
+                    for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+                        CHECK(mesh.vertices_[mesh.indices_[i]].GetNormal().Equals(Vector3(0.0f, expectedY, 0.0f), 1e-5f));
+                }
+            }
+        }
+    }
+}

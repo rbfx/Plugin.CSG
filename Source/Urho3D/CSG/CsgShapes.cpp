@@ -598,7 +598,7 @@ bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
         corner.position_ = position;
         corner.uv_ = Vector2(position.x_ + 0.5f, position.z_ + 0.5f);
         corner.tangentDir_ = Vector3::RIGHT;
-        corner.vDir_ = Vector3::BACK;
+        corner.vDir_ = Vector3::FORWARD;
         corner.normal_ = normal;
         corner.isCap_ = true;
         return corner;

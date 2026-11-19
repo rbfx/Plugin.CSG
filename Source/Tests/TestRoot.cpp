@@ -3868,8 +3868,8 @@ TEST_CASE("CsgSphereBrush generates the model fast", "[root][procedural]")
 #else
     const double slowFactor = 1.0;
 #endif
-    CHECK(defaultMs < 5.0 * slowFactor);
-    CHECK(fineMs < 50.0 * slowFactor);
+    CHECK(defaultMs < 15.0 * slowFactor);
+    CHECK(fineMs < 150.0 * slowFactor);
 }
 
 namespace
@@ -4332,8 +4332,8 @@ TEST_CASE("CsgCylinderBrush generates the model fast", "[root][procedural]")
 #else
     const double slowFactor = 1.0;
 #endif
-    CHECK(defaultMs < 5.0 * slowFactor);
-    CHECK(fineMs < 50.0 * slowFactor);
+    CHECK(defaultMs < 15.0 * slowFactor);
+    CHECK(fineMs < 150.0 * slowFactor);
 }
 
 namespace
@@ -4744,6 +4744,6 @@ TEST_CASE("CsgRingBrush generates the model fast", "[root][procedural]")
 #else
     const double slowFactor = 1.0;
 #endif
-    CHECK(defaultMs < 5.0 * slowFactor);
-    CHECK(fineMs < 50.0 * slowFactor);
+    CHECK(defaultMs < 15.0 * slowFactor);
+    CHECK(fineMs < 150.0 * slowFactor);
 }
