@@ -123,13 +123,29 @@ The hotkeys work in the scene view. You can bind them again on the "Key Bindings
 | `Csg.SetUnion` | 1 | Set `Union` on all selected brushes. |
 | `Csg.SetDifference` | 2 | Set `DifferenceAB` on all selected brushes. |
 | `Csg.SetIntersection` | 3 | Set `Intersection` on all selected brushes. |
+| `Csg.MoveEarlier` | [ | Move the active brush one operand earlier. |
+| `Csg.MoveLater` | ] | Move the active brush one operand later. |
+| `Csg.ToggleBrush` | H | Toggle "Is Enabled" of all selected brushes. |
 
-The toolbar has the same commands. The toolbar "add" buttons put the brush at the center of the view. The operation buttons show the operation of the active brush. The "CSG" menu of the tab context menu also has the commands.
+The toolbar has the add and operation commands. The toolbar "add" buttons put the brush at the center of the view. The operation buttons show the operation of the active brush. The toolbar tooltips show the build status of the active root. The "CSG" menu of the tab context menu has all commands.
+
+### Brush presets
+
+The toolbar combo in front of the "add" buttons selects the model of a new brush. The hotkeys B and Shift+B and the toolbar "add" buttons use it. The presets are the CoreData models `Box`, `Sphere`, `Cylinder`, `Cone`, `Pyramid` and `Torus`. The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. Tests.CSG builds a root with one union brush for each preset model. Each build succeeds and gives a closed and valid mesh with a positive volume.
+
+### Operation colors and operand overlay
+
+- The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
+- If a root or a brush is active, the addon draws the debug shapes of all operands of the root. A selected brush draws with no depth test.
+- An overlay in the top right corner of the view lists the brushes of the active root in operand order. Each line has the index, a color mark for the operation and the node name. A disabled brush shows "(off)". The build status of the root is at the top.
+- A click on a line selects the brush. The line of the active brush is highlighted.
+- A move with [ or ] is one undo step. The move skips the children that are not brushes. Undo and redo make the root rebuild.
+- A toggle with H is one undo step. A disabled brush is not an operand. The root rebuilds.
 
 ### Workflow
 
 - The active root is the CSG root of the selected node or of its parent.
-- "Add brush" adds a child brush (`Models/Box.mdl`) to the active root at the hit point of the ray.
+- "Add brush" adds a child brush with the preset model to the active root at the hit point of the ray.
 - If the ray hits nothing, the brush goes to the root position. Without a root, it goes 10 units in front of the camera.
 - If there is no active root, "add brush" makes a root node "CSG" next to the selected node or in the scene. The brush is its first operand.
 - "Add brush" selects the new brush. One undo step removes the brush, and the new root too.
@@ -170,6 +186,12 @@ The editor has no test harness for addons. Do these checks by hand:
 17. Select the root. Drop a material or a prefab. The stock behavior applies.
 18. Select a root with the scale (72, 1, 82). Push B. The new brush has about the size of the box model, not 72 units.
 19. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
+20. Select "Sphere" in the preset combo. Push B. The new brush is a sphere. Restart the editor. The combo shows "Sphere".
+21. Select a brush of a root with two brushes. The overlay shows the root name, the build status and two lines. The union brush has a green mark and a green wireframe. The subtract brush has red.
+22. Push [ on the second brush. It moves to line 0 and the build status changes. Push Ctrl+Z. The old order comes back and the root rebuilds. Push Ctrl+Y. The move comes back.
+23. Push H. The line shows "(off)" and the result loses the brush. Push Ctrl+Z. The brush comes back.
+24. Click a line of the overlay. The brush of the line is selected. The node under the overlay is not selected.
+25. Hover a CSG toolbar button. The tooltip shows the build status of the active root.
 
 ## How to try the sample scene
 
