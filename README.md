@@ -91,7 +91,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere" and "Procedural cylinder".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder" and "Procedural ring".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -137,6 +137,7 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 - `Box`: a procedural `CsgBoxBrush`. It has no model file.
 - `Sphere`: a procedural `CsgSphereBrush`. It has no model file.
 - `Cylinder`: a procedural `CsgCylinderBrush`. It has no model file.
+- `Ring`: a procedural `CsgRingBrush`. It has no model file.
 - `Box.mdl`, `Sphere.mdl`, `Cylinder.mdl`, `Cone.mdl`, `Pyramid.mdl` and `Torus.mdl`: a `CsgBrush` with the CoreData model.
 
 The editor settings (`ui.ini`) keep the choice as `CsgEditor.BrushPreset`. A saved name `Box` from an older version now selects the procedural box. An unknown name keeps the current preset. The combo hides a procedural preset if its type is not registered.
@@ -183,6 +184,22 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - UV 0 of the side is (angle / 2pi, height fraction). UV 0 of a cap is the planar (x + 0.5, z + 0.5). UV 1 is equal to UV 0.
 - Validity: the centers must be at least 0.001 apart. Both ends must not be apexes. The volume must be positive. A shape that is not valid gives no operand and logs one warning.
 - If the top is below the bottom in Y, the generator flips the winding. The volume stays positive and the top cap stays at "Top Center".
+- A value that is not finite gets its default value.
+
+### Procedural ring
+
+`CsgRingBrush` generates a ring (a torus with an elliptic tube section) from parameters. It has no "Model" attribute. See `CsgGenerateRing`. The ring lies around the local Y axis: it lies in the XZ plane.
+
+- "Radius": the major radius, from the axis to the center of the tube. It is in [0.01, 16384]. The default is 0.5.
+- "Tube Radius": the radial and the axial radius of the tube. Each component is in [0.005, 16384]. The default is (0.15, 0.15). The radial radius is at most 0.99 * "Radius", so the inner edge stays at a positive radius.
+- "Segments": 3 to 128, around the axis. The default is 32. "Tube Segments": 3 to 64, around the tube. The default is 12. 4 tube segments give a square section if "Tube Angle" is 45 degrees, and a diamond if it is 0.
+- "Arc": the sweep around the axis, in degrees, from 1 to 360. The default is 360. An arc below 360 adds two flat end caps. Each cap is a fan from the center of the section.
+- "Tube Angle": from -180 to 180 degrees. The default is 0. It rotates the start of the tube section. 0 is the outer side. The angle grows toward +Y.
+- "Smooth Normals": the default is on. The normal is the analytic normal of the elliptic section. Off gives a flat normal for each triangle. A cap normal is always flat.
+- "Materials": six slots, in this order: 0 the outer surface, 1 the inner surface, 2 the top (+Y), 3 the bottom (-Y), 4 the start cap, 5 the end cap. The slots of the caps of a full ring stay free. A quadrant without a quad also leaves its slot free. The other slots keep their numbers.
+- The section splits in four quadrants by its axes. A quad of the tube belongs to the quadrant of the angle of its middle, including "Tube Angle". A middle angle on a quadrant border goes to the next quadrant, in the direction of growing angle.
+- UV 0 is (angle around the axis / arc, angle around the tube / 2pi). A cap uses the planar section coordinates. UV 1 is equal to UV 0.
+- Validity: the volume must be positive and no triangle can have two equal positions. The sanitized values always give a valid ring. A shape that is not valid gives no operand and logs one warning.
 - A value that is not finite gets its default value.
 
 ### Operation colors and operand overlay
@@ -264,6 +281,10 @@ The editor has no test harness for addons. Do these checks by hand:
 37. Set "Top Radius" to (0, 0). The brush is a cone and the top cap goes. Set a material in slot 1 and in slot 2. Only the bottom cap gets the slot 2 material.
 38. Move "Top Center" to (1, 1, 0). The axis tilts and the result stays closed. Swap the two centers in Y. The shape stays solid and is not inside out.
 39. Set "Bulge" to 2 and "Height Segments" to 4. The body bulges. Set both centers to the same point. The wireframe goes and the log shows one warning.
+40. Select "Ring" in the preset combo. Push B. A `CsgRingBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgRingBrush".
+41. Set "Arc" to 180. The ring opens and the two end caps appear. Set a material in slot 4 and in slot 5. Each cap gets its own material.
+42. Set "Tube Segments" to 4 and "Tube Angle" to 45. The tube section is a square. Set "Tube Angle" to 0. The section is a diamond. Set a material in slot 3. Only the bottom of the ring gets it.
+43. Set "Tube Radius" to (5, 0.1). The radial radius goes down to 0.99 times "Radius". The ring stays solid. Subtract the ring from a box. The cut stays closed.
 
 ## How to try the sample scene
 
