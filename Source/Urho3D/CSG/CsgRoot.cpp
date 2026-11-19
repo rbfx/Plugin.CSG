@@ -7,6 +7,7 @@
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
+#include "Urho3D/CSG/CsgRootProtocol.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Core/Context.h>
@@ -88,6 +89,8 @@ struct CsgRoot::BuildJob
     /// Statistics of the job. The worker thread fills it before it posts the main thread task.
     /// The main thread task adds the model build time. The posted task orders the two writes, so there is no data race.
     CsgBuildStats stats_;
+    /// Pick table of the result in node space. The worker thread fills it.
+    CsgPickTable pickTable_;
     /// True if the boolean threw. The worker thread sets it before it posts the main thread task.
     bool failed_{};
 };
@@ -285,6 +288,8 @@ void SetStaticModelMaterials(StaticModel* staticModel, const ea::vector<SharedPt
 CsgRoot::CsgRoot(Context* context)
     : CsgComponent(context)
 {
+    // The pick uses only the applied result, so it works also while the root is not active.
+    SubscribeToEvent(this, E_CSGROOTPICK, URHO3D_HANDLER(CsgRoot, HandlePick));
 }
 
 void CsgRoot::RegisterObject(Context* context)
@@ -504,6 +509,36 @@ ea::string CsgRoot::GetBuildStatus() const
         return "Invalid";
     const float totalMs = lastBuildStats_.booleanMs_ + lastBuildStats_.triangulateMs_ + lastBuildStats_.buildModelMs_;
     return Format("OK: {:.1f} ms, {} triangles", totalMs, lastBuildStats_.triangleCount_);
+}
+
+CsgPickHit CsgRoot::Pick(const Vector3& origin, const Vector3& direction, float maxDistance) const
+{
+    // The table is valid only while the output shows the model that it belongs to.
+    const Node* resultNode = resultNode_;
+    const StaticModel* output = output_;
+    if (!resultNode || !output || !pickModel_ || output->GetModel() != pickModel_)
+        return {};
+    return CsgInternal::PickTriangles(pickTable_, resultNode->GetWorldTransform(), origin, direction, maxDistance);
+}
+
+void CsgRoot::SetPickTable(Model* model, CsgPickTable table)
+{
+    pickModel_ = model;
+    pickTable_ = model ? ea::move(table) : CsgPickTable{};
+}
+
+void CsgRoot::HandlePick(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace CsgRootPick;
+    const auto maxDistance = eventData.find(P_MAXDISTANCE);
+    const CsgPickHit hit = Pick(eventData[P_ORIGIN].GetVector3(), eventData[P_DIRECTION].GetVector3(),
+        maxDistance != eventData.end() ? maxDistance->second.GetFloat() : 1e9f);
+    eventData[P_VERSION] = CsgRootPickVersion;
+    eventData[P_HIT] = hit.hit_;
+    eventData[P_SOURCE] = hit.source_;
+    eventData[P_POSITION] = hit.position_;
+    eventData[P_NORMAL] = hit.normal_;
+    eventData[P_DISTANCE] = hit.distance_;
 }
 
 void CsgRoot::AddBrush()
@@ -887,6 +922,97 @@ void ToNodeSpace(CsgTriangulatedModel& model, const Vector3& scale)
         model.boundingBox_ = BoundingBox(model.boundingBox_.min_ * inverse, model.boundingBox_.max_ * inverse);
 }
 
+CsgPickTable BuildPickTable(const CsgTriangulatedModel& model)
+{
+    CsgPickTable table;
+    unsigned triangleCount = 0;
+    for (const CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+        triangleCount += geometry.indexData_.size() / 3;
+    table.positions_.reserve(triangleCount * 3);
+    table.sources_.reserve(triangleCount);
+    for (const CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+    {
+        const unsigned count = geometry.indexData_.size() / 3;
+        for (unsigned t = 0; t < count; ++t)
+        {
+            for (unsigned k = 0; k < 3; ++k)
+                table.positions_.push_back(geometry.vertices_[geometry.indexData_[t * 3 + k]].GetPosition());
+            table.sources_.push_back(t < geometry.triangleSources_.size() ? geometry.triangleSources_[t] : 0u);
+        }
+    }
+    return table;
+}
+
+CsgPickHit PickTriangles(const CsgPickTable& table, const Matrix3x4& worldTransform, const Vector3& origin,
+    const Vector3& direction, float maxDistance)
+{
+    CsgPickHit result;
+    const float length = direction.Length();
+    if (!origin.IsNaN() && !origin.IsInf() && std::isfinite(length) && length > 0.0f && !(maxDistance < 0.0f)
+        && !table.sources_.empty())
+    {
+        // The local ray has the same parameter as the world ray with a unit direction. So t is a world distance.
+        const Matrix3x4 inverse = worldTransform.Inverse();
+        const Vector3 worldDir = direction / length;
+        const Vector3 localOrigin = inverse * origin;
+        const Vector3 localDir = inverse * Vector4(worldDir, 0.0f);
+        // A mirror transform turns the winding. Then the front face has the other sign.
+        const Matrix3 linear = worldTransform.ToMatrix3();
+        const double frontSign = linear.Determinant() < 0.0f ? -1.0 : 1.0;
+
+        const double ox = localOrigin.x_, oy = localOrigin.y_, oz = localOrigin.z_;
+        const double dx = localDir.x_, dy = localDir.y_, dz = localDir.z_;
+        constexpr double edgeTolerance = 1e-9;
+        double bestT = static_cast<double>(maxDistance);
+        unsigned best = ~0u;
+        const unsigned count = table.sources_.size();
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const Vector3& a = table.positions_[i * 3];
+            const Vector3& b = table.positions_[i * 3 + 1];
+            const Vector3& c = table.positions_[i * 3 + 2];
+            const double e1x = b.x_ - a.x_, e1y = b.y_ - a.y_, e1z = b.z_ - a.z_;
+            const double e2x = c.x_ - a.x_, e2y = c.y_ - a.y_, e2z = c.z_ - a.z_;
+            // Moller-Trumbore. det = -dot(direction, (b - a) x (c - a)), so det > 0 is a front face hit.
+            const double px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+            const double det = (e1x * px + e1y * py + e1z * pz) * frontSign;
+            if (!(det > 1e-30))
+                continue;
+            const double invDet = frontSign / det;
+            const double sx = ox - a.x_, sy = oy - a.y_, sz = oz - a.z_;
+            const double u = (sx * px + sy * py + sz * pz) * invDet;
+            if (u < -edgeTolerance || u > 1.0 + edgeTolerance)
+                continue;
+            const double qx = sy * e1z - sz * e1y, qy = sz * e1x - sx * e1z, qz = sx * e1y - sy * e1x;
+            const double v = (dx * qx + dy * qy + dz * qz) * invDet;
+            if (v < -edgeTolerance || u + v > 1.0 + edgeTolerance)
+                continue;
+            const double t = (e2x * qx + e2y * qy + e2z * qz) * invDet;
+            // A strict compare keeps the lower triangle index on a tie.
+            if (t >= 0.0 && (t < bestT || (best == ~0u && t == bestT)))
+            {
+                bestT = t;
+                best = i;
+            }
+        }
+        if (best != ~0u)
+        {
+            const Vector3 localHit = localOrigin + localDir * static_cast<float>(bestT);
+            const Vector3& a = table.positions_[best * 3];
+            const Vector3& b = table.positions_[best * 3 + 1];
+            const Vector3& c = table.positions_[best * 3 + 2];
+            const Vector3 worldA = worldTransform * a;
+            const Vector3 worldNormal = (worldTransform * b - worldA).CrossProduct(worldTransform * c - worldA);
+            result.hit_ = true;
+            result.source_ = table.sources_[best];
+            result.position_ = worldTransform * localHit;
+            result.normal_ = worldNormal.NormalizedOrDefault(-worldDir);
+            result.distance_ = (result.position_ - origin).Length();
+        }
+    }
+    return result;
+}
+
 ea::vector<CsgPolygon> RescalePolygons(const CsgSolid& solid, const Vector3& factor)
 {
     if (factor == Vector3::ONE)
@@ -927,6 +1053,7 @@ void CsgRoot::Rebuild()
     {
         ApplyResultToOutput(nullptr, {});
         lastGeometryComponents_.clear();
+        SetPickTable(nullptr, {});
         return;
     }
 
@@ -936,6 +1063,7 @@ void CsgRoot::Rebuild()
     {
         ApplyResultToOutput(nullptr, {});
         lastGeometryComponents_.clear();
+        SetPickTable(nullptr, {});
         return;
     }
 
@@ -994,6 +1122,8 @@ void CsgRoot::Rebuild()
             const ResourceRefList outputMaterials = baked_->outputMaterials_;
             ApplyResultToOutput(baked_->outputModel_, outputMaterials);
             lastGeometryComponents_.clear();
+            SetPickTable(nullptr, {});
+        SetPickTable(nullptr, {});
             lastBuildFailed_ = false;
             return;
         }
@@ -1003,6 +1133,7 @@ void CsgRoot::Rebuild()
         else
             ApplyResultToOutput(nullptr, {});
         lastGeometryComponents_.clear();
+        SetPickTable(nullptr, {});
         lastBuildFailed_ = false;
         return;
     }
@@ -1115,6 +1246,7 @@ void CsgRoot::ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std:
                 // It runs before the scale, as the grid of the check (2^-24 units) is the grid of the root frame.
                 check = CsgCheckModel(*triangulated);
                 CsgInternal::ToNodeSpace(*triangulated, job->metricScale_);
+                job->pickTable_ = CsgInternal::BuildPickTable(*triangulated);
             }
         }
         if (!triangulated)
@@ -1267,6 +1399,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         root->ApplyResultToOutput(renderableModel, materials);
         root->lastBuildStats_ = job->stats_;
         root->lastGeometryComponents_ = ea::move(components);
+        root->SetPickTable(renderableModel, ea::move(job->pickTable_));
         root->lastBuildFailed_ = false;
         root->hasAppliedBuild_ = true;
     }
@@ -1274,6 +1407,7 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
     {
         PendingBuildResult pending{renderableModel, materials, job->buildId_, job->stats_};
         pending.components_ = ea::move(components);
+        pending.pickTable_ = ea::move(job->pickTable_);
         root->pendingResults_.push_back(ea::move(pending));
     }
 
@@ -1300,6 +1434,7 @@ bool CsgRoot::ApplyPendingResult()
     ApplyResultToOutput(result.model_, result.materials_);
     lastBuildStats_ = result.stats_;
     lastGeometryComponents_ = result.components_;
+    SetPickTable(result.model_, result.pickTable_);
     hasAppliedBuild_ = true;
     return true;
 }

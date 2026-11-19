@@ -922,6 +922,8 @@ struct CsgBooleanDiagnostics
     /// Exact passes of DifferenceAB, Intersection or Union that ran again with the nearest rounding, because the wanted
     /// side rule gave more open edges than the operands.
     std::atomic<int> wantedSideRetries_{};
+    /// Triangles that RepairFlatTriangles split to remove a flat triangle.
+    std::atomic<int> flatRepairs_{};
     /// Switch of the validity count. A test sets it. Reset does not change it.
     std::atomic<bool> countInvalid_{false};
 
@@ -932,7 +934,7 @@ struct CsgBooleanDiagnostics
                  &invalidInside_, &invalidOrder_, &invalidSegments_, &invalidCorner_, &checkedCrossings_,
                  &foldCrossings_, &foldInside_, &foldOrder_, &foldSegments_, &constrainedCrossings_,
                  &unconstrainableCrossings_, &zeroSumUnclassifiedPatches_, &zeroSumDegeneratePatches_,
-                 &componentsRemoved_, &thickRetries_, &wantedSideRetries_})
+                 &componentsRemoved_, &thickRetries_, &wantedSideRetries_, &flatRepairs_})
             counter->store(0, std::memory_order_relaxed);
     }
 };

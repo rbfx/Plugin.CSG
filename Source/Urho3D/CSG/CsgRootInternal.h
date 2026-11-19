@@ -8,6 +8,7 @@
 #pragma once
 
 #include "Urho3D/CSG/CsgPolygon.h"
+#include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include "Urho3D/CSG/_Plugin.h"
@@ -31,6 +32,14 @@ PLUGIN_RBFXCSG_API void ToNodeSpace(CsgTriangulatedModel& model, const Vector3& 
 /// The normals use the inverse factor and become unit length. The plane of each polygon is computed again.
 /// The polygons keep their shared keys. If the factor is one, the result is a plain copy.
 PLUGIN_RBFXCSG_API ea::vector<CsgPolygon> RescalePolygons(const CsgSolid& solid, const Vector3& factor);
+
+/// Return the triangles of a model with the source of each triangle. The positions keep the model space.
+PLUGIN_RBFXCSG_API CsgPickTable BuildPickTable(const CsgTriangulatedModel& model);
+
+/// Cast a world ray into the triangles of a table. `worldTransform` maps the table space to world space.
+/// Only front faces count. The nearest hit wins. A tie keeps the lower triangle index.
+PLUGIN_RBFXCSG_API CsgPickHit PickTriangles(const CsgPickTable& table, const Matrix3x4& worldTransform,
+    const Vector3& origin, const Vector3& direction, float maxDistance);
 
 } // namespace CsgInternal
 } // namespace Urho3D

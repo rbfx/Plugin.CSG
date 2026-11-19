@@ -37,6 +37,9 @@ public:
 		/// Triangulated vertex stream in unpacked `ModelVertex` format.
 		ea::vector<ModelVertex> vertices_;
 		ea::vector<unsigned> indexData_;
+		/// Source of each triangle: the node ID of the brush that made its polygon (see `CsgPolygon::source_`).
+		/// It has one entry for each three indices of `indexData_`. 0 is the base model or an unknown source.
+		ea::vector<unsigned> triangleSources_;
 	};
 
 	ea::vector<Geometry> geometries_;
@@ -118,5 +121,15 @@ struct CsgModelCheck
 /// A degenerate triangle has an index twice, two corners on one grid point or no exact grid normal.
 /// The grid has the step 2^-24 units. Call the function before the model goes to node space.
 PLUGIN_RBFXCSG_API CsgModelCheck CsgCheckModel(const CsgTriangulatedModel& model);
+
+namespace CsgInternal
+{
+
+/// Split the neighbor of each flat triangle at the middle corner and remove the flat triangle.
+/// A flat triangle has three distinct grid corners on one line. The new half keeps the source of its neighbor.
+/// CsgTriangulateSolid calls the function. It is public for the tests.
+PLUGIN_RBFXCSG_API void RepairFlatTriangles(CsgTriangulatedModel& model);
+
+} // namespace CsgInternal
 
 } // namespace Urho3D

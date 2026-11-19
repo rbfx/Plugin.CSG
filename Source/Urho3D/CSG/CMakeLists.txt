@@ -47,6 +47,7 @@ set (SOURCE_FILES
     CsgProceduralBrush.h
     CsgRoot.h
     CsgRootInternal.h
+    CsgRootProtocol.h
     CsgShapes.h
     CsgSimd.h
     CsgTriangulation.h

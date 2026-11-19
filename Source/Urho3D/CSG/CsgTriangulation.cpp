@@ -5,6 +5,7 @@
 #include "Urho3D/CSG/CsgTriangulation.h"
 
 #include "Urho3D/CSG/CsgCommon.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgExact.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include <Urho3D/Container/Ptr.h>
@@ -340,13 +341,16 @@ namespace
 /// Triangulate polygons with the triangles from `triangulate`, given the index of each polygon.
 /// Vertices are shared when they coincide and their attributes agree. If `useKeys` is set, `vertexKey` names the
 /// position of each polygon vertex by an id below `keySpace`, so the function needs no hashing.
+/// If `outTriangleSources` is not null, it gets the source of the polygon of each output triangle.
 template <class GetPolygon, class Triangulate, class VertexKey>
 bool TriangulateGeometryImpl(unsigned polygonCount, GetPolygon&& getPolygon, Triangulate&& triangulate,
     bool useKeys, VertexKey&& vertexKey, unsigned keySpace, float epsilon, ea::vector<ModelVertex>& outVertices,
-    ea::vector<unsigned>& outIndexData)
+    ea::vector<unsigned>& outIndexData, ea::vector<unsigned>* outTriangleSources = nullptr)
 {
     outVertices.clear();
     outIndexData.clear();
+    if (outTriangleSources)
+        outTriangleSources->clear();
 
     if (polygonCount == 0)
         return false;
@@ -437,6 +441,8 @@ bool TriangulateGeometryImpl(unsigned polygonCount, GetPolygon&& getPolygon, Tri
             if (polyVertexIndex < poly.vertices_.size())
                 outIndexData.push_back(getOrCreateVertexIndex(poly.vertices_[polyVertexIndex], polyVertexIndex));
         }
+        if (outTriangleSources)
+            outTriangleSources->resize(outIndexData.size() / 3, poly.source_);
     }
 
     return !outIndexData.empty();
@@ -506,7 +512,16 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(ea::vector<CsgPolygon> po
         CsgTriangulatedModel::Geometry geometry;
         geometry.shared_ = sharedKey;
 
-        if (!CsgTriangulateGeometry(polys, epsilon, geometry.vertices_, geometry.indexData_))
+        CsgTriangulationScratch scratch;
+        if (!TriangulateGeometryImpl(
+                polys.size(), [&](unsigned i) -> const CsgPolygon& { return polys[i]; },
+                [&](const CsgPolygon& poly, unsigned, ea::vector<unsigned>& indices)
+                {
+                    bool clean = true;
+                    return CsgTriangulatePolygon(poly, indices, {}, clean, scratch);
+                },
+                false, [](unsigned, unsigned) { return 0; }, 0, epsilon, geometry.vertices_, geometry.indexData_,
+                &geometry.triangleSources_))
             continue;
 
         if (geometry.vertices_.empty() || geometry.indexData_.empty())
@@ -518,12 +533,6 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulatePolygons(ea::vector<CsgPolygon> po
     return result;
 }
 
-namespace
-{
-
-void RepairFlatTriangles(CsgTriangulatedModel& model);
-
-} // namespace
 
 SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float epsilon)
 {
@@ -577,7 +586,7 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float
                 [&](const CsgPolygon&, unsigned i, ea::vector<unsigned>& indices)
                 { return solid.CopyTriangles(members[i], indices); },
                 true, [&](unsigned i, unsigned local) { return solid.VertexKey(members[i], local); }, keySpace,
-                epsilon, geometry.vertices_, geometry.indexData_))
+                epsilon, geometry.vertices_, geometry.indexData_, &geometry.triangleSources_))
             continue;
 
         if (geometry.vertices_.empty() || geometry.indexData_.empty())
@@ -586,7 +595,7 @@ SharedPtr<CsgTriangulatedModel> CsgTriangulateSolid(const CsgSolid& solid, float
         AddGeometry(*result, ea::move(geometry));
     }
 
-    RepairFlatTriangles(*result);
+    CsgInternal::RepairFlatTriangles(*result);
     return result;
 }
 
@@ -722,6 +731,11 @@ bool ClassifyFlat(const Vector3 (&p)[3], Vector3& from, Vector3& middle, Vector3
 /// The neighbor triangle holds the opposite directed edge from the end `to_` to the end `from_`. The function
 /// splits the neighbor at the middle point. The two new edges pair with the edges of the triangles at the sides of
 /// the flat one, so the surface stays closed and covers the same area. A flat triangle without such a neighbor stays.
+} // namespace
+
+namespace CsgInternal
+{
+
 void RepairFlatTriangles(CsgTriangulatedModel& model)
 {
     constexpr unsigned MAX_PASSES = 8;
@@ -823,6 +837,9 @@ void RepairFlatTriangles(CsgTriangulatedModel& model)
             geometry.indexData_.push_back(indexMiddle);
             geometry.indexData_.push_back(indexFrom);
             geometry.indexData_.push_back(indexOther);
+            // The new half comes from the same face as the neighbor.
+            geometry.triangleSources_.push_back(geometry.triangleSources_[base / 3]);
+            CSG_DIAG_COUNT(flatRepairs_);
             touched[neighbor.geometry_][neighbor.triangle_ / 3] = true;
             removed[flat.geometry_][flat.triangle_ / 3] = true;
             progress = true;
@@ -833,21 +850,25 @@ void RepairFlatTriangles(CsgTriangulatedModel& model)
         for (unsigned g = 0; g < model.geometries_.size(); ++g)
         {
             ea::vector<unsigned>& indices = model.geometries_[g].indexData_;
+            ea::vector<unsigned>& sources = model.geometries_[g].triangleSources_;
             unsigned out = 0;
             for (unsigned i = 0; i + 2 < indices.size(); i += 3)
             {
                 if (i / 3 < removed[g].size() && removed[g][i / 3])
                     continue;
+                // The source table keeps one entry for each triangle, in the same order.
+                sources[out / 3] = sources[i / 3];
                 indices[out++] = indices[i];
                 indices[out++] = indices[i + 1];
                 indices[out++] = indices[i + 2];
             }
             indices.resize(out);
+            sources.resize(out / 3);
         }
     }
 }
 
-} // namespace
+} // namespace CsgInternal
 
 CsgModelCheck CsgCheckModel(const CsgTriangulatedModel& model)
 {

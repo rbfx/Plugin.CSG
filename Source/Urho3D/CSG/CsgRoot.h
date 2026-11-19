@@ -66,6 +66,29 @@ struct CsgBuildStats
     bool valid_{};
 };
 
+/// Triangles of an applied result with the source of each triangle. The pick uses it.
+struct CsgPickTable
+{
+    /// Three corners for each triangle, in the space of the result node.
+    ea::vector<Vector3> positions_;
+    /// Source of each triangle: the node ID of the brush that made it. 0 is the base model or an unknown source.
+    ea::vector<unsigned> sources_;
+};
+
+/// Result of `CsgRoot::Pick`.
+struct CsgPickHit
+{
+    bool hit_{};
+    /// Node ID of the brush that made the hit face. 0 is the base model or an unknown source.
+    unsigned source_{};
+    /// Hit position in world space.
+    Vector3 position_{Vector3::ZERO};
+    /// Unit world normal of the front face of the hit triangle.
+    Vector3 normal_{Vector3::ZERO};
+    /// Distance from the ray origin to the hit position in world units.
+    float distance_{};
+};
+
 /// Root (builder) component for component-based CSG workflow.
 ///
 /// High-level behavior:
@@ -188,6 +211,12 @@ public:
     ea::string GetBuildStatus() const;
     /// Create a child node with the name "Brush" and a `CsgBrush`.
     void AddBrush();
+    /// Cast a world ray into the applied result. See `E_CSGROOTPICK` in CsgRootProtocol.h.
+    /// The direction can have any length. The ray hits only front faces. The nearest hit wins.
+    /// No hit if no build result is applied, or if the direction is zero or not finite.
+    CsgPickHit Pick(const Vector3& origin, const Vector3& direction, float maxDistance = 1e9f) const;
+    /// Return the pick table of the applied result. It is empty if no build result is applied.
+    const CsgPickTable& GetPickTable() const { return pickTable_; }
 
 protected:
     void ApplyAttributes() override;
@@ -243,6 +272,8 @@ private:
         bool failed_{};
         /// The component of each geometry of the model.
         ea::vector<unsigned> components_;
+        /// The pick table of the model.
+        CsgPickTable pickTable_;
     };
 
     /// Result of a bake. It replaces the base operand until the base model or the epsilon changes.
@@ -283,6 +314,9 @@ private:
     void HandleRequestRebuild(StringHash eventType, VariantMap& eventData);
     void HandleNodeAdded(StringHash eventType, VariantMap& eventData);
     void HandleNodeRemoved(StringHash eventType, VariantMap& eventData);
+    void HandlePick(StringHash eventType, VariantMap& eventData);
+    /// Set the pick table of the applied result. A null model clears it.
+    void SetPickTable(Model* model, CsgPickTable table);
 
     static void ExecuteBuildJob(unsigned threadIndex, WorkQueue* queue, const std::shared_ptr<BuildJob>& job);
     static void ApplyBuildJobResultOnMainThread(const std::shared_ptr<BuildJob>& job, SharedPtr<CsgTriangulatedModel> triangulated);
@@ -314,6 +348,9 @@ private:
     ea::vector<PendingBuildResult> pendingResults_;
     CsgBuildStats lastBuildStats_;
     ea::vector<unsigned> lastGeometryComponents_;
+    /// Pick table of the applied result. It is valid only while the output shows `pickModel_`.
+    CsgPickTable pickTable_;
+    WeakPtr<Model> pickModel_;
     bool lastBuildFailed_{};
     /// True after the root applied the result of a build that did not fail.
     bool hasAppliedBuild_{};

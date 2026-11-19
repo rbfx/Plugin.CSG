@@ -7,11 +7,13 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBoxBrush.h"
 #include "Urho3D/CSG/CsgBrush.h"
+#include "Urho3D/CSG/CsgCorefine.h"
 #include "Urho3D/CSG/CsgCylinderBrush.h"
 #include "Urho3D/CSG/CsgRingBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
+#include "Urho3D/CSG/CsgRootProtocol.h"
 #include "Urho3D/CSG/CsgShapes.h"
 #include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
@@ -5170,4 +5172,532 @@ TEST_CASE("CsgBrush Root UV mode survives the fold with a sphere and a rotated b
         }
     }
     CHECK(errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// Return the node ID of a brush.
+unsigned IdOf(const CsgBrush* brush) { return brush->GetNode()->GetID(); }
+
+/// Return the node name of a pick source, or "base" for the source 0.
+ea::string SourceName(Scene* scene, unsigned source)
+{
+    if (source == 0)
+        return "base";
+    const Node* node = scene->GetNode(source);
+    return node ? node->GetName() : ea::string("missing");
+}
+
+/// Check that each geometry has one source for each triangle. Count the triangles with the source 0.
+unsigned CheckTriangleSources(const CsgTriangulatedModel& model)
+{
+    unsigned zeroSources = 0;
+    for (const CsgTriangulatedModel::Geometry& geometry : model.geometries_)
+    {
+        CHECK(geometry.triangleSources_.size() * 3 == geometry.indexData_.size());
+        for (const unsigned source : geometry.triangleSources_)
+            zeroSources += source == 0 ? 1 : 0;
+    }
+    return zeroSources;
+}
+
+/// Return the polygons of a model with each polygon source set to `source`.
+ea::vector<CsgPolygon> SourcedPolygons(const Model* model, const Matrix3x4& transform, unsigned meshId, unsigned source)
+{
+    ea::vector<CsgPolygon> polygons = CsgBuildPolygonsFromModel(model, transform, meshId);
+    for (CsgPolygon& polygon : polygons)
+        polygon.source_ = source;
+    return polygons;
+}
+
+/// Check that the pick table of the root has a source for each triangle, and that all sources are in `allowed`.
+void CheckPickTableSources(const CsgRoot* root, const ea::vector<unsigned>& allowed)
+{
+    const CsgPickTable& table = root->GetPickTable();
+    REQUIRE(!table.sources_.empty());
+    CHECK(table.positions_.size() == table.sources_.size() * 3);
+    CHECK(table.sources_.size() == root->GetLastBuildStats().triangleCount_);
+    unsigned unknown = 0;
+    for (const unsigned source : table.sources_)
+        unknown += ea::find(allowed.begin(), allowed.end(), source) == allowed.end() ? 1 : 0;
+    CHECK(unknown == 0);
+}
+
+/// Cast rays from six sides on a grid. Return a text line for each ray with the source name and the hit position.
+ea::vector<ea::string> PickGrid(CsgRoot* root)
+{
+    ea::vector<ea::string> lines;
+    const Vector3 directions[] = {Vector3::LEFT, Vector3::RIGHT, Vector3::UP, Vector3::DOWN, Vector3::FORWARD,
+        Vector3::BACK};
+    for (const Vector3& direction : directions)
+    {
+        // Two axes across the direction.
+        const Vector3 u = std::abs(direction.x_) > 0.5f ? Vector3::UP : Vector3::RIGHT;
+        const Vector3 v = direction.CrossProduct(u);
+        for (int i = -6; i <= 6; ++i)
+        {
+            for (int j = -6; j <= 6; ++j)
+            {
+                const Vector3 origin = -direction * 5.0f + u * (0.23f * i) + v * (0.23f * j);
+                const CsgPickHit hit = root->Pick(origin, direction);
+                if (!hit.hit_)
+                    lines.push_back("miss");
+                else
+                {
+                    lines.push_back(Format("{} {:.4f} {:.4f} {:.4f}", SourceName(root->GetScene(), hit.source_),
+                        hit.position_.x_, hit.position_.y_, hit.position_.z_));
+                }
+            }
+        }
+    }
+    return lines;
+}
+
+} // namespace
+
+TEST_CASE("CsgRoot pick reports the brush of the hit face", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // A pocket in the top face and a bump on the +X face.
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgBrush* pocket = AddBoxBrush(root, "Pocket", Vector3(0.0f, 0.0f, 1.0f), CsgOperation::DifferenceAB);
+    pocket->GetNode()->SetScale(0.5f);
+    CsgBrush* bump = AddBoxBrush(root, "Bump", Vector3(1.25f, 0.0f, 0.0f), CsgOperation::Union);
+    bump->GetNode()->SetScale(0.5f);
+    BuildFully(root, workQueue);
+
+    SECTION("The floor and the wall of the pocket report the subtract brush")
+    {
+        CsgPickHit hit = root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -2.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == IdOf(pocket));
+        CHECK(hit.position_.Equals(Vector3(0.0f, 0.0f, 0.5f), 1e-4f));
+        CHECK(hit.normal_.Equals(Vector3(0.0f, 0.0f, 1.0f), 1e-4f));
+        CHECK(hit.distance_ == Catch::Approx(4.5f).margin(1e-4f));
+
+        hit = root->Pick(Vector3(0.0f, 0.0f, 0.75f), Vector3(1.0f, 0.0f, 0.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == IdOf(pocket));
+        CHECK(hit.normal_.Equals(Vector3(-1.0f, 0.0f, 0.0f), 1e-4f));
+        CHECK(hit.distance_ == Catch::Approx(0.5f).margin(1e-4f));
+    }
+
+    SECTION("The outer faces report the union brush and the base")
+    {
+        CsgPickHit hit = root->Pick(Vector3(5.0f, 0.0f, 0.0f), Vector3(-1.0f, 0.0f, 0.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == IdOf(bump));
+        CHECK(hit.position_.Equals(Vector3(1.75f, 0.0f, 0.0f), 1e-4f));
+
+        hit = root->Pick(Vector3(0.8f, 0.8f, 5.0f), Vector3(0.0f, 0.0f, -1.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == 0);
+        CHECK(hit.distance_ == Catch::Approx(4.0f).margin(1e-4f));
+        CHECK(hit.normal_.Equals(Vector3(0.0f, 0.0f, 1.0f), 1e-4f));
+
+        hit = root->Pick(Vector3(0.0f, -5.0f, 0.0f), Vector3(0.0f, 1.0f, 0.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == 0);
+        CHECK(hit.position_.Equals(Vector3(0.0f, -1.0f, 0.0f), 1e-4f));
+    }
+
+    SECTION("A miss, a back face, a zero direction and the maximum distance give no hit")
+    {
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, 1.0f)).hit_);
+        CHECK_FALSE(root->Pick(Vector3(5.0f, 5.0f, 5.0f), Vector3(1.0f, 0.0f, 0.0f)).hit_);
+        // From inside the solid the ray sees only the back of the pocket floor and of the top face.
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 0.0f), Vector3(0.0f, 0.0f, 1.0f)).hit_);
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3::ZERO).hit_);
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(nan, 0.0f, -1.0f)).hit_);
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -1.0f), 4.4f).hit_);
+        CHECK(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -1.0f), 4.6f).hit_);
+    }
+
+    SECTION("The event gives the same hit as the function")
+    {
+        using namespace CsgRootPick;
+        VariantMap& data = root->GetEventDataMap();
+        data[P_ORIGIN] = Vector3(0.0f, 0.0f, 5.0f);
+        data[P_DIRECTION] = Vector3(0.0f, 0.0f, -3.0f);
+        root->SendEvent(E_CSGROOTPICK, data);
+        CHECK(data[P_VERSION].GetInt() == 1);
+        REQUIRE(data[P_HIT].GetBool());
+        CHECK(data[P_SOURCE].GetUInt() == IdOf(pocket));
+        CHECK(data[P_POSITION].GetVector3().Equals(Vector3(0.0f, 0.0f, 0.5f), 1e-4f));
+        CHECK(data[P_NORMAL].GetVector3().Equals(Vector3(0.0f, 0.0f, 1.0f), 1e-4f));
+        CHECK(data[P_DISTANCE].GetFloat() == Catch::Approx(4.5f).margin(1e-4f));
+
+        VariantMap& limited = root->GetEventDataMap();
+        limited[P_ORIGIN] = Vector3(0.0f, 0.0f, 5.0f);
+        limited[P_DIRECTION] = Vector3(0.0f, 0.0f, -1.0f);
+        limited[P_MAXDISTANCE] = 1.0f;
+        root->SendEvent(E_CSGROOTPICK, limited);
+        CHECK(limited[P_VERSION].GetInt() == 1);
+        CHECK_FALSE(limited[P_HIT].GetBool());
+    }
+
+    SECTION("A disabled root still picks the applied result")
+    {
+        root->SetEnabled(false);
+        RunFrames(root, workQueue, 5);
+        const CsgPickHit hit = root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -1.0f));
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == IdOf(pocket));
+    }
+
+    SECTION("All brushes removed gives no hit")
+    {
+        pocket->GetNode()->Remove();
+        bump->GetNode()->Remove();
+        RunFrames(root, workQueue, 60);
+        CHECK(root->GetPickTable().sources_.empty());
+        CHECK_FALSE(root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -1.0f)).hit_);
+    }
+}
+
+TEST_CASE("CsgRoot pick reports each union brush on an empty base", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    CsgBrush* left = AddBoxBrush(root, "Left", Vector3(-1.5f, 0.0f, 0.0f), CsgOperation::Union);
+    CsgBrush* right = AddBoxBrush(root, "Right", Vector3(1.5f, 0.0f, 0.0f), CsgOperation::Union);
+    BuildFully(root, workQueue);
+
+    CHECK(root->Pick(Vector3(-5.0f, 0.0f, 0.0f), Vector3::RIGHT).source_ == IdOf(left));
+    CHECK(root->Pick(Vector3(5.0f, 0.0f, 0.0f), Vector3::LEFT).source_ == IdOf(right));
+    CHECK(root->Pick(Vector3(-1.5f, 5.0f, 0.0f), Vector3::DOWN).source_ == IdOf(left));
+    CHECK(root->Pick(Vector3(1.5f, 0.0f, -5.0f), Vector3::FORWARD).source_ == IdOf(right));
+    // The gap between the boxes.
+    CHECK_FALSE(root->Pick(Vector3(0.0f, 5.0f, 0.0f), Vector3::DOWN).hit_);
+    CheckPickTableSources(root, {IdOf(left), IdOf(right)});
+}
+
+TEST_CASE("CsgRoot pick keeps the sources after a reorder with the fold cache", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+
+    // The order changes from First, Second, Third to First, Third, Second. The first fold state is reused.
+    Node* secondNode = brushes[1]->GetNode();
+    secondNode->SetParent(scene);
+    secondNode->SetParent(root->GetNode());
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+    CheckPickTableSources(root, {0u, IdOf(brushes[0]), IdOf(brushes[1]), IdOf(brushes[2])});
+
+    CsgRoot* fresh = MakeBoxRoot(scene, "Fresh");
+    ea::vector<CsgBrush*> expected = AddFoldBrushes(fresh);
+    Node* expectedSecond = expected[1]->GetNode();
+    expectedSecond->SetParent(scene);
+    expectedSecond->SetParent(fresh->GetNode());
+    BuildFully(fresh, workQueue);
+    CheckSameOutput(root, fresh);
+
+    const ea::vector<ea::string> actualLines = PickGrid(root);
+    const ea::vector<ea::string> expectedLines = PickGrid(fresh);
+    REQUIRE(actualLines.size() == expectedLines.size());
+    unsigned hits = 0;
+    unsigned mismatches = 0;
+    for (unsigned i = 0; i < actualLines.size(); ++i)
+    {
+        hits += actualLines[i] != "miss" ? 1 : 0;
+        if (actualLines[i] != expectedLines[i])
+        {
+            ++mismatches;
+            UNSCOPED_INFO((actualLines[i] + " != " + expectedLines[i]).c_str());
+        }
+    }
+    CHECK(mismatches == 0);
+    CHECK(hits > 100);
+    // Each brush and the base show in the grid.
+    for (const char* name : {"base", "First", "Second", "Third"})
+    {
+        const bool found = ea::any_of(actualLines.begin(), actualLines.end(),
+            [&](const ea::string& line) { return line.starts_with(ea::string(name) + " "); });
+        INFO(name);
+        CHECK(found);
+    }
+}
+
+TEST_CASE("CsgRoot pick reports the new node after a brush node is replaced", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    BuildFully(root, workQueue);
+    const unsigned oldId = IdOf(brushes[2]);
+    CHECK(root->Pick(Vector3(5.0f, 0.0f, 0.0f), Vector3::LEFT).source_ == oldId);
+
+    // The new node has the same model, transform and operation as the old one.
+    brushes[2]->GetNode()->Remove();
+    CsgBrush* replacement = AddBoxBrush(root, "Third", Vector3(1.5f, 0.0f, 0.0f), CsgOperation::Union);
+    replacement->GetNode()->SetScale(0.5f);
+    RunFrames(root, workQueue, 60);
+    REQUIRE(IdOf(replacement) != oldId);
+
+    const CsgPickHit hit = root->Pick(Vector3(5.0f, 0.0f, 0.0f), Vector3::LEFT);
+    REQUIRE(hit.hit_);
+    CHECK(hit.source_ == IdOf(replacement));
+    CheckPickTableSources(root, {0u, IdOf(brushes[0]), IdOf(brushes[1]), IdOf(replacement)});
+}
+
+TEST_CASE("CsgRoot pick table follows only the applied result", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgBrush* pocket = AddBoxBrush(root, "Pocket", Vector3(0.0f, 0.0f, 1.0f), CsgOperation::DifferenceAB);
+    pocket->GetNode()->SetScale(0.5f);
+    BuildFully(root, workQueue);
+    const Vector3 origin(0.0f, 0.0f, 5.0f);
+    const CsgPickHit before = root->Pick(origin, Vector3::BACK);
+    REQUIRE(before.hit_);
+    CHECK(before.source_ == IdOf(pocket));
+    const unsigned triangleCount = root->GetPickTable().sources_.size();
+
+    SECTION("A dropped stale result does not change the table")
+    {
+        // The job starts with a shallow pocket. A later change makes it stale. With auto-apply off the root drops it.
+        // Then the root builds the newest state and queues it.
+        root->SetAutoApplyResults(false);
+        pocket->GetNode()->SetPosition(Vector3(0.0f, 0.0f, 1.25f));
+        root->Rebuild();
+        pocket->GetNode()->SetPosition(Vector3(0.0f, 0.0f, 1.4f));
+        RunFrames(root, workQueue, 60);
+
+        const CsgPickHit after = root->Pick(origin, Vector3::BACK);
+        REQUIRE(after.hit_);
+        CHECK(after.source_ == before.source_);
+        CHECK(after.position_.Equals(before.position_, 1e-6f));
+        CHECK(root->GetPickTable().sources_.size() == triangleCount);
+
+        REQUIRE(root->HasPendingResult());
+        while (root->HasPendingResult())
+            root->ApplyPendingResult();
+        // The grid of the root frame has the step 1/1024, so 0.9 rounds to 0.9004.
+        CHECK(root->Pick(origin, Vector3::BACK).position_.Equals(Vector3(0.0f, 0.0f, 0.9f), 1e-3f));
+    }
+
+    SECTION("A queued result changes the table only when the root applies it")
+    {
+        root->SetAutoApplyResults(false);
+        pocket->GetNode()->SetPosition(Vector3(0.0f, 0.0f, 1.25f));
+        RunFrames(root, workQueue, 60);
+        REQUIRE(root->HasPendingResult());
+        CHECK(root->Pick(origin, Vector3::BACK).position_.Equals(before.position_, 1e-6f));
+
+        while (root->HasPendingResult())
+            root->ApplyPendingResult();
+        const CsgPickHit after = root->Pick(origin, Vector3::BACK);
+        REQUIRE(after.hit_);
+        CHECK(after.source_ == IdOf(pocket));
+        CHECK(after.position_.Equals(Vector3(0.0f, 0.0f, 0.75f), 1e-4f));
+    }
+}
+
+TEST_CASE("CsgRoot pick gives world positions for a moved, rotated and scaled root", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    root->GetNode()->SetTransform(Vector3(3.0f, 1.0f, -2.0f), Quaternion(20.0f, 30.0f, 0.0f), Vector3(2.0f, 1.0f, 0.5f));
+    CsgBrush* pocket = AddBoxBrush(root, "Pocket", Vector3(0.0f, 0.0f, 1.0f), CsgOperation::DifferenceAB);
+    pocket->GetNode()->SetScale(0.5f);
+    BuildFully(root, workQueue);
+
+    const Matrix3x4 world = root->GetNode()->GetWorldTransform();
+    const auto check = [&](const Vector3& localOrigin, const Vector3& localHit, const Vector3& localNormal,
+                           unsigned source)
+    {
+        const Vector3 origin = world * localOrigin;
+        const Vector3 expected = world * localHit;
+        const Vector3 direction = (expected - origin) * 0.3f;
+        const CsgPickHit hit = root->Pick(origin, direction);
+        REQUIRE(hit.hit_);
+        CHECK(hit.source_ == source);
+        CHECK(hit.position_.Equals(expected, 1e-3f));
+        CHECK(hit.distance_ == Catch::Approx((expected - origin).Length()).margin(1e-3f));
+        // A normal transforms with the inverse transpose.
+        const Vector3 normal = (world.ToMatrix3().Inverse().Transpose() * localNormal).Normalized();
+        CHECK(hit.normal_.Equals(normal, 1e-3f));
+    };
+    check(Vector3(0.8f, 5.0f, 0.8f), Vector3(0.8f, 1.0f, 0.8f), Vector3::UP, 0);
+    check(Vector3(0.1f, 0.2f, 5.0f), Vector3(0.1f, 0.2f, 0.5f), Vector3::FORWARD, IdOf(pocket));
+    check(Vector3(-5.0f, 0.3f, -0.4f), Vector3(-1.0f, 0.3f, -0.4f), Vector3::LEFT, 0);
+}
+
+TEST_CASE("Triangulation keeps one source for each triangle", "[triangulate][pick]")
+{
+    auto context = MakeCsgTestContext();
+    SharedPtr<Model> box = AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+
+    CsgShapeMesh sphereMesh;
+    CsgSphereParams sphereParams;
+    sphereParams.radius_ = Vector3(0.8f, 0.8f, 0.8f);
+    REQUIRE(CsgGenerateSphere(sphereParams, sphereMesh));
+    SharedPtr<Model> sphere = CsgBuildModelFromMesh(context, sphereMesh);
+    REQUIRE(sphere);
+
+    CsgShapeMesh cylinderMesh;
+    CsgCylinderParams cylinderParams;
+    cylinderParams.bottomCenter_ = Vector3(0.0f, -3.0f, 0.0f);
+    cylinderParams.topCenter_ = Vector3(0.0f, 3.0f, 0.0f);
+    REQUIRE(CsgGenerateCylinder(cylinderParams, cylinderMesh));
+    SharedPtr<Model> cylinder = CsgBuildModelFromMesh(context, cylinderMesh);
+    REQUIRE(cylinder);
+
+    struct Fixture
+    {
+        const char* name_;
+        const Model* model_;
+        Matrix3x4 transform_;
+        CsgOperation op_;
+    };
+    const Fixture fixtures[] = {
+        {"cavity", box, Matrix3x4(Vector3(0.0f, 0.0f, 1.0f), Quaternion::IDENTITY, 0.5f), CsgOperation::DifferenceAB},
+        {"rotated box", box, Matrix3x4(Vector3(0.7f, 0.3f, 0.0f), Quaternion(30.0f, 40.0f, 10.0f), 0.8f),
+            CsgOperation::Union},
+        {"sphere cut", sphere, Matrix3x4(Vector3(0.5f, 0.6f, 0.7f), Quaternion::IDENTITY, 1.0f),
+            CsgOperation::DifferenceAB},
+        {"cylinder through a box", cylinder, Matrix3x4(Vector3(0.2f, 0.0f, 0.1f), Quaternion(15.0f, 0.0f, 5.0f), 1.0f),
+            CsgOperation::DifferenceAB},
+    };
+    for (const Fixture& fixture : fixtures)
+    {
+        CAPTURE(fixture.name_);
+        const SharedPtr<CsgSolid> a =
+            CsgSolid::FromOperand(SourcedPolygons(box, Matrix3x4::IDENTITY, 0, 7), CSG_DEFAULT_EPSILON);
+        const SharedPtr<CsgSolid> b =
+            CsgSolid::FromOperand(SourcedPolygons(fixture.model_, fixture.transform_, 1, 9), CSG_DEFAULT_EPSILON);
+        const SharedPtr<const CsgSolid> result = CsgBooleanOperation(a.Get(), b.Get(), fixture.op_, CSG_DEFAULT_EPSILON);
+        REQUIRE(result);
+        REQUIRE(result->FaceCount() != 0);
+        // Each face of the result keeps a source of an operand.
+        bool sawA = false;
+        bool sawB = false;
+        for (unsigned i = 0; i < result->FaceCount(); ++i)
+        {
+            const unsigned source = result->GetFace(i)->source_;
+            CHECK((source == 7 || source == 9));
+            sawA = sawA || source == 7;
+            sawB = sawB || source == 9;
+        }
+        CHECK(sawA);
+        CHECK(sawB);
+        const SharedPtr<CsgTriangulatedModel> model = CsgTriangulateSolid(*result);
+        REQUIRE(model);
+        CHECK(CheckTriangleSources(*model) == 0);
+    }
+}
+
+TEST_CASE("RepairFlatTriangles keeps the triangle sources in step", "[triangulate][pick]")
+{
+    // The flat triangle runs middle, from, to. Its neighbor in another geometry has the edge from `to` to `from`.
+    const auto vertex = [](float x, float y)
+    {
+        ModelVertex v{};
+        v.SetPosition(Vector3(x, y, 0.0f));
+        v.SetNormal(Vector3::BACK);
+        return v;
+    };
+    CsgTriangulatedModel model;
+    CsgTriangulatedModel::Geometry neighbor;
+    neighbor.vertices_ = {vertex(0.0f, 0.0f), vertex(2.0f, 0.0f), vertex(1.0f, -1.0f), vertex(5.0f, 5.0f),
+        vertex(6.0f, 5.0f), vertex(5.0f, 6.0f)};
+    // An unrelated triangle first, then the neighbor: to, from, other.
+    neighbor.indexData_ = {3, 4, 5, 0, 1, 2};
+    neighbor.triangleSources_ = {5, 7};
+    CsgTriangulatedModel::Geometry flat;
+    flat.vertices_ = {vertex(1.0f, 0.0f), vertex(2.0f, 0.0f), vertex(0.0f, 0.0f), vertex(5.0f, 5.0f),
+        vertex(5.0f, 6.0f), vertex(4.0f, 5.0f)};
+    flat.indexData_ = {0, 1, 2, 3, 4, 5};
+    flat.triangleSources_ = {9, 11};
+    model.geometries_.push_back(neighbor);
+    model.geometries_.push_back(flat);
+
+    CsgInternal::g_csgDiagnostics.Reset();
+    CsgInternal::RepairFlatTriangles(model);
+    CHECK(CsgInternal::g_csgDiagnostics.flatRepairs_.load() == 1);
+
+    CHECK(CheckTriangleSources(model) == 0);
+    REQUIRE(model.geometries_[0].indexData_.size() == 9);
+    CHECK(model.geometries_[0].triangleSources_ == ea::vector<unsigned>{5, 7, 7});
+    REQUIRE(model.geometries_[1].indexData_.size() == 3);
+    CHECK(model.geometries_[1].triangleSources_ == ea::vector<unsigned>{11});
+    CHECK(model.geometries_[1].indexData_ == ea::vector<unsigned>{3, 4, 5});
+}
+
+TEST_CASE("CsgRoot gives every triangle a brush source on an empty base", "[root][pick]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    ea::vector<unsigned> ids;
+    ids.push_back(IdOf(AddProceduralBox(root, "Body", Vector3::ZERO, Vector3(3.0f, 2.0f, 2.0f), CsgOperation::Union)));
+    CsgBrush* rotated = AddBoxBrush(root, "Rotated", Vector3(1.5f, 0.5f, 0.0f), CsgOperation::Union);
+    rotated->GetNode()->SetRotation(Quaternion(30.0f, 40.0f, 10.0f));
+    rotated->GetNode()->SetScale(0.7f);
+    ids.push_back(IdOf(rotated));
+    ids.push_back(IdOf(AddProceduralSphere(
+        root, "Sphere", Vector3(-1.0f, 0.6f, 0.5f), Vector3(0.8f, 0.8f, 0.8f), CsgOperation::DifferenceAB)));
+    CsgCylinderParams cylinderParams;
+    cylinderParams.bottomCenter_ = Vector3(0.0f, -3.0f, 0.0f);
+    cylinderParams.topCenter_ = Vector3(0.0f, 3.0f, 0.0f);
+    cylinderParams.bottomRadius_ = Vector2(0.4f, 0.4f);
+    cylinderParams.topRadius_ = Vector2(0.4f, 0.4f);
+    ids.push_back(IdOf(AddProceduralCylinder(
+        root, "Cylinder", cylinderParams, CsgOperation::DifferenceAB, Vector3(0.3f, 0.0f, -0.2f))));
+    BuildFully(root, workQueue);
+    // The sources do not need a valid result. This fixture gives one duplicate triangle today.
+    CHECK(root->GetLastBuildStats().closed_);
+    CHECK(root->GetLastBuildStats().triangleCount_ > 200);
+
+    CheckPickTableSources(root, ids);
+    for (const unsigned id : ids)
+    {
+        CAPTURE(id);
+        const auto& sources = root->GetPickTable().sources_;
+        CHECK(ea::find(sources.begin(), sources.end(), id) != sources.end());
+    }
 }
