@@ -15,6 +15,7 @@
 #include <Urho3D/Core/WorkQueue.h>
 #include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Graphics/Graphics.h>
+#include <Urho3D/Graphics/Light.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/ModelView.h>
 #include <Urho3D/Graphics/Octree.h>
@@ -2341,4 +2342,84 @@ TEST_CASE("CsgRoot has the Add Brush action and CsgBrush does not", "[root]")
     Node* brushNode = root->GetNode()->GetChild("Brush");
     REQUIRE(brushNode);
     CHECK(brushNode->GetComponent<CsgBrush>() != nullptr);
+}
+
+TEST_CASE("CsgRoot leaves a user node with the result name alone", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The user node has a light and a child. The root must not change it or take it.
+    Node* rootNode = scene->CreateChild("Root");
+    Node* userNode = rootNode->CreateChild("CsgResult");
+    userNode->SetPosition(Vector3(2.0f, 0.0f, 0.0f));
+    userNode->CreateComponent<Light>();
+    userNode->CreateChild("Child");
+    // A node with a light and a model is not a candidate too.
+    Node* userModelNode = rootNode->CreateChild("CsgResult");
+    userModelNode->CreateComponent<StaticModel>();
+    userModelNode->CreateComponent<Light>();
+    auto* root = rootNode->CreateComponent<CsgRoot>();
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxA.mdl"));
+    root->SetDeferredDelaySec(0.0f);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+
+    Node* resultNode = root->GetResultNode();
+    REQUIRE(resultNode);
+    CHECK(resultNode != userNode);
+    CHECK(resultNode != userModelNode);
+    CHECK(resultNode->IsTemporary());
+    CHECK(CountResultNodes(rootNode) == 3);
+    CHECK(userNode->GetParent() == rootNode);
+    CHECK(!userNode->IsTemporary());
+    CHECK(userNode->GetPosition().Equals(Vector3(2.0f, 0.0f, 0.0f)));
+    CHECK(userNode->GetChild("Child") != nullptr);
+    CHECK(userNode->GetComponent<Light>() != nullptr);
+    CHECK(userNode->GetComponent<StaticModel>() == nullptr);
+    CHECK(userModelNode->GetParent() == rootNode);
+    CHECK(!userModelNode->IsTemporary());
+
+    // Removal of the root leaves the user nodes.
+    rootNode->RemoveComponent(root);
+    CHECK(CountResultNodes(rootNode) == 2);
+    CHECK(userNode->GetParent() == rootNode);
+    CHECK(userModelNode->GetParent() == rootNode);
+}
+
+TEST_CASE("CsgRoot reuses a result node that has only a StaticModel", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // This is the shape of a result node in a scene file that a tool saved with temporary nodes.
+    Node* rootNode = scene->CreateChild("Root");
+    Node* saved = rootNode->CreateChild("CsgResult");
+    saved->SetPosition(Vector3(3.0f, 0.0f, 0.0f));
+    auto* savedModel = saved->CreateComponent<StaticModel>();
+    Node* duplicate = rootNode->CreateChild("CsgResult");
+    duplicate->CreateComponent<StaticModel>();
+    WeakPtr<Node> weakDuplicate{duplicate};
+    auto* root = rootNode->CreateComponent<CsgRoot>();
+    root->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxA.mdl"));
+    root->SetDeferredDelaySec(0.0f);
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+
+    CHECK(root->GetResultNode() == saved);
+    CHECK(root->GetResultModel() == savedModel);
+    CHECK(saved->IsTemporary());
+    CHECK(saved->GetTransformMatrix() == Matrix3x4::IDENTITY);
+    CHECK(!weakDuplicate);
+    CHECK(CountResultNodes(rootNode) == 1);
+    REQUIRE(savedModel->GetModel());
+    CHECK(savedModel->GetModel()->GetNumGeometries() > 0);
 }

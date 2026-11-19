@@ -236,6 +236,19 @@ void CanonicalizeSharedKeys(ea::vector<CsgPolygon>& polygons, const ea::hash_map
 /// Name of the temporary child node that holds the result.
 const char* const CSG_RESULT_NODE_NAME = "CsgResult";
 
+/// Return true if the node can be the result node: the reserved name, no children and only StaticModel components.
+bool IsResultNodeCandidate(const Node* node)
+{
+    if (!node || node->GetName() != CSG_RESULT_NODE_NAME || node->GetNumChildren() != 0)
+        return false;
+    for (const SharedPtr<Component>& component : node->GetComponents())
+    {
+        if (component->GetType() != StaticModel::GetTypeStatic())
+            return false;
+    }
+    return true;
+}
+
 Node* GetOrCreateTemporaryChild(Node* parent, const ea::string& name)
 {
     if (!parent)
@@ -412,11 +425,12 @@ StaticModel* CsgRoot::GetOrCreateOutputStaticModel()
         resultNode = nullptr;
         // A copy of the child list, because the loop removes nodes. A duplicate can come from a scene file
         // that a tool saved with temporary nodes. The root keeps the first node and removes the others.
-        // A child with a brush or a root is an operand or a sub-root, so the root never takes it.
+        // Only a node with no children and no components other than StaticModel is a candidate.
+        // The root does not change or remove another node with the reserved name. It makes its own node.
         const ea::vector<SharedPtr<Node>> children = node_->GetChildren();
         for (const SharedPtr<Node>& child : children)
         {
-            if (child->GetName() != CSG_RESULT_NODE_NAME || child->GetComponent<CsgBrush>() || child->GetComponent<CsgRoot>())
+            if (!IsResultNodeCandidate(child))
                 continue;
             if (!resultNode)
                 resultNode = child;

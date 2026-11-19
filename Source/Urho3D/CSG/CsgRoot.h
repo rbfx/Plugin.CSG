@@ -96,6 +96,9 @@ struct CsgBuildStats
 ///
 /// Output ownership:
 /// - The result goes to a `StaticModel` on a temporary child node with the name "CsgResult".
+/// - "CsgResult" is a reserved child name. Do not give it to other children of the root.
+/// - The root reuses a child with that name only if it has no children and no components other than StaticModel.
+///   The root removes other such children. It does not change or remove a child with that name that has more.
 /// - The scene does not save or clone the result node. The root makes it again after a load or a clone.
 /// - The result node has the identity local transform. It has no `CsgBrush`, so it is not an operand.
 /// - The result node and its model follow the effective enabled state of the root.
