@@ -317,4 +317,47 @@ PLUGIN_RBFXCSG_API void CsgSanitizeWedgeParams(CsgWedgeParams& params);
 /// positive or the float positions merge in a triangle (a very small wedge far from the origin).
 PLUGIN_RBFXCSG_API bool CsgGenerateWedge(const CsgWedgeParams& params, CsgShapeMesh& mesh);
 
+/// The parameters of a procedural solid staircase.
+///
+/// The stairs fill a part of the local box [-sx/2, sx/2] x [-sy/2, sy/2] x [-sz/2, sz/2] around the center.
+/// The profile in the YZ plane is extruded along X. The first riser is at the front (z = -sz/2) and starts
+/// at the bottom. Step i (from 0) has the height sy * (i + 1) / steps and the tread depth sz / steps.
+/// The top tread ends at the back (z = sz/2, y = sy/2). The back face goes down to the bottom.
+struct CsgStairsParams
+{
+    static constexpr float MinSize = 0.001f;
+    static constexpr float MaxSize = 16384.0f;
+    static constexpr int MinSteps = 1;
+    static constexpr int MaxSteps = 64;
+
+    /// The size of the bounding box.
+    Vector3 size_{Vector3::ONE};
+    /// The center of the bounding box in the local space of the brush.
+    Vector3 center_{Vector3::ZERO};
+    /// The number of steps.
+    int steps_{5};
+};
+
+/// Clamp each size component to [0.001, 16384], each center component to [-16384, 16384] and the steps to [1, 64].
+/// A component that is not finite gets its default value.
+PLUGIN_RBFXCSG_API void CsgSanitizeStairsParams(CsgStairsParams& params);
+
+/// Generate solid stairs.
+///
+/// The mesh has one position table: the 2 * steps + 2 profile points at x = -sx/2, then the same points at x = sx/2.
+/// Profile point 0 is the front bottom corner. Then each step adds the top of its riser and the back end of its tread.
+/// The last point is the back bottom corner. Each tread and each riser is one quad (two triangles).
+/// Each side is a fan from the back bottom corner over the profile points. The fan uses only the table positions,
+/// so no side triangle has a vertex on an edge of another face: the mesh has no T-junction.
+///
+/// Face groups, in this order and with these slots (the order is a file contract):
+/// 0 the treads (+Y), 1 the risers (-Z), 2 the two sides (-X and +X), 3 the bottom (-Y), 4 the back (+Z).
+/// Each triangle has a flat normal. UV 0 is a planar projection of each face in shape units, relative to the center.
+/// UV 1 is equal to UV 0. The volume is sx * sy * sz * (steps + 1) / (2 * steps).
+///
+/// The function uses a sanitized copy of the parameters. See `CsgSanitizeStairsParams`.
+/// Return false if the shape is not valid. Then `mesh` is empty. A shape is not valid if the volume is not
+/// positive or the float positions merge in a triangle (very small steps far from the origin).
+PLUGIN_RBFXCSG_API bool CsgGenerateStairs(const CsgStairsParams& params, CsgShapeMesh& mesh);
+
 } // namespace Urho3D

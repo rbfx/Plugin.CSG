@@ -1160,4 +1160,83 @@ bool CsgGenerateWedge(const CsgWedgeParams& params, CsgShapeMesh& mesh)
     return writer.Finish();
 }
 
+void CsgSanitizeStairsParams(CsgStairsParams& params)
+{
+    params.size_ = SanitizeVector(params.size_, CsgStairsParams::MinSize, CsgStairsParams::MaxSize, Vector3::ONE);
+    params.center_ = SanitizeCenter(params.center_);
+    params.steps_ = Clamp(params.steps_, CsgStairsParams::MinSteps, CsgStairsParams::MaxSteps);
+}
+
+bool CsgGenerateStairs(const CsgStairsParams& params, CsgShapeMesh& mesh)
+{
+    CsgStairsParams sanitized = params;
+    CsgSanitizeStairsParams(sanitized);
+    const unsigned steps = static_cast<unsigned>(sanitized.steps_);
+    const Vector3& size = sanitized.size_;
+    const Vector3& c = sanitized.center_;
+    const float hx = size.x_ * 0.5f;
+
+    // The profile in (z, y), relative to the center. The step edges use one division each,
+    // so a riser top and the next tread start share the same values.
+    const unsigned numProfile = 2 * steps + 2;
+    ea::vector<Vector2> profile(numProfile);
+    const auto stepZ = [&](unsigned i) { return static_cast<float>(size.z_ * (static_cast<double>(i) / steps - 0.5)); };
+    const auto stepY = [&](unsigned i) { return static_cast<float>(size.y_ * (static_cast<double>(i) / steps - 0.5)); };
+    profile[0] = Vector2(stepZ(0), stepY(0));
+    for (unsigned i = 0; i < steps; ++i)
+    {
+        profile[2 * i + 1] = Vector2(stepZ(i), stepY(i + 1));
+        profile[2 * i + 2] = Vector2(stepZ(i + 1), stepY(i + 1));
+    }
+    profile[numProfile - 1] = Vector2(stepZ(steps), stepY(0));
+
+    // Each vertex copies its position from this table, so the shared positions are bit-identical.
+    // Index k is the profile point k at -X. Index numProfile + k is the same point at +X.
+    ea::vector<Vector3> positions(2 * numProfile);
+    for (unsigned k = 0; k < numProfile; ++k)
+    {
+        positions[k] = c + Vector3(-hx, profile[k].y_, profile[k].x_);
+        positions[numProfile + k] = c + Vector3(hx, profile[k].y_, profile[k].x_);
+    }
+    const auto left = [&](unsigned k) { return k % numProfile; };
+    const auto right = [&](unsigned k) { return numProfile + k % numProfile; };
+    // The quad of the profile edge from k to k + 1. The profile turns clockwise in (z, y), so this winding points out.
+    const auto edgeQuad = [&](ShapeMeshWriter& writer, unsigned k, const FaceFrame& frame)
+    { writer.FlatQuad(left(k), left(k + 1), right(k + 1), right(k), frame); };
+
+    ShapeMeshWriter writer(mesh, positions, c);
+    const unsigned numTriangles = 4 * steps + 4 + 2 * (2 * steps);
+    mesh.vertices_.reserve(3 * numTriangles);
+    mesh.indices_.reserve(3 * numTriangles);
+
+    writer.BeginGroup();
+    for (unsigned i = 0; i < steps; ++i)
+        edgeQuad(writer, 2 * i + 1, FrameUp);
+    writer.EndGroup(0);
+
+    writer.BeginGroup();
+    for (unsigned i = 0; i < steps; ++i)
+        edgeQuad(writer, 2 * i, FrameBack);
+    writer.EndGroup(1);
+
+    // The sides: a fan from the back bottom corner. Each diagonal from that corner stays inside the profile,
+    // because the profile is a staircase that rises from the front to the back.
+    const unsigned apex = numProfile - 1;
+    writer.BeginGroup();
+    for (unsigned k = 0; k + 1 < apex; ++k)
+        writer.FlatTriangle(left(apex), left(k + 1), left(k), FrameLeft);
+    for (unsigned k = 0; k + 1 < apex; ++k)
+        writer.FlatTriangle(right(apex), right(k), right(k + 1), FrameRight);
+    writer.EndGroup(2);
+
+    writer.BeginGroup();
+    edgeQuad(writer, numProfile - 1, FrameDown);
+    writer.EndGroup(3);
+
+    writer.BeginGroup();
+    edgeQuad(writer, numProfile - 2, FrameForward);
+    writer.EndGroup(4);
+    return writer.Finish();
+}
+
 } // namespace Urho3D

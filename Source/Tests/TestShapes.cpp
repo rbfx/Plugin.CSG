@@ -2269,3 +2269,130 @@ TEST_CASE("CsgSanitizeWedgeParams clamps the range and the extreme wedge stays v
     REQUIRE(CsgGenerateWedge(bad, mesh));
     CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(0.5));
 }
+
+TEST_CASE("CsgGenerateStairs is closed with exact vertex sharing and has the stairs volume", "[shapes][procedural]")
+{
+    for (const int steps : {1, 2, 5, 64})
+    {
+        for (const Vector3& size : {Vector3::ONE, Vector3(2.0f, 3.0f, 0.5f), Vector3(16384.0f, 16384.0f, 16384.0f),
+                 Vector3(0.01f, 0.01f, 0.01f)})
+        {
+            for (const Vector3& center : {Vector3::ZERO, Vector3(-2.0f, 1.0f, 3.5f)})
+            {
+                INFO("Steps " << steps << " size " << size.ToString().c_str() << " center " << center.ToString().c_str());
+                CsgStairsParams params;
+                params.size_ = size;
+                params.center_ = center;
+                params.steps_ = steps;
+                CsgShapeMesh mesh;
+                REQUIRE(CsgGenerateStairs(params, mesh));
+                const unsigned n = steps;
+                // Treads 2n, risers 2n, two side fans of 2n triangles, the bottom 2 and the back 2.
+                CHECK(mesh.indices_.size() == 3 * (8 * n + 4));
+                CHECK(CountDistinctPositionBits(mesh) == 4 * n + 4);
+                CheckShapeMeshRules(mesh, size.x_ > 0.1f && steps <= 5);
+                CHECK(GroupSlots(mesh) == ea::vector<unsigned>{0, 1, 2, 3, 4});
+
+                // Step i has the height sy (i + 1) / n and the depth sz / n. The sum over the steps is
+                // sz / n * sy / n * n (n + 1) / 2, so the volume is sx * sy * sz * (n + 1) / (2 n).
+                const double expected = static_cast<double>(size.x_) * size.y_ * size.z_ * (n + 1) / (2.0 * n);
+                CHECK(VolumeAround(mesh, center) == Catch::Approx(expected).epsilon(1e-4));
+            }
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateStairs faces point outward", "[shapes][procedural]")
+{
+    CsgStairsParams params;
+    params.size_ = Vector3(2.0f, 1.0f, 3.0f);
+    params.center_ = Vector3(0.5f, 0.25f, -1.0f);
+    params.steps_ = 4;
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateStairs(params, mesh));
+
+    const auto all = [&](unsigned slot, const Vector3& expected)
+    {
+        const ea::vector<Vector3> normals = GroupTriangleNormals(mesh, slot);
+        for (const Vector3& n : normals)
+            CHECK(n.Equals(expected, 1e-5f));
+        return normals.size();
+    };
+    CHECK(all(0, Vector3::UP) == 8);
+    CHECK(all(1, Vector3::BACK) == 8);
+    CHECK(all(3, Vector3::DOWN) == 2);
+    CHECK(all(4, Vector3::FORWARD) == 2);
+
+    // The sides: the triangles at -X face -X, the triangles at +X face +X.
+    unsigned numLeft = 0;
+    unsigned numRight = 0;
+    for (const CsgShapeGroup& group : mesh.groups_)
+    {
+        if (group.slot_ != 2)
+            continue;
+        for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; i += 3)
+        {
+            const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+            const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+            const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+            const Vector3 n = (p1 - p0).CrossProduct(p2 - p0).Normalized();
+            if (p0.x_ < params.center_.x_)
+            {
+                CHECK(n.Equals(Vector3::LEFT, 1e-5f));
+                ++numLeft;
+            }
+            else
+            {
+                CHECK(n.Equals(Vector3::RIGHT, 1e-5f));
+                ++numRight;
+            }
+        }
+    }
+    CHECK(numLeft == 8);
+    CHECK(numRight == 8);
+
+    // Each tread is at the height of its step: the top tread is at the top of the box.
+    float maxTreadY = -1e9f;
+    for (const CsgShapeGroup& group : mesh.groups_)
+    {
+        if (group.slot_ == 0)
+        {
+            for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+                maxTreadY = ea::max(maxTreadY, mesh.vertices_[mesh.indices_[i]].GetPosition().y_);
+        }
+    }
+    CHECK(maxTreadY == Catch::Approx(0.75f));
+    CheckShapeModelLayout(mesh, 5);
+}
+
+TEST_CASE("CsgSanitizeStairsParams clamps the range and CsgGenerateStairs refuses merged positions", "[shapes][procedural]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CsgStairsParams params;
+    params.size_ = Vector3(nan, -1.0f, 1e9f);
+    params.center_ = Vector3(1e9f, nan, -1.0f);
+    params.steps_ = 0;
+    CsgSanitizeStairsParams(params);
+    CHECK(params.size_ == Vector3(1.0f, CsgStairsParams::MinSize, CsgStairsParams::MaxSize));
+    CHECK(params.center_ == Vector3(CsgMaxShapeCenter, 0.0f, -1.0f));
+    CHECK(params.steps_ == 1);
+    params.steps_ = 1000;
+    CsgSanitizeStairsParams(params);
+    CHECK(params.steps_ == 64);
+
+    // 64 steps of a tiny height far from the origin merge their float positions: the shape is not valid.
+    CsgStairsParams far;
+    far.size_ = Vector3(0.001f, 0.001f, 0.001f);
+    far.center_ = Vector3(16384.0f, 16384.0f, 16384.0f);
+    far.steps_ = 64;
+    CsgShapeMesh mesh;
+    CHECK_FALSE(CsgGenerateStairs(far, mesh));
+    CHECK(mesh.vertices_.empty());
+    CHECK(mesh.indices_.empty());
+    CHECK(mesh.groups_.empty());
+
+    // The smallest stairs at the origin are valid.
+    far.center_ = Vector3::ZERO;
+    REQUIRE(CsgGenerateStairs(far, mesh));
+    CHECK(IsExactlyClosed(mesh));
+}
