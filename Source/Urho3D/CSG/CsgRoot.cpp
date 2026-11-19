@@ -425,7 +425,11 @@ void CsgRoot::UpdateSubscriptions()
     }
     listenedNodes_.clear();
     if (!isActive)
+    {
+        // An inactive root does not see a reload, so the cached fold states can become stale.
         UnwatchModels();
+        ClearBuildCache();
+    }
     UnsubscribeFromEvent(E_NODEADDED);
     UnsubscribeFromEvent(E_NODEREMOVED);
 
@@ -1039,9 +1043,11 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         return;
     }
 
-    // A failed build changes nothing: the cache, the dirty brushes and the output stay as they are.
+    // A failed build keeps the dirty brushes and the output. The build already changed the watched models,
+    // so the root discards the cache.
     if (job->failed_)
     {
+        root->ClearBuildCache();
         if (root->autoApplyResults_)
             root->lastBuildFailed_ = true;
         else
