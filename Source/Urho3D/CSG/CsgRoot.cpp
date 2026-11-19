@@ -1162,8 +1162,11 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
 
     root->rebuildInFlight_ = false;
 
-    // Drop stale results.
-    if (root->rebuildRequestId_ != job->buildId_)
+    // A result is stale if a change came after the job started. A stale result still shows if a newer
+    // rebuild is pending, because that rebuild replaces it. This gives live updates during a drag.
+    // The root drops a stale result of a failed job, of a root that is not active, or when auto-apply is off.
+    const bool stale = root->rebuildRequestId_ != job->buildId_;
+    if (stale && (job->failed_ || !root->autoApplyResults_ || !root->rebuildDirty_ || !root->IsEnabledEffective() || !root->node_))
     {
         root->UpdateWatchedModels(nullptr);
         if (root->rebuildDirty_)
@@ -1218,28 +1221,35 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
 
     job->stats_.buildModelMs_ = static_cast<float>(buildModelTimer.GetUSec(false)) * 0.001f;
 
-    // Acknowledge changes.
-    root->AcknowledgeBrushes(job->operands_);
+    // Acknowledge changes. A stale result keeps the dirty flags, so the next build checks the brushes again.
+    if (!stale)
+        root->AcknowledgeBrushes(job->operands_);
 
-    // Keep the fold states only if all brushes are alive.
-    // An invalid result is never cached: the next rebuild starts from the brushes again.
-    root->ClearBuildCache();
-    if (job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size())
+    // A stale result leaves the cache as it is. The fingerprints decide the reuse for the next build.
+    if (stale)
+        root->UpdateWatchedModels(nullptr);
+    else
     {
-        // A null result solid means that no shell dropped. Then the final solid is the last fold state.
-        root->cachedSolid_ = job->resultSolid_ ? job->resultSolid_ : job->stepSolids_.back();
-        root->cachedBaseSolid_ = job->baseSolid_;
-        root->cachedStepSolids_ = job->stepSolids_;
-        root->cachedBrushes_ = job->capturedBrushes_;
+        // Keep the fold states only if all brushes are alive.
+        // An invalid result is never cached: the next rebuild starts from the brushes again.
+        root->ClearBuildCache();
+        if (job->stats_.valid_ && job->capturedBrushes_.size() == job->operands_.size())
+        {
+            // A null result solid means that no shell dropped. Then the final solid is the last fold state.
+            root->cachedSolid_ = job->resultSolid_ ? job->resultSolid_ : job->stepSolids_.back();
+            root->cachedBaseSolid_ = job->baseSolid_;
+            root->cachedStepSolids_ = job->stepSolids_;
+            root->cachedBrushes_ = job->capturedBrushes_;
+        }
+        root->cachedBaseModel_ = job->baseModel_;
+        root->cachedEpsilon_ = job->epsilon_;
+        root->cachedMetricScale_ = job->metricScale_;
+        root->cachedMinComponentVolumeFraction_ = job->minComponentVolumeFraction_;
+        root->cachedSourceModels_ = job->sourceModels_;
+        root->cachedSourceMaterials_ = job->sourceMaterials_;
+        // The watch set now follows the stored cache.
+        root->UpdateWatchedModels(nullptr);
     }
-    root->cachedBaseModel_ = job->baseModel_;
-    root->cachedEpsilon_ = job->epsilon_;
-    root->cachedMetricScale_ = job->metricScale_;
-    root->cachedMinComponentVolumeFraction_ = job->minComponentVolumeFraction_;
-    root->cachedSourceModels_ = job->sourceModels_;
-    root->cachedSourceMaterials_ = job->sourceMaterials_;
-    // The watch set now follows the stored cache.
-    root->UpdateWatchedModels(nullptr);
 
     if (root->autoApplyResults_)
     {
@@ -1254,6 +1264,14 @@ void CsgRoot::ApplyBuildJobResultOnMainThread(
         PendingBuildResult pending{renderableModel, materials, job->buildId_, job->stats_};
         pending.components_ = ea::move(components);
         root->pendingResults_.push_back(ea::move(pending));
+    }
+
+    // The changes that came during the job start a new wait now.
+    if (stale)
+    {
+        if (!root->deferredRebuildScheduled_)
+            root->waitStartTimeMs_ = Time::GetSystemTime();
+        root->ScheduleDeferredRebuild();
     }
 }
 

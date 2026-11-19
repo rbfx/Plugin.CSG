@@ -80,8 +80,9 @@ struct CsgBuildStats
 /// - Rebuild requests are debounced using `deferredDelaySec_`. The wait starts at the first open change.
 ///   A later change does not reset it. A rebuild with the newest state runs when the wait ends.
 ///   A change during a build starts a new wait. Setting delay to 0 triggers immediate rebuild.
-/// - Results are de-staled: if multiple rebuilds are requested while a build is in-flight, older
-///   results are discarded and a fresh rebuild is scheduled.
+/// - One build runs at a time. A change during a build leaves the root dirty. If the build result is
+///   older than the change, the root still shows it and starts a new wait for the newer state.
+///   The root drops a stale result of a failed build, of a root that is not active, or when auto-apply is off.
 ///
 /// Root frame and coordinates:
 /// - The build runs in the root frame. The root frame carries the world scale of the root, but not

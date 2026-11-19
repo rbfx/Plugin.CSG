@@ -94,7 +94,7 @@ The baselines for the float build and the double build are in the header of `Sou
 A procedural brush (`CsgBoxBrush`) generates its model from parameters. See "Procedural box".
 The root writes the result to a `StaticModel` on the same node.
 
-- The build runs on the `WorkQueue`. The main thread applies the result. The root drops a stale result and schedules a new build.
+- The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build or when auto-apply is off.
 - `Deferred Delay Sec` is the wait before a rebuild. The wait starts at the first change and a later change does not reset it. A drag gives live updates. `Rebuild()` ignores it.
 - Solid cache: the root stores a fingerprint for each brush (brush, model, transform, mesh id and operation). If a rebuild only appends brushes and the base model, the epsilon and the earlier brushes did not change, it starts from the cached solid. It applies only the new brushes.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
