@@ -450,6 +450,16 @@ The handles of each shape:
 | Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. |
 | Arch | The X and Y radius, the thickness, the depth and the arc end (axes). |
 
+### Bake to asset
+
+- `CsgRoot::SaveResultModel(Serializer&)` saves the applied result with `Model::Save`. It returns false if the root has no result. The materials stay outside the file.
+- The command "Bake to Asset" is in the CSG menu and in the overlay of the root. It needs a root with a result and a parent node.
+- The file is `Models/<root name>_Baked.mdl` in the resource directory of the scene file. If the scene has no resource file name, the directory of the base model of the root is used. Without both, the command logs an error.
+- The command never overwrites a file. It appends _1, _2 and so on to the name.
+- One undo step adds the sibling node "<root name> Baked" and disables the `CsgRoot` component. The node has the world transform of the root. Its `StaticModel` has the saved model and the materials of the result.
+- Undo removes the new node and enables the root. The file stays on the disk.
+- This command is not `Bake()`. `Bake()` works at run time and removes the brush nodes.
+
 ### Manual check list
 
 The editor has no test harness for addons. Do these checks by hand:
@@ -537,6 +547,9 @@ The editor has no test harness for addons. Do these checks by hand:
 81. Subtract a box from the floor under the sphere. Start play mode. The sphere falls into the hole.
 82. Clear "Generate Collision". Start play mode. The sphere falls through the floor.
 83. Save the scene and open the file. It has no `CsgResult` node, no collision shape of the result and no body of the result.
+84. Save the scene in a resource directory. Add a box brush with B. Choose "Bake to Asset" in the CSG menu. The file `Models/CSG_Baked.mdl` appears in the resource directory. A node "CSG Baked" with the same shape appears and is selected. The root result is gone.
+85. Choose "Bake to Asset" again after you enable the root. The new file is `Models/CSG_Baked_1.mdl`. The first file stays.
+86. Push Ctrl+Z. The node "CSG Baked" goes and the root result comes back. The file stays. Push Ctrl+Y. The node and the disabled root come back.
 
 ## How to try the sample scene
 
