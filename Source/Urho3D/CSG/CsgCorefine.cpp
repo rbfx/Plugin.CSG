@@ -3181,7 +3181,8 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
         const CsgGridPoint2 p2 = corner(2);
         const CsgGridPoint2 q = CsgExact::Project(candidate, view.dropAxis_, view.flip_);
         const int side = CsgExact::Orient2(p0, p1, p2);
-        // If strict is false, a position on the boundary counts as inside if the exact crossing is on that edge too.
+        // If strict is false, a position on the boundary counts as inside if it welds at a vertex of the chain of the
+        // edge, or if the exact crossing is on that edge too.
         const int q0 = CsgExact::Orient2(p0, p1, q);
         const int q1 = CsgExact::Orient2(p1, p2, q);
         const int q2 = CsgExact::Orient2(p2, p0, q);
@@ -3212,8 +3213,34 @@ unsigned Corefinement::CrossingInvalidRules(const Crossing& record, const CsgGri
             }
             return false;
         };
+        // A position on an edge line at a vertex of the chain of the edge welds to that vertex. It is not a fold.
+        // The chain of the edge has its two ends and its crossings. A position at a crossing of the chain welds
+        // only if it is also an end of the crossing edge. Then the two vertices are one grid point.
+        const auto weldsAtVertex = [&](int edgeIndex)
+        {
+            const int u = other.triangleIds_[key.triangle_ * 3 + edgeIndex];
+            const int v = other.triangleIds_[key.triangle_ * 3 + (edgeIndex + 1) % 3];
+            if (candidate == other.grid_[u] || candidate == other.grid_[v])
+                return true;
+            if (!(candidate == edges.grid_[key.low_]) && !(candidate == edges.grid_[key.high_]))
+                return false;
+            const EdgeList* list = edgeCrossings_[key.edgeInSecond_ ? 0 : 1].Find(
+                CsgDirectedKey(static_cast<unsigned>(ea::min(u, v)), static_cast<unsigned>(ea::max(u, v))));
+            for (int node = list ? list->head_ : -1; node >= 0; node = edgeNodes_[node].next_)
+            {
+                const int item = edgeNodes_[node].record_;
+                if (item != static_cast<int>(index) && crossings_[item].grid_ == candidate)
+                    return true;
+            }
+            return false;
+        };
         const auto outsideOf = [&](int orient, int edgeIndex)
-        { return orient == -side ? !onTwin(edgeIndex) : orient == 0 && !exactOnEdge(edgeIndex); };
+        {
+            if (orient == -side)
+                return !onTwin(edgeIndex);
+            // The grid compares of weldsAtVertex come before the exact test of exactOnEdge.
+            return orient == 0 && !weldsAtVertex(edgeIndex) && !exactOnEdge(edgeIndex);
+        };
         const bool outside = strict ? (q0 != side || q1 != side || q2 != side)
                                     : (outsideOf(q0, 0) || outsideOf(q1, 1) || outsideOf(q2, 2));
         if (side == 0 || outside)
