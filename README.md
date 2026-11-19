@@ -100,6 +100,44 @@ The root writes the result to a `StaticModel` on the same node.
 - `AutoApplyResults` (default true) applies a finished result at once. If it is false, the root queues each result. `HasPendingResult`, `GetPendingResultRevision` and `ApplyPendingResult` give access to the oldest queued result.
 - `Bake()` folds the applied brushes into the base operand and removes the brush nodes. The baked geometry exists only at run time and the root does not serialize it. `Bake()` returns false if a rebuild is in flight, a brush is dirty or a result is pending.
 
+### Shape handles (protocol)
+
+A procedural brush offers handles. A handle is a point that the user drags in the viewport.
+The editor addon stays independent of the shape types. It uses two events and does not link Plugin.CSG.
+The header `Source/Urho3D/CSG/CsgShapeProtocol.h` has the events and the keys. It needs only the Urho3D core types.
+The addon sends an event with `component->SendEvent(...)`. The brush answers on itself and writes the result into the event data.
+A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
+
+- `E_CSGSHAPEQUERYHANDLES`. Out: `P_VERSION` (int, 1), `P_VALID` (bool) and `P_HANDLES` (a `VariantVector`).
+  Each element is a `VariantMap` with the keys `Id` (int), `Name` (string), `Kind` (int: 0 point, 1 axis),
+  `Position` (Vector3) and `Axis` (unit Vector3, zero for a point). The key constants are in `CsgShapeProtocol`.
+  The positions and axes are in the local space of the brush. A shape that is not valid gives `P_VALID` false and no handle.
+- `E_CSGSHAPEMOVEHANDLES`. In: `P_INDICES` (a `VariantVector` of int ids) and `P_DELTA` (Vector3).
+  The delta is the total delta from the drag start, in the local space of the brush.
+  Out: `P_ACCEPTED` (bool).
+
+The move is stateless. The brush applies the delta to its current parameters. The editor restores the attributes before each call.
+The brush clamps the result with the sanitizer of the shape. It refuses a result that is not valid.
+Then `P_ACCEPTED` is false and the parameters stay. A non-finite delta, an unknown id and a move without a change also give false.
+An accepted move marks the brush dirty once. In C++ the same API is `CsgProceduralBrush::GetHandles` and `MoveHandles`.
+A repeated id counts once. The handles apply in the given order.
+
+The ids are a file contract.
+
+| Shape | Id | Handle |
+| --- | --- | --- |
+| Box | 0 to 7 | Corners (points). Bit 0 is +X, bit 1 is +Y, bit 2 is +Z. |
+| Box | 20 to 25 | Faces (axes) in the order -X, +X, -Y, +Y, -Z, +Z. The face moves its 4 corners along the axis. |
+| Sphere | 0 to 5 | Radius at +X, -X, +Y, -Y, +Z, -Z. The + and - handles of one axis edit one component. |
+| Cylinder | 0, 1 | Bottom center and top center (points). |
+| Cylinder | 2 to 5 | Bottom radius at +X, -X, +Z, -Z. Not offered if the bottom is an apex. |
+| Cylinder | 6 to 9 | Top radius at +X, -X, +Z, -Z. Not offered if the top is an apex. |
+| Cylinder | 10 | Bulge (axis +X at the middle of the center line). Not offered if the mean X radius is 0.001 or less. |
+| Ring | 0 | Major radius (axis +X). |
+| Ring | 1 | Radial tube radius (axis +X). |
+| Ring | 2 | Axial tube radius (axis +Y). |
+| Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
+
 ## UV projection
 
 Each `CsgBrush` has three UV attributes. They come after "Materials" in the inspector.
