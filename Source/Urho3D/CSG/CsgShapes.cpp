@@ -710,4 +710,240 @@ bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
     return true;
 }
 
+void CsgSanitizeRingParams(CsgRingParams& params)
+{
+    const CsgRingParams defaults;
+    params.radius_ = SanitizeValue(params.radius_, CsgRingParams::MinRadius, CsgRingParams::MaxRadius, defaults.radius_);
+    params.tubeRadius_ = Vector2(SanitizeValue(params.tubeRadius_.x_, CsgRingParams::MinTubeRadius,
+                                     CsgRingParams::MaxTubeRadius, defaults.tubeRadius_.x_),
+        SanitizeValue(params.tubeRadius_.y_, CsgRingParams::MinTubeRadius, CsgRingParams::MaxTubeRadius,
+            defaults.tubeRadius_.y_));
+    // The inner edge must stay at a positive radius.
+    params.tubeRadius_.x_ = ea::min(params.tubeRadius_.x_, params.radius_ * CsgRingParams::MaxInnerFraction);
+    params.segments_ = Clamp(params.segments_, CsgRingParams::MinSegments, CsgRingParams::MaxSegments);
+    params.tubeSegments_ = Clamp(params.tubeSegments_, CsgRingParams::MinTubeSegments, CsgRingParams::MaxTubeSegments);
+    params.arc_ = SanitizeValue(params.arc_, CsgRingParams::MinArc, CsgRingParams::MaxArc, defaults.arc_);
+    params.tubeAngle_ = SanitizeValue(
+        params.tubeAngle_, CsgRingParams::MinTubeAngle, CsgRingParams::MaxTubeAngle, defaults.tubeAngle_);
+}
+
+namespace
+{
+
+/// One corner of a ring triangle with all attributes except the final normal.
+struct RingCorner
+{
+    Vector3 position_;
+    Vector2 uv_;
+    /// The direction of the U axis in space.
+    Vector3 tangentDir_;
+    /// The direction of the V axis in space.
+    Vector3 vDir_;
+    /// The smooth normal. A cap corner always uses it.
+    Vector3 normal_;
+    bool isCap_{};
+};
+
+} // namespace
+
+bool CsgGenerateRing(const CsgRingParams& params, CsgShapeMesh& mesh)
+{
+    mesh.vertices_.clear();
+    mesh.indices_.clear();
+    mesh.groups_.clear();
+
+    CsgRingParams sanitized = params;
+    CsgSanitizeRingParams(sanitized);
+    const unsigned segments = static_cast<unsigned>(sanitized.segments_);
+    const unsigned tubeSegments = static_cast<unsigned>(sanitized.tubeSegments_);
+    const double radius = sanitized.radius_;
+    const double tubeA = sanitized.tubeRadius_.x_;
+    const double tubeB = sanitized.tubeRadius_.y_;
+    const double degToRad = M_PI / 180.0;
+    const double arcRad = sanitized.arc_ * degToRad;
+    const bool fullRing = sanitized.arc_ >= CsgRingParams::MaxArc;
+    const unsigned numRings = fullRing ? segments : segments + 1;
+
+    // The trigonometric tables. The index segments is the end of the arc.
+    ea::vector<double> segCos(segments + 1);
+    ea::vector<double> segSin(segments + 1);
+    for (unsigned i = 0; i <= segments; ++i)
+    {
+        segCos[i] = std::cos(arcRad * i / segments);
+        segSin[i] = std::sin(arcRad * i / segments);
+    }
+    ea::vector<double> tubeCos(tubeSegments + 1);
+    ea::vector<double> tubeSin(tubeSegments + 1);
+    for (unsigned j = 0; j <= tubeSegments; ++j)
+    {
+        const double psi = (sanitized.tubeAngle_ + 360.0 * j / tubeSegments) * degToRad;
+        tubeCos[j] = std::cos(psi);
+        tubeSin[j] = std::sin(psi);
+    }
+
+    // Each vertex copies its position from this table, so the shared positions are bit-identical.
+    // The rings come first. The section centers of an arc come last.
+    const unsigned startCenter = numRings * tubeSegments;
+    const unsigned endCenter = startCenter + 1;
+    ea::vector<Vector3> positions(endCenter + 1);
+    for (unsigned i = 0; i < numRings; ++i)
+    {
+        for (unsigned j = 0; j < tubeSegments; ++j)
+        {
+            const double r = radius + tubeA * tubeCos[j];
+            positions[i * tubeSegments + j] = Vector3(static_cast<float>(r * segCos[i]),
+                static_cast<float>(tubeB * tubeSin[j]), static_cast<float>(r * segSin[i]));
+        }
+    }
+    positions[startCenter] = Vector3(static_cast<float>(radius * segCos[0]), 0.0f, static_cast<float>(radius * segSin[0]));
+    positions[endCenter] =
+        Vector3(static_cast<float>(radius * segCos[segments]), 0.0f, static_cast<float>(radius * segSin[segments]));
+    // The end of a full ring (i == segments) copies ring 0. The tube seam (j == tubeSegments) copies j 0.
+    const auto ringPosition = [&](unsigned i, unsigned j) -> const Vector3&
+    { return positions[(i % numRings) * tubeSegments + j % tubeSegments]; };
+
+    const auto bodyCorner = [&](unsigned i, unsigned j) -> RingCorner
+    {
+        const Vector3 radial(static_cast<float>(segCos[i]), 0.0f, static_cast<float>(segSin[i]));
+        const Vector3 along(static_cast<float>(-segSin[i]), 0.0f, static_cast<float>(segCos[i]));
+        RingCorner corner;
+        corner.position_ = ringPosition(i, j);
+        corner.uv_ = Vector2(static_cast<float>(static_cast<double>(i) / segments),
+            static_cast<float>(static_cast<double>(j) / tubeSegments));
+        // The normal of the elliptic section: the gradient is (cos / a, sin / b), so it is (b cos, a sin).
+        corner.normal_ = (radial * static_cast<float>(tubeB * tubeCos[j]) + Vector3::UP * static_cast<float>(tubeA * tubeSin[j]))
+                             .NormalizedOrDefault(radial);
+        corner.tangentDir_ = along;
+        corner.vDir_ = radial * static_cast<float>(-tubeA * tubeSin[j]) + Vector3::UP * static_cast<float>(tubeB * tubeCos[j]);
+        return corner;
+    };
+    // A cap corner. The `j` is the rim index. `isCenter` selects the section center instead.
+    const auto capCorner = [&](unsigned i, unsigned j, bool atStart, bool isCenter) -> RingCorner
+    {
+        const Vector3 radial(static_cast<float>(segCos[i]), 0.0f, static_cast<float>(segSin[i]));
+        const Vector3 along(static_cast<float>(-segSin[i]), 0.0f, static_cast<float>(segCos[i]));
+        RingCorner corner;
+        corner.isCap_ = true;
+        corner.normal_ = atStart ? -along : along;
+        corner.tangentDir_ = radial;
+        corner.vDir_ = Vector3::UP;
+        if (isCenter)
+        {
+            corner.position_ = positions[atStart ? startCenter : endCenter];
+            corner.uv_ = Vector2(0.5f, 0.5f);
+        }
+        else
+        {
+            corner.position_ = ringPosition(i, j);
+            corner.uv_ = Vector2(static_cast<float>(tubeA * tubeCos[j] + 0.5), static_cast<float>(tubeB * tubeSin[j] + 0.5));
+        }
+        return corner;
+    };
+
+    const Vector4 white = Color::WHITE.ToVector4();
+    double volume = 0.0;
+    bool degenerate = false;
+
+    const auto emitTriangle = [&](const RingCorner& c0, const RingCorner& c1, const RingCorner& c2)
+    {
+        const RingCorner* corners[3] = {&c0, &c1, &c2};
+        const Vector3& p0 = c0.position_;
+        const Vector3& p1 = c1.position_;
+        const Vector3& p2 = c2.position_;
+        if (p0 == p1 || p1 == p2 || p2 == p0)
+            degenerate = true;
+        const Vector3 flatNormal = (p1 - p0).CrossProduct(p2 - p0).NormalizedOrDefault(Vector3::UP);
+        volume += TripleProduct(p0, p1, p2) / 6.0;
+
+        for (const RingCorner* corner : corners)
+        {
+            const Vector3 normal = corner->isCap_ || sanitized.smoothNormals_ ? corner->normal_ : flatNormal;
+            // The shader bitangent is cross(tangent, normal) * w. It must point along the V axis.
+            const Vector3 tangent = (corner->tangentDir_ - normal * normal.DotProduct(corner->tangentDir_))
+                                        .NormalizedOrDefault(corner->tangentDir_);
+            const float handedness = tangent.CrossProduct(normal).DotProduct(corner->vDir_) >= 0.0f ? 1.0f : -1.0f;
+
+            ModelVertex vertex{};
+            vertex.SetPosition(corner->position_);
+            vertex.SetNormal(normal);
+            vertex.tangent_ = Vector4(tangent, handedness);
+            vertex.uv_[0] = Vector4(corner->uv_.x_, corner->uv_.y_, 0.0f, 0.0f);
+            vertex.uv_[1] = vertex.uv_[0];
+            vertex.color_[0] = white;
+
+            mesh.indices_.push_back(mesh.vertices_.size());
+            mesh.vertices_.push_back(vertex);
+        }
+    };
+
+    // The group of a tube quad: the quadrant of the angle of its middle. The small bias breaks the tie
+    // on a quadrant border the same way for each platform.
+    // Quadrant 0 is +radial, 1 is +Y, 2 is -radial, 3 is -Y. Group order: outer, inner, top, bottom.
+    const unsigned quadrantGroup[4] = {0, 2, 1, 3};
+    ea::vector<unsigned> quadGroup(tubeSegments);
+    for (unsigned j = 0; j < tubeSegments; ++j)
+    {
+        const double middle = sanitized.tubeAngle_ + 360.0 * (j + 0.5) / tubeSegments;
+        const long quadrant = static_cast<long>(std::floor((middle + 45.0 + 1e-6) / 90.0));
+        quadGroup[j] = quadrantGroup[((quadrant % 4) + 4) % 4];
+    }
+
+    const unsigned numTriangles = 2 * segments * tubeSegments + (fullRing ? 0 : 2 * tubeSegments);
+    mesh.vertices_.reserve(3 * numTriangles);
+    mesh.indices_.reserve(3 * numTriangles);
+
+    for (unsigned group = 0; group < 4; ++group)
+    {
+        const unsigned start = mesh.indices_.size();
+        for (unsigned j = 0; j < tubeSegments; ++j)
+        {
+            if (quadGroup[j] != group)
+                continue;
+            for (unsigned i = 0; i < segments; ++i)
+            {
+                const RingCorner a = bodyCorner(i, j);
+                const RingCorner b = bodyCorner(i + 1, j);
+                const RingCorner c = bodyCorner(i + 1, j + 1);
+                const RingCorner d = bodyCorner(i, j + 1);
+                emitTriangle(a, d, b);
+                emitTriangle(b, d, c);
+            }
+        }
+        const unsigned count = static_cast<unsigned>(mesh.indices_.size()) - start;
+        if (count)
+            mesh.groups_.push_back(CsgShapeGroup{start, count, group});
+    }
+
+    if (!fullRing)
+    {
+        // Group 4: the start cap. Group 5: the end cap. A cap normal points away from the ring.
+        for (unsigned cap = 0; cap < 2; ++cap)
+        {
+            const bool atStart = cap == 0;
+            const unsigned ring = atStart ? 0 : segments;
+            const unsigned start = mesh.indices_.size();
+            const RingCorner center = capCorner(ring, 0, atStart, true);
+            for (unsigned j = 0; j < tubeSegments; ++j)
+            {
+                const RingCorner rim0 = capCorner(ring, j, atStart, false);
+                const RingCorner rim1 = capCorner(ring, j + 1, atStart, false);
+                if (atStart)
+                    emitTriangle(center, rim1, rim0);
+                else
+                    emitTriangle(center, rim0, rim1);
+            }
+            mesh.groups_.push_back(CsgShapeGroup{start, static_cast<unsigned>(mesh.indices_.size()) - start, 4u + cap});
+        }
+    }
+
+    if (degenerate || !(volume > 0.0))
+    {
+        mesh.vertices_.clear();
+        mesh.indices_.clear();
+        mesh.groups_.clear();
+        return false;
+    }
+    return true;
+}
+
 } // namespace Urho3D

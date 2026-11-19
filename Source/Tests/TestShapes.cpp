@@ -1300,3 +1300,516 @@ TEST_CASE("CsgGenerateCylinder gives the vertex layout of Box.mdl in the model",
         CHECK(elements[i].offset_ == expected[i].offset_);
     }
 }
+
+namespace
+{
+
+/// Return the independent volume of the ring polyhedron.
+/// The wedge between two section planes with the angle step d is a prismatoid with planar side faces.
+/// Its volume is sin(d) * integral of the radial coordinate over the section polygon.
+/// The test computes the integral with the shoelace formula. It does not use the mesh generator.
+double ExpectedRingVolume(const CsgRingParams& p)
+{
+    const double pi = 3.14159265358979323846;
+    const unsigned m = p.tubeSegments_;
+    double integral = 0.0;
+    for (unsigned j = 0; j < m; ++j)
+    {
+        const double a0 = (p.tubeAngle_ + 360.0 * j / m) * pi / 180.0;
+        const double a1 = (p.tubeAngle_ + 360.0 * (j + 1) / m) * pi / 180.0;
+        const double x0 = p.radius_ + p.tubeRadius_.x_ * std::cos(a0);
+        const double y0 = p.tubeRadius_.y_ * std::sin(a0);
+        const double x1 = p.radius_ + p.tubeRadius_.x_ * std::cos(a1);
+        const double y1 = p.tubeRadius_.y_ * std::sin(a1);
+        integral += (x0 + x1) * (x0 * y1 - x1 * y0) / 6.0;
+    }
+    const double step = p.arc_ * pi / 180.0 / p.segments_;
+    return p.segments_ * std::sin(step) * integral;
+}
+
+/// The ring variants of the tests.
+ea::vector<CsgRingParams> MakeRingVariants(unsigned segments, unsigned tubeSegments)
+{
+    ea::vector<CsgRingParams> variants;
+    for (const float tubeAngle : {0.0f, 45.0f})
+    {
+        for (const float arc : {360.0f, 90.0f, 180.0f})
+        {
+            for (const bool elliptic : {false, true})
+            {
+                CsgRingParams params;
+                params.segments_ = segments;
+                params.tubeSegments_ = tubeSegments;
+                params.tubeAngle_ = tubeAngle;
+                params.arc_ = arc;
+                if (elliptic)
+                {
+                    params.radius_ = 1.2f;
+                    params.tubeRadius_ = Vector2(0.4f, 0.15f);
+                }
+                variants.push_back(params);
+            }
+        }
+    }
+    return variants;
+}
+
+} // namespace
+
+TEST_CASE("CsgGenerateRing gives a closed mesh without degenerate triangles", "[shapes][procedural]")
+{
+    const unsigned cases[][2] = {{3, 3}, {128, 64}, {32, 12}, {32, 4}, {7, 5}};
+    for (const auto& c : cases)
+    {
+        for (const CsgRingParams& params : MakeRingVariants(c[0], c[1]))
+        {
+            INFO("Segments " << c[0] << " tube segments " << c[1] << " tube angle " << params.tubeAngle_ << " arc "
+                             << params.arc_ << " tube " << params.tubeRadius_.x_);
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateRing(params, mesh));
+            const bool full = params.arc_ >= 360.0f;
+            const unsigned bodyTriangles = 2 * c[0] * c[1];
+            const unsigned capTriangles = full ? 0 : 2 * c[1];
+            CHECK(mesh.indices_.size() == 3 * (bodyTriangles + capTriangles));
+            CHECK(mesh.vertices_.size() == mesh.indices_.size());
+            CHECK(HasNoDegenerateTriangle(mesh));
+            const ea::vector<CsgPolygon> polygons = MeshToPolygons(mesh);
+            CHECK(IsEdgeClosed(polygons, 1e-6f));
+            CHECK(SignedVolume(polygons) > 0.0);
+            if (c[0] * c[1] <= 400)
+                CHECK(SolidVolume(mesh) > 0.0);
+
+            // The groups follow the order, do not overlap and cover the index list.
+            unsigned next = 0;
+            unsigned lastSlot = 0;
+            for (unsigned i = 0; i < mesh.groups_.size(); ++i)
+            {
+                const CsgShapeGroup& group = mesh.groups_[i];
+                CHECK(group.indexStart_ == next);
+                CHECK(group.indexCount_ > 0);
+                CHECK(group.indexCount_ % 3 == 0);
+                CHECK(group.slot_ < 6);
+                CHECK((i == 0 || group.slot_ > lastSlot));
+                lastSlot = group.slot_;
+                next += group.indexCount_;
+            }
+            CHECK(next == mesh.indices_.size());
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateRing volume matches the independent polyhedron volume", "[shapes][procedural]")
+{
+    const double pi = 3.14159265358979323846;
+    CsgShapeMesh mesh;
+    for (const auto& c : {ea::pair<unsigned, unsigned>{3, 3}, {32, 12}, {32, 4}, {128, 64}, {9, 7}})
+    {
+        for (const CsgRingParams& params : MakeRingVariants(c.first, c.second))
+        {
+            INFO("Segments " << c.first << " tube segments " << c.second << " tube angle " << params.tubeAngle_
+                             << " arc " << params.arc_ << " tube " << params.tubeRadius_.x_);
+            REQUIRE(CsgGenerateRing(params, mesh));
+            CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(ExpectedRingVolume(params)).epsilon(1e-4));
+        }
+    }
+
+    // The fine full ring is close to the torus volume 2 pi^2 R a b. The polyhedron is inside the torus.
+    CsgRingParams fine;
+    fine.segments_ = 128;
+    fine.tubeSegments_ = 64;
+    fine.radius_ = 1.0f;
+    fine.tubeRadius_ = Vector2(0.4f, 0.2f);
+    REQUIRE(CsgGenerateRing(fine, mesh));
+    const double torus = 2.0 * pi * pi * 1.0 * 0.4 * 0.2;
+    const double volume = SignedVolume(MeshToPolygons(mesh));
+    CHECK(volume < torus);
+    CHECK(volume == Catch::Approx(torus).epsilon(5e-3));
+
+    // The default ring has a CSG solid with the same volume.
+    REQUIRE(CsgGenerateRing(CsgRingParams{}, mesh));
+    CHECK(SolidVolume(mesh) == Catch::Approx(ExpectedRingVolume(CsgRingParams{})).epsilon(3e-3));
+}
+
+TEST_CASE("CsgGenerateRing has analytic normals, flat caps and UV", "[shapes][procedural]")
+{
+    for (const CsgRingParams& base : MakeRingVariants(16, 10))
+    {
+        for (const bool smooth : {true, false})
+        {
+            CsgRingParams params = base;
+            params.smoothNormals_ = smooth;
+            INFO("Smooth " << smooth << " tube angle " << params.tubeAngle_ << " arc " << params.arc_);
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateRing(params, mesh));
+            const double arcRad = params.arc_ * 3.14159265358979323846 / 180.0;
+            const double a = params.tubeRadius_.x_;
+            const double b = params.tubeRadius_.y_;
+
+            for (const CsgShapeGroup& group : mesh.groups_)
+            {
+                for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; i += 3)
+                {
+                    const Vector3 p0 = mesh.vertices_[mesh.indices_[i]].GetPosition();
+                    const Vector3 p1 = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+                    const Vector3 p2 = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+                    const Vector3 flat = (p1 - p0).CrossProduct(p2 - p0).Normalized();
+                    for (unsigned k = 0; k < 3; ++k)
+                    {
+                        const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i + k]];
+                        const Vector3 p = vertex.GetPosition();
+                        const Vector3 n = vertex.GetNormal();
+                        CHECK(n.Length() == Catch::Approx(1.0f).margin(1e-3));
+                        CHECK(vertex.uv_[0] == vertex.uv_[1]);
+                        if (group.slot_ >= 4)
+                        {
+                            // A cap is flat. The normal points along the end tangent, away from the ring.
+                            CHECK(n.Equals(flat, 1e-3f));
+                            const double phi = std::atan2(p.z_, p.x_);
+                            const Vector3 along(static_cast<float>(-std::sin(phi)), 0.0f, static_cast<float>(std::cos(phi)));
+                            CHECK(n.Equals(group.slot_ == 4 ? -along : along, 1e-3f));
+                            CHECK(vertex.uv_[0].x_ >= -1e-5f);
+                            continue;
+                        }
+                        if (smooth)
+                        {
+                            // The analytic normal of the elliptic section.
+                            const double rho = std::hypot(p.x_, p.z_) - params.radius_;
+                            const Vector3 radial(p.x_, 0.0f, p.z_);
+                            const Vector3 expected =
+                                (radial.Normalized() * static_cast<float>(b * rho / a) + Vector3::UP * static_cast<float>(a * p.y_ / b))
+                                    .Normalized();
+                            CHECK(n.Equals(expected, 2e-3f));
+                        }
+                        else
+                        {
+                            CHECK(n.Equals(flat, 1e-3f));
+                        }
+                        // The normal points out of the tube: away from the tube center.
+                        const double rho = std::hypot(p.x_, p.z_) - params.radius_;
+                        const Vector3 radial = Vector3(p.x_, 0.0f, p.z_).Normalized();
+                        CHECK(n.DotProduct(radial * static_cast<float>(rho) + Vector3::UP * p.y_) > 0.0f);
+
+                        // UV 0: the segment fraction and the tube fraction.
+                        const float u = vertex.uv_[0].x_;
+                        const float v = vertex.uv_[0].y_;
+                        CHECK(u >= 0.0f);
+                        CHECK(u <= 1.0f);
+                        CHECK(v >= 0.0f);
+                        CHECK(v <= 1.0f);
+                        CHECK(u * 16.0f == Catch::Approx(std::round(u * 16.0f)).margin(1e-4));
+                        CHECK(v * 10.0f == Catch::Approx(std::round(v * 10.0f)).margin(1e-4));
+                        double phi = std::atan2(p.z_, p.x_);
+                        if (phi < -1e-6)
+                            phi += 2.0 * 3.14159265358979323846;
+                        if (u == 1.0f)
+                            phi += arcRad > 6.28 ? 2.0 * 3.14159265358979323846 : 0.0;
+                        CHECK(std::fmod(phi, 2.0 * 3.14159265358979323846) == Catch::Approx(std::fmod(u * arcRad, 2.0 * 3.14159265358979323846)).margin(1e-3));
+                        // The tangent follows the U axis and is perpendicular to the normal.
+                        const Vector3 tangent = vertex.GetTangent();
+                        CHECK(tangent.DotProduct(n) == Catch::Approx(0.0f).margin(1e-3));
+                        const Vector3 along(static_cast<float>(-std::sin(phi)), 0.0f, static_cast<float>(std::cos(phi)));
+                        CHECK(tangent.DotProduct(along) > 0.9f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateRing shares bit-identical positions at the seams and the cap rims", "[shapes][procedural]")
+{
+    for (const float arc : {360.0f, 120.0f})
+    {
+        CsgRingParams params;
+        params.segments_ = 7;
+        params.tubeSegments_ = 5;
+        params.arc_ = arc;
+        params.tubeAngle_ = 13.0f;
+        const bool full = arc >= 360.0f;
+        INFO("Arc " << arc);
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateRing(params, mesh));
+
+        // The position table: 7 rings of 5 positions (8 for an arc) and the 2 section centers of an arc.
+        CHECK(CountDistinctPositions(mesh) == (full ? 7u * 5u : 8u * 5u + 2u));
+
+        // A seam vertex copies the position of the vertex at the start, in the same tube row.
+        for (const CsgShapeGroup& group : mesh.groups_)
+        {
+            if (group.slot_ >= 4)
+                continue;
+            for (unsigned k = group.indexStart_; k < group.indexStart_ + group.indexCount_; ++k)
+            {
+                const ModelVertex& vertex = mesh.vertices_[mesh.indices_[k]];
+                // The end of a full ring wraps to u 0. The end of an arc is its own ring.
+                const float u = full && vertex.uv_[0].x_ == 1.0f ? 0.0f : vertex.uv_[0].x_;
+                const float v = vertex.uv_[0].y_ == 1.0f ? 0.0f : vertex.uv_[0].y_;
+                bool found = false;
+                for (const ModelVertex& other : mesh.vertices_)
+                    found = found || (other.uv_[0].x_ == u && other.uv_[0].y_ == v && SamePositionBits(vertex, other));
+                CHECK(found);
+            }
+        }
+
+        // Any two vertices with nearly equal positions have bit-identical positions.
+        for (unsigned i = 0; i < mesh.vertices_.size(); ++i)
+        {
+            for (unsigned j = i + 1; j < mesh.vertices_.size(); ++j)
+            {
+                if (mesh.vertices_[i].GetPosition().Equals(mesh.vertices_[j].GetPosition(), 1e-6f))
+                    CHECK(SamePositionBits(mesh.vertices_[i], mesh.vertices_[j]));
+            }
+        }
+
+        // Each cap rim vertex equals a body vertex of the end ring. The cap center is the section center.
+        for (const CsgShapeGroup& group : mesh.groups_)
+        {
+            if (group.slot_ < 4)
+                continue;
+            const float endU = group.slot_ == 4 ? 0.0f : 1.0f;
+            const double phi = group.slot_ == 4 ? 0.0 : params.arc_ * 3.14159265358979323846 / 180.0;
+            const Vector3 center(static_cast<float>(params.radius_ * std::cos(phi)), 0.0f, static_cast<float>(params.radius_ * std::sin(phi)));
+            unsigned numCenter = 0;
+            for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+            {
+                const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+                if (vertex.GetPosition().Equals(center, 1e-6f))
+                {
+                    ++numCenter;
+                    continue;
+                }
+                bool found = false;
+                for (unsigned j = 0; j < mesh.groups_[0].indexStart_ + mesh.indices_.size(); ++j)
+                {
+                    if (j >= mesh.indices_.size())
+                        break;
+                    if (j >= group.indexStart_)
+                        break;
+                    const ModelVertex& body = mesh.vertices_[mesh.indices_[j]];
+                    found = found || (body.uv_[0].x_ == endU && SamePositionBits(vertex, body));
+                }
+                CHECK(found);
+            }
+            CHECK(numCenter == 5);
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateRing gives the group order and the slot mapping", "[shapes][procedural]")
+{
+    auto context = MakeShared<Context>();
+    CsgShapeMesh mesh;
+
+    // A full ring: the four surface groups. The caps 4 and 5 are absent. The model has four geometries.
+    // The tube angle 7 puts no quad middle on a quadrant border: 12 quads in the quadrants 3 + 3 + 3 + 3.
+    CsgRingParams params;
+    params.segments_ = 8;
+    params.tubeSegments_ = 12;
+    params.tubeAngle_ = 7.0f;
+    REQUIRE(CsgGenerateRing(params, mesh));
+    REQUIRE(mesh.groups_.size() == 4);
+    for (unsigned i = 0; i < 4; ++i)
+    {
+        CHECK(mesh.groups_[i].slot_ == i);
+        CHECK(mesh.groups_[i].indexCount_ == 3 * 2 * 8 * 3);
+    }
+
+    // The quad of a group is in the expected quadrant of the section angle.
+    // Middle angles are 22, 52, 82, 112, 142, 172, 202, 232, 262, 292, 322 and 352 degrees.
+    // Quadrant to group: outer 0, inner 1, top 2, bottom 3.
+    const auto expectedGroup = [](unsigned j)
+    {
+        const unsigned byQuad[12] = {0, 2, 2, 2, 1, 1, 1, 3, 3, 3, 0, 0};
+        return byQuad[j];
+    };
+    for (const CsgShapeGroup& group : mesh.groups_)
+    {
+        for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; i += 3)
+        {
+            float minV = 2.0f;
+            for (unsigned k = 0; k < 3; ++k)
+                minV = ea::min(minV, mesh.vertices_[mesh.indices_[i + k]].uv_[0].y_);
+            const unsigned j = static_cast<unsigned>(std::lround(minV * 12.0f));
+            CHECK(expectedGroup(j) == group.slot_);
+        }
+    }
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 4);
+
+    // The normal of the group: the outer group faces away from the axis, the top group faces up.
+    const auto averageNormal = [&](const CsgShapeGroup& group)
+    {
+        Vector3 sum;
+        for (unsigned i = group.indexStart_; i < group.indexStart_ + group.indexCount_; ++i)
+        {
+            const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+            const Vector3 p = vertex.GetPosition();
+            // The radial component is relative to the position, so the sum does not cancel around the ring.
+            const Vector3 radial = Vector3(p.x_, 0.0f, p.z_).Normalized();
+            const Vector3 n = vertex.GetNormal();
+            sum += Vector3(n.DotProduct(radial), n.y_, 0.0f);
+        }
+        return sum;
+    };
+    CHECK(averageNormal(mesh.groups_[0]).x_ > 0.0f);
+    CHECK(averageNormal(mesh.groups_[1]).x_ < 0.0f);
+    CHECK(averageNormal(mesh.groups_[2]).y_ > 0.0f);
+    CHECK(averageNormal(mesh.groups_[3]).y_ < 0.0f);
+
+    // An arc: the groups 4 and 5 are the caps. The model has six geometries.
+    params.arc_ = 90.0f;
+    REQUIRE(CsgGenerateRing(params, mesh));
+    REQUIRE(mesh.groups_.size() == 6);
+    for (unsigned i = 0; i < 6; ++i)
+        CHECK(mesh.groups_[i].slot_ == i);
+    CHECK(mesh.groups_[4].indexCount_ == 3 * 12);
+    CHECK(mesh.groups_[5].indexCount_ == 3 * 12);
+    CHECK(mesh.vertices_[mesh.indices_[mesh.groups_[4].indexStart_]].GetNormal().Equals(Vector3::BACK, 1e-5f));
+    CHECK(mesh.vertices_[mesh.indices_[mesh.groups_[5].indexStart_]].GetNormal().Equals(Vector3::LEFT, 1e-5f));
+    model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    CHECK(model->GetNumGeometries() == 6);
+
+    // The diamond (4 tube segments, tube angle 0): the quad middles are on the borders and go to the next quadrant.
+    // Each quadrant has one quad. The outer group is the quad around 315 degrees.
+    CsgRingParams diamond;
+    diamond.tubeSegments_ = 4;
+    REQUIRE(CsgGenerateRing(diamond, mesh));
+    REQUIRE(mesh.groups_.size() == 4);
+    for (unsigned i = 0; i < 4; ++i)
+        CHECK(mesh.groups_[i].indexCount_ == 3 * 2 * 32);
+    // The square (tube angle 45): the quad middles are on the axes. One group each.
+    CsgRingParams square = diamond;
+    square.tubeAngle_ = 45.0f;
+    REQUIRE(CsgGenerateRing(square, mesh));
+    REQUIRE(mesh.groups_.size() == 4);
+    // Group 2 (top): the quad from 45 to 135 degrees. Its vertices have a positive Y.
+    for (unsigned i = mesh.groups_[2].indexStart_; i < mesh.groups_[2].indexStart_ + mesh.groups_[2].indexCount_; ++i)
+        CHECK(mesh.vertices_[mesh.indices_[i]].GetPosition().y_ > 0.0f);
+    for (unsigned i = mesh.groups_[3].indexStart_; i < mesh.groups_[3].indexStart_ + mesh.groups_[3].indexCount_; ++i)
+        CHECK(mesh.vertices_[mesh.indices_[i]].GetPosition().y_ < 0.0f);
+
+    // A model with an empty quadrant keeps the slots. Three tube segments at tube angle 0: the middles are
+    // at 60, 180 and 300 degrees: top, inner and bottom. No outer quad.
+    CsgRingParams triangle;
+    triangle.tubeSegments_ = 3;
+    REQUIRE(CsgGenerateRing(triangle, mesh));
+    REQUIRE(mesh.groups_.size() == 3);
+    CHECK(mesh.groups_[0].slot_ == 1);
+    CHECK(mesh.groups_[1].slot_ == 2);
+    CHECK(mesh.groups_[2].slot_ == 3);
+    triangle.tubeAngle_ = 90.0f;
+    // The middles are at 150, 270 and 30 degrees: inner, bottom and outer. No top quad.
+    REQUIRE(CsgGenerateRing(triangle, mesh));
+    REQUIRE(mesh.groups_.size() == 3);
+    CHECK(mesh.groups_[0].slot_ == 0);
+    CHECK(mesh.groups_[1].slot_ == 1);
+    CHECK(mesh.groups_[2].slot_ == 3);
+    model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    REQUIRE(model->GetNumGeometries() == 4);
+    CHECK(model->GetGeometry(2, 0)->GetIndexCount() == 0);
+    CHECK(model->GetGeometry(3, 0)->GetIndexCount() == 3 * 2 * 32);
+}
+
+TEST_CASE("CsgSanitizeRingParams clamps the range and replaces values that are not finite", "[shapes][procedural]")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+
+    CsgRingParams params;
+    params.radius_ = nan;
+    params.tubeRadius_ = Vector2(inf, -1.0f);
+    params.segments_ = 1;
+    params.tubeSegments_ = 1000;
+    params.arc_ = nan;
+    params.tubeAngle_ = inf;
+    CsgSanitizeRingParams(params);
+    CHECK(params.radius_ == 0.5f);
+    // The infinite radial radius gets the default 0.15. The negative axial radius gets the minimum.
+    CHECK(params.tubeRadius_.x_ == 0.15f);
+    CHECK(params.tubeRadius_.y_ == CsgRingParams::MinTubeRadius);
+    CHECK(params.segments_ == 3);
+    CHECK(params.tubeSegments_ == 64);
+    CHECK(params.arc_ == 360.0f);
+    CHECK(params.tubeAngle_ == 0.0f);
+
+    params.radius_ = 1e9f;
+    params.tubeRadius_ = Vector2(1e9f, 1e9f);
+    params.segments_ = 100000;
+    params.tubeSegments_ = -3;
+    params.arc_ = 1000.0f;
+    params.tubeAngle_ = -1000.0f;
+    CsgSanitizeRingParams(params);
+    CHECK(params.radius_ == CsgRingParams::MaxRadius);
+    CHECK(params.tubeRadius_.x_ == Catch::Approx(CsgRingParams::MaxRadius * 0.99f));
+    CHECK(params.tubeRadius_.y_ == CsgRingParams::MaxTubeRadius);
+    CHECK(params.segments_ == 128);
+    CHECK(params.tubeSegments_ == 3);
+    CHECK(params.arc_ == 360.0f);
+    CHECK(params.tubeAngle_ == -180.0f);
+    params.arc_ = -5.0f;
+    params.tubeAngle_ = 1000.0f;
+    CsgSanitizeRingParams(params);
+    CHECK(params.arc_ == 1.0f);
+    CHECK(params.tubeAngle_ == 180.0f);
+
+    // The radial tube radius stays below the major radius, so the inner edge has a positive radius.
+    CsgRingParams thick;
+    thick.radius_ = 0.2f;
+    thick.tubeRadius_ = Vector2(0.5f, 0.1f);
+    CsgSanitizeRingParams(thick);
+    CHECK(thick.tubeRadius_.x_ == Catch::Approx(0.2f * 0.99f));
+    CHECK(thick.tubeRadius_.x_ < thick.radius_);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateRing(thick, mesh));
+    for (const ModelVertex& vertex : mesh.vertices_)
+        CHECK(std::hypot(vertex.GetPosition().x_, vertex.GetPosition().z_) > 0.0f);
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+
+    // The generator uses the sanitized values and does not crash.
+    CsgRingParams raw;
+    raw.radius_ = nan;
+    raw.tubeRadius_ = Vector2(nan, inf);
+    raw.segments_ = 0;
+    raw.tubeSegments_ = 0;
+    raw.arc_ = inf;
+    raw.tubeAngle_ = -inf;
+    REQUIRE(CsgGenerateRing(raw, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+    CHECK(HasNoDegenerateTriangle(mesh));
+
+    // The smallest valid values.
+    CsgRingParams small;
+    small.radius_ = 0.0f;
+    small.tubeRadius_ = Vector2::ZERO;
+    small.segments_ = 128;
+    small.tubeSegments_ = 64;
+    small.arc_ = 1.0f;
+    REQUIRE(CsgGenerateRing(small, mesh));
+    CHECK(HasNoDegenerateTriangle(mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+}
+
+TEST_CASE("CsgGenerateRing keeps the shape valid for the extreme values", "[shapes][procedural]")
+{
+    // The float positions of a thin tube at the largest radius do not merge in a triangle:
+    // the Y coordinate stays precise and the section stays distinct in Y.
+    CsgShapeMesh mesh;
+    CsgRingParams thin;
+    thin.radius_ = CsgRingParams::MaxRadius;
+    thin.tubeRadius_ = Vector2(CsgRingParams::MinTubeRadius, CsgRingParams::MinTubeRadius);
+    thin.segments_ = 128;
+    thin.tubeSegments_ = 64;
+    REQUIRE(CsgGenerateRing(thin, mesh));
+    CHECK(HasNoDegenerateTriangle(mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) > 0.0);
+
+    // The generator clears the old mesh data.
+    mesh.indices_.push_back(1);
+    CsgRingParams params;
+    params.arc_ = 90.0f;
+    REQUIRE(CsgGenerateRing(params, mesh));
+    CHECK(mesh.indices_.size() == 3 * (2 * 32 * 12 + 2 * 12));
+}

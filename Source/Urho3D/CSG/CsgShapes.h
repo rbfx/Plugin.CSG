@@ -211,4 +211,74 @@ PLUGIN_RBFXCSG_API void CsgSanitizeCylinderParams(CsgCylinderParams& params);
 /// or the float positions merge in a triangle (a very small shape far from the origin).
 PLUGIN_RBFXCSG_API bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh);
 
+/// The parameters of a procedural ring (a torus with an elliptic tube section).
+///
+/// The ring lies around the local Y axis: it lies in the XZ plane. The center of the tube moves on a circle
+/// of the radius `radius_`. The tube section has a radial radius and an axial radius.
+struct CsgRingParams
+{
+    static constexpr float MinRadius = 0.01f;
+    static constexpr float MaxRadius = 16384.0f;
+    static constexpr float MinTubeRadius = 0.005f;
+    static constexpr float MaxTubeRadius = 16384.0f;
+    /// The radial tube radius is at most this fraction of the major radius. The inner edge stays at a positive radius.
+    static constexpr float MaxInnerFraction = 0.99f;
+    static constexpr int MinSegments = 3;
+    static constexpr int MaxSegments = 128;
+    static constexpr int MinTubeSegments = 3;
+    static constexpr int MaxTubeSegments = 64;
+    static constexpr float MinArc = 1.0f;
+    static constexpr float MaxArc = 360.0f;
+    static constexpr float MinTubeAngle = -180.0f;
+    static constexpr float MaxTubeAngle = 180.0f;
+
+    /// The major radius: the distance from the Y axis to the center of the tube.
+    float radius_{0.5f};
+    /// The tube radii: x is the radial radius, y is the axial radius (along Y).
+    Vector2 tubeRadius_{0.15f, 0.15f};
+    /// The number of divisions around the axis.
+    int segments_{32};
+    /// The number of divisions around the tube. 4 gives a square section if `tubeAngle_` is 45 degrees,
+    /// and a diamond if it is 0.
+    int tubeSegments_{12};
+    /// The sweep of the ring around the axis, in degrees. 360 is a closed ring. Less than 360 adds two end caps.
+    float arc_{360.0f};
+    /// The angle of the first tube vertex in the section, in degrees. It rotates the section.
+    /// 0 is the outer side (+radial). The angle grows toward +Y.
+    float tubeAngle_{0.0f};
+    /// True: normals follow the tube. False: each triangle has a flat normal.
+    bool smoothNormals_{true};
+};
+
+/// Clamp the radius to [0.01, 16384], each tube radius to [0.005, 16384], the segments to [3, 128],
+/// the tube segments to [3, 64], the arc to [1, 360] and the tube angle to [-180, 180].
+/// Then clamp the radial tube radius to at most 0.99 * radius.
+/// A value that is not finite gets its default value.
+PLUGIN_RBFXCSG_API void CsgSanitizeRingParams(CsgRingParams& params);
+
+/// Generate a ring.
+///
+/// The mesh has one position table: the rings of the tube section around the axis (`segments` rings for a full
+/// ring, `segments + 1` for an arc), each with `tubeSegments` positions, then the two section centers of an arc.
+/// The last ring of a full ring wraps to the first. The seams duplicate the vertices only for UV.
+/// Their positions are bit-identical copies from the table. The end caps of an arc are fans from the
+/// section center. The section is convex. The cap rim positions are equal to the tube ring positions.
+///
+/// Face groups, in this order and with these slots (the order is a file contract):
+/// 0 the outer surface, 1 the inner surface, 2 the top (+Y), 3 the bottom (-Y), 4 the start cap, 5 the end cap.
+/// The section splits in four quadrants by its axes. A quad of the tube belongs to the quadrant
+/// of the angle of its middle, in the section (the angle includes `tubeAngle_`).
+/// Outer is around +radial, top around +Y, inner around -radial, bottom around -Y.
+/// A middle angle on a quadrant border goes to the next quadrant, in the direction of growing angle.
+/// A quadrant without a quad and the caps of a full ring give no group. Their slots stay free.
+/// Smooth normals are the analytic normal of the elliptic section: normalize(b cos(t), a sin(t)) in (radial, Y),
+/// with the radial radius a and the axial radius b. A cap normal is flat.
+/// UV 0 is (angle around the axis / arc, angle around the tube / 2pi). A cap uses the planar section coordinates.
+/// UV 1 is equal to UV 0.
+///
+/// The function uses a sanitized copy of the parameters. See `CsgSanitizeRingParams`.
+/// Return false if the shape is not valid. Then `mesh` is empty. A shape is not valid if the volume is not
+/// positive or the float positions merge in a triangle (a very small tube far from the origin).
+PLUGIN_RBFXCSG_API bool CsgGenerateRing(const CsgRingParams& params, CsgShapeMesh& mesh);
+
 } // namespace Urho3D
