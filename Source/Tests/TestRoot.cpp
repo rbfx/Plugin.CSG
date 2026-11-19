@@ -119,7 +119,7 @@ bool RunUntilOutput(CsgRoot* root, WorkQueue* workQueue, unsigned maxIterations)
         root->GetScene()->Update(1.0f / 60.0f);
         time->EndFrame();
 
-        auto* output = root->GetNode()->GetComponent<StaticModel>();
+        auto* output = root->GetResultModel();
         if (output && output->GetModel() && output->GetModel()->GetNumGeometries() > 0)
             return true;
     }
@@ -153,7 +153,7 @@ BoundingBox BuildDifferenceBounds(Context* context, Scene* scene, WorkQueue* wor
     root->Rebuild();
     REQUIRE(RunUntilOutput(root, workQueue, 1000));
 
-    auto* output = rootNode->GetComponent<StaticModel>();
+    auto* output = root->GetResultModel();
     REQUIRE(output);
     REQUIRE(output->GetModel());
     return output->GetModel()->GetBoundingBox();
@@ -192,7 +192,29 @@ void RunFrames(CsgRoot* root, WorkQueue* workQueue, unsigned frames)
     }
 }
 
-StaticModel* GetOutput(CsgRoot* root) { return root->GetNode()->GetComponent<StaticModel>(); }
+StaticModel* GetOutput(CsgRoot* root) { return root->GetResultModel(); }
+
+/// Count the direct children of the node with the name of the result node.
+unsigned CountResultNodes(Node* node)
+{
+    unsigned count = 0;
+    for (Node* child : node->GetChildren())
+        count += child->GetName() == "CsgResult" ? 1 : 0;
+    return count;
+}
+
+/// Run the scene and the work queue for a fixed number of frames. The function needs no root.
+void RunSceneFrames(Scene* scene, WorkQueue* workQueue, unsigned frames)
+{
+    auto* time = scene->GetSubsystem<Time>();
+    for (unsigned i = 0; i < frames; ++i)
+    {
+        workQueue->CompleteAll();
+        time->BeginFrame(1.0f / 60.0f);
+        scene->Update(1.0f / 60.0f);
+        time->EndFrame();
+    }
+}
 
 /// Remove the test build hook when the scope ends. A failed check must not leave the hook for other tests.
 struct TestBuildHookGuard
@@ -229,7 +251,7 @@ TEST_CASE("CsgRoot builds a model from a root and a brush")
     root->Rebuild();
     REQUIRE(RunUntilOutput(root, workQueue, 1000));
 
-    auto* output = rootNode->GetComponent<StaticModel>();
+    auto* output = root->GetResultModel();
     REQUIRE(output);
     const Model* model = output->GetModel();
     REQUIRE(model);
@@ -2016,4 +2038,239 @@ TEST_CASE("CsgRoot runs all steps when the base model toggles between empty and 
     CHECK(root->GetLastBuildStats().foldSteps_ == 2);
     checkState("FreshEmpty2", false);
     CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgRoot puts the result on a temporary child node", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    root->GetNode()->SetPosition(Vector3(5.0f, 0.0f, 0.0f));
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+
+    // A root with the default delay makes nothing before its first build.
+    auto* fresh = scene->CreateChild("Fresh")->CreateComponent<CsgRoot>();
+    CHECK(fresh->GetResultNode() == nullptr);
+    CHECK(fresh->GetResultModel() == nullptr);
+
+    // The result node does not request a rebuild. The revision stays the same through the first build.
+    const unsigned revision = root->GetRebuildRevision();
+    BuildFully(root, workQueue);
+    CHECK(root->GetRebuildRevision() == revision);
+
+    Node* rootNode = root->GetNode();
+    CHECK(rootNode->GetComponent<StaticModel>() == nullptr);
+    Node* resultNode = root->GetResultNode();
+    REQUIRE(resultNode);
+    CHECK(resultNode->GetName() == "CsgResult");
+    CHECK(resultNode->GetParent() == rootNode);
+    CHECK(resultNode->IsTemporary());
+    CHECK(resultNode->GetComponent<CsgBrush>() == nullptr);
+    CHECK(resultNode->GetTransformMatrix() == Matrix3x4::IDENTITY);
+    CHECK(resultNode->GetWorldPosition().Equals(rootNode->GetWorldPosition()));
+    REQUIRE(root->GetResultModel());
+    CHECK(root->GetResultModel()->GetNode() == resultNode);
+    CHECK(CountResultNodes(rootNode) == 1);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    // A second explicit build reuses the same node.
+    root->Rebuild();
+    RunFrames(root, workQueue, 60);
+    CHECK(root->GetResultNode() == resultNode);
+    CHECK(CountResultNodes(rootNode) == 1);
+}
+
+TEST_CASE("CsgRoot result node follows the enabled state of the root", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    Node* resultNode = root->GetResultNode();
+    REQUIRE(resultNode);
+    CHECK(resultNode->IsEnabled());
+    CHECK(root->GetResultModel()->IsEnabledEffective());
+
+    root->SetEnabled(false);
+    CHECK(!resultNode->IsEnabled());
+    CHECK(!root->GetResultModel()->IsEnabledEffective());
+    root->SetEnabled(true);
+    CHECK(resultNode->IsEnabled());
+    CHECK(root->GetResultModel()->IsEnabledEffective());
+
+    // A disabled root node disables the root, so the result goes off too.
+    root->GetNode()->SetEnabled(false);
+    CHECK(!resultNode->IsEnabled());
+    root->GetNode()->SetEnabled(true);
+    CHECK(resultNode->IsEnabled());
+
+    // A deep enable of the root node enables the child node. The model of a disabled root stays off.
+    root->SetEnabled(false);
+    root->GetNode()->SetDeepEnabled(true);
+    CHECK(!root->GetResultModel()->IsEnabledEffective());
+    root->SetEnabled(true);
+    CHECK(root->GetResultModel()->IsEnabledEffective());
+}
+
+TEST_CASE("CsgRoot removes the result node with the root component", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    Node* rootNode = root->GetNode();
+    WeakPtr<Node> resultNode{root->GetResultNode()};
+    REQUIRE(resultNode);
+
+    rootNode->RemoveComponent(root);
+    CHECK(!resultNode);
+    CHECK(CountResultNodes(rootNode) == 0);
+    CHECK(rootNode->GetChild("Cut") != nullptr);
+    RunSceneFrames(scene, workQueue, 10);
+}
+
+TEST_CASE("CsgRoot survives the destruction of its node and of the scene", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The node goes away after a build.
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Built");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        WeakPtr<CsgRoot> weakRoot{root};
+        WeakPtr<Node> resultNode{root->GetResultNode()};
+        REQUIRE(resultNode);
+        root->GetNode()->Remove();
+        CHECK(!weakRoot);
+        CHECK(!resultNode);
+        RunSceneFrames(scene, workQueue, 10);
+    }
+
+    // The node goes away while a build is in flight.
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "InFlight");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        root->Rebuild();
+        root->GetNode()->Remove();
+        RunSceneFrames(scene, workQueue, 10);
+    }
+
+    // The scene goes away with a built root and a build in flight.
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "SceneOwned");
+        AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        WeakPtr<Node> resultNode{root->GetResultNode()};
+        root->GetNode()->SetPosition(Vector3(0.5f, 0.0f, 0.0f));
+        AddBoxBrush(root, "Second", Vector3(-1.0f, 0.0f, 0.0f), CsgOperation::Union);
+        scene->Clear();
+        CHECK(!resultNode);
+        RunSceneFrames(scene, workQueue, 10);
+        scene.Reset();
+        workQueue->CompleteAll();
+    }
+}
+
+TEST_CASE("CsgRoot does not save the result node and rebuilds it after a load", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetResultNode());
+    const unsigned indices = CountIndices(GetOutput(root)->GetModel());
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    const ea::string_view data(reinterpret_cast<const char*>(buffer.GetData()), buffer.GetSize());
+    CHECK(data.find("Cut") != ea::string_view::npos);
+    CHECK(data.find("CsgResult") == ea::string_view::npos);
+
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild("Root");
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    // The load can start a build at once. The root never makes a second result node.
+    CHECK(CountResultNodes(loadedRootNode) <= 1);
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(CountResultNodes(loadedRootNode) == 1);
+    CHECK(loadedRootNode->GetComponent<StaticModel>() == nullptr);
+    CHECK(CountIndices(GetOutput(loadedRoot)->GetModel()) == indices);
+}
+
+TEST_CASE("CsgRoot clone has exactly one result node", "[root]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    AddBoxBrush(root, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(root, workQueue);
+    REQUIRE(root->GetResultNode());
+    const unsigned indices = CountIndices(GetOutput(root)->GetModel());
+
+    Node* cloneNode = root->GetNode()->Clone();
+    REQUIRE(cloneNode);
+    auto* cloneRoot = cloneNode->GetComponent<CsgRoot>();
+    REQUIRE(cloneRoot);
+    // The clone does not copy the temporary result node. The clone can start a build at once.
+    CHECK(cloneRoot->GetResultNode() != root->GetResultNode());
+    CHECK(CountResultNodes(cloneNode) <= 1);
+    REQUIRE(RunUntilOutput(cloneRoot, workQueue, 1000));
+    RunFrames(cloneRoot, workQueue, 60);
+    CHECK(CountResultNodes(cloneNode) == 1);
+    CHECK(cloneRoot->GetResultNode() != root->GetResultNode());
+    CHECK(cloneRoot->GetResultNode()->GetParent() == cloneNode);
+    CHECK(CountResultNodes(root->GetNode()) == 1);
+    CHECK(CountIndices(GetOutput(cloneRoot)->GetModel()) == indices);
+
+    // A node with the result name that is already there is reused. The root removes a duplicate.
+    Node* staleNode = scene->CreateChild("Stale");
+    Node* first = staleNode->CreateChild("CsgResult");
+    staleNode->CreateChild("CsgResult");
+    auto* stale = staleNode->CreateComponent<CsgRoot>();
+    stale->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/BoxA.mdl"));
+    stale->SetDeferredDelaySec(0.0f);
+    AddBoxBrush(stale, "Cut", Vector3(1.0f, 1.0f, 1.0f), CsgOperation::DifferenceAB);
+    BuildFully(stale, workQueue);
+    CHECK(CountResultNodes(stale->GetNode()) == 1);
+    CHECK(stale->GetResultNode() == first);
+    CHECK(first->IsTemporary());
 }

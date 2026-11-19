@@ -233,6 +233,9 @@ void CanonicalizeSharedKeys(ea::vector<CsgPolygon>& polygons, const ea::hash_map
     }
 }
 
+/// Name of the temporary child node that holds the result.
+const char* const CSG_RESULT_NODE_NAME = "CsgResult";
+
 Node* GetOrCreateTemporaryChild(Node* parent, const ea::string& name)
 {
     if (!parent)
@@ -290,11 +293,15 @@ void CsgRoot::OnSetEnabled()
 {
     Component::OnSetEnabled();
     UpdateSubscriptions();
+    UpdateResultEnabled();
 }
 
 void CsgRoot::OnNodeSet(Node* previousNode, Node* currentNode)
 {
     Component::OnNodeSet(previousNode, currentNode);
+    // The result node belongs to the old node. A node that the scene destroys has no children at this time.
+    if (previousNode != currentNode)
+        RemoveResultNode();
     UpdateSubscriptions();
 }
 
@@ -393,10 +400,68 @@ StaticModel* CsgRoot::GetOrCreateOutputStaticModel()
     if (!node_)
         return nullptr;
 
-    if (output_)
-        return output_;
+    Node* resultNode = resultNode_;
+    if (!resultNode || resultNode->GetParent() != node_)
+    {
+        output_ = nullptr;
+        resultNode = nullptr;
+        // A copy of the child list, because the loop removes nodes. A duplicate can come from a scene file
+        // that a tool saved with temporary nodes. The root keeps the first node and removes the others.
+        // A child with a brush or a root is an operand or a sub-root, so the root never takes it.
+        const ea::vector<SharedPtr<Node>> children = node_->GetChildren();
+        for (const SharedPtr<Node>& child : children)
+        {
+            if (child->GetName() != CSG_RESULT_NODE_NAME || child->GetComponent<CsgBrush>() || child->GetComponent<CsgRoot>())
+                continue;
+            if (!resultNode)
+                resultNode = child;
+            else
+                child->Remove();
+        }
+        // The child is not a brush, so the node events and the dirty listeners do not request a rebuild.
+        if (!resultNode)
+            resultNode = node_->CreateTemporaryChild(CSG_RESULT_NODE_NAME);
+        resultNode->SetTemporary(true);
+        resultNode->SetTransform(Vector3::ZERO, Quaternion::IDENTITY, Vector3::ONE);
+        resultNode_ = resultNode;
+    }
 
-    output_ = node_->GetOrCreateComponent<StaticModel>();
+    if (!output_)
+    {
+        output_ = resultNode->GetOrCreateComponent<StaticModel>();
+        output_->SetTemporary(true);
+    }
+    UpdateResultEnabled();
+    return output_;
+}
+
+void CsgRoot::UpdateResultEnabled()
+{
+    // A deep enable of the root node can enable the child node too. The disabled model stays hidden then.
+    const bool enabled = IsEnabledEffective();
+    if (Node* resultNode = resultNode_)
+        resultNode->SetEnabled(enabled);
+    if (StaticModel* output = output_)
+        output->SetEnabled(enabled);
+}
+
+void CsgRoot::RemoveResultNode()
+{
+    // Clear the pointers first. The removal can destroy the node and send scene events.
+    const SharedPtr<Node> resultNode{resultNode_.Get()};
+    resultNode_ = nullptr;
+    output_ = nullptr;
+    if (resultNode)
+        resultNode->Remove();
+}
+
+Node* CsgRoot::GetResultNode() const
+{
+    return resultNode_;
+}
+
+StaticModel* CsgRoot::GetResultModel() const
+{
     return output_;
 }
 
@@ -1170,7 +1235,7 @@ bool CsgRoot::Bake()
             return false;
     }
 
-    const StaticModel* output = GetOrCreateOutputStaticModel();
+    const StaticModel* output = GetResultModel();
     if (!output || !output->GetModel())
         return false;
 
