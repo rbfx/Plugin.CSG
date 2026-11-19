@@ -11,6 +11,7 @@
 #include "Urho3D/CSG/CsgProceduralBrush.h"
 #include "Urho3D/CSG/CsgRoot.h"
 #include "Urho3D/CSG/CsgShapes.h"
+#include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include "Urho3D/CSG/CsgTriangulation.h"
 #include <Urho3D/Container/ByteVector.h>
@@ -457,6 +458,7 @@ void RegisterCsgLibrary(Context* context)
     CsgBrush::RegisterObject(context);
     CsgProceduralBrush::RegisterObject(context);
     CsgBoxBrush::RegisterObject(context);
+    CsgSphereBrush::RegisterObject(context);
     CsgRoot::RegisterObject(context);
 }
 
@@ -466,6 +468,7 @@ void RegisterCsgLibrary(PluginApplication& plugin)
     plugin.RegisterObject<CsgBrush>();
     plugin.RegisterObject<CsgProceduralBrush>();
     plugin.RegisterObject<CsgBoxBrush>();
+    plugin.RegisterObject<CsgSphereBrush>();
     plugin.RegisterObject<CsgRoot>();
 }
 

@@ -11,6 +11,7 @@
 #include "Urho3D/CSG/CsgOperationColor.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
 #include "Urho3D/CSG/CsgShapes.h"
+#include "Urho3D/CSG/CsgSphereBrush.h"
 #include "Urho3D/CSG/CsgSolid.h"
 #include "TestGeneratedBrush.h"
 
@@ -3528,4 +3529,343 @@ TEST_CASE("CsgRoot drops a stale result in queued mode and after a failed job", 
         CHECK(counter.GetCount() == 2);
         CHECK(!root->GetLastBuildFailed());
     }
+}
+
+namespace
+{
+
+/// Add a procedural sphere brush under the node of the root.
+CsgSphereBrush* AddProceduralSphere(
+    CsgRoot* root, const ea::string& name, const Vector3& position, const Vector3& radius, CsgOperation op)
+{
+    Node* brushNode = root->GetNode()->CreateChild(name);
+    brushNode->SetPosition(position);
+    auto* brush = brushNode->CreateComponent<CsgSphereBrush>();
+    brush->SetRadius(radius);
+    brush->SetOperation(op);
+    return brush;
+}
+
+/// Add the model of a generated sphere to the resource cache.
+void AddGeneratedSphereModel(Context* context, const ea::string& name, const CsgSphereParams& params)
+{
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateSphere(params, mesh));
+    SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+    REQUIRE(model);
+    model->SetName(name);
+    context->GetSubsystem<ResourceCache>()->AddManualResource(model);
+}
+
+/// Return the exact volume of the unit UV polyhedron. Each band between two ring planes is a frustum.
+double UnitSphereVolume(unsigned segments, unsigned rings)
+{
+    const double pi = 3.14159265358979323846;
+    const auto area = [&](double r) { return 0.5 * segments * r * r * std::sin(2.0 * pi / segments); };
+    double volume = 0.0;
+    for (unsigned row = 0; row < rings; ++row)
+    {
+        const double theta0 = pi * row / rings;
+        const double theta1 = pi * (row + 1) / rings;
+        const double a0 = area(std::sin(theta0));
+        const double a1 = area(std::sin(theta1));
+        volume += (std::cos(theta0) - std::cos(theta1)) / 3.0 * (a0 + a1 + std::sqrt(a0 * a1));
+    }
+    return volume;
+}
+
+} // namespace
+
+TEST_CASE("CsgSphereBrush is an operand with the polyhedron volume", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    const double unit = UnitSphereVolume(24, 12);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("A sphere alone gives the volume of the polyhedron")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Alone");
+        CsgSphereBrush* brush =
+            AddProceduralSphere(root, "Sphere", Vector3::ZERO, Vector3(1.0f, 2.0f, 3.0f), CsgOperation::Union);
+        CHECK(brush->IsShapeValid());
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().closed_);
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(unit * 6.0).epsilon(1e-3));
+    }
+
+    SECTION("A subtract sphere on a face of the base removes half of its volume")
+    {
+        // The base box is the cube from -1 to 1. The sphere is centered on the +X face.
+        // The plane x = 0 of the sphere has vertices on it, so the cut half is exact.
+        CsgRoot* root = MakeBoxRoot(scene, "Procedural");
+        AddProceduralSphere(root, "Cut", Vector3(1.0f, 0.0f, 0.0f), Vector3(0.5f, 0.5f, 0.5f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().volume_ == Catch::Approx(8.0 - 0.5 * unit * 0.125).epsilon(1e-3));
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.2);
+        CHECK(errors.GetCount() == 0);
+
+        // A model brush with the same mesh gives the same output.
+        AddGeneratedSphereModel(context, "Csg/GeneratedSphere.mdl", CsgSphereParams{});
+        CsgRoot* expected = MakeBoxRoot(scene, "Model");
+        Node* cutNode = expected->GetNode()->CreateChild("Cut");
+        cutNode->SetPosition(Vector3(1.0f, 0.0f, 0.0f));
+        auto* cut = cutNode->CreateComponent<CsgBrush>();
+        cut->SetModel(ResourceRef(Model::GetTypeStatic(), "Csg/GeneratedSphere.mdl"));
+        cut->SetOperation(CsgOperation::DifferenceAB);
+        BuildFully(expected, workQueue);
+        CheckSameOutput(root, expected);
+    }
+
+    SECTION("A sphere subtracted from a box and a sphere united with a rotated box fold without a failure")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Fold");
+        // A sphere inside the base box makes a closed cavity. A sphere on a corner makes a dent.
+        AddProceduralSphere(root, "Cavity", Vector3(0.0f, 0.0f, 0.0f), Vector3(0.5f, 0.5f, 0.5f), CsgOperation::DifferenceAB);
+        AddProceduralSphere(root, "Dent", Vector3(1.0f, 1.0f, 1.0f), Vector3(0.6f, 0.6f, 0.6f), CsgOperation::DifferenceAB);
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        CHECK(root->GetLastBuildStats().valid_);
+        CHECK(root->GetLastBuildStats().foldSteps_ == 2);
+        CHECK(root->GetLastBuildStats().volume_ < 8.0 - 0.4);
+
+        CsgRoot* united = MakeEmptyBaseRoot(scene, "United");
+        AddProceduralBox(united, "Box", Vector3::ZERO, Vector3(2.0f, 1.0f, 1.0f), CsgOperation::Union)
+            ->GetNode()->SetRotation(Quaternion(30.0f, Vector3(0.3f, 1.0f, 0.2f)));
+        AddProceduralSphere(united, "Sphere", Vector3(0.7f, 0.1f, 0.2f), Vector3(0.8f, 0.6f, 0.7f), CsgOperation::Union);
+        BuildFully(united, workQueue);
+        CHECK(!united->GetLastBuildFailed());
+        CHECK(united->GetLastBuildStats().valid_);
+        CHECK(united->GetLastBuildStats().closed_);
+        CHECK(united->GetLastBuildStats().foldSteps_ == 2);
+        CHECK(united->GetLastBuildStats().volume_ > 2.0);
+    }
+
+    SECTION("The brush draws its generated model")
+    {
+        auto* debug = scene->CreateComponent<DebugRenderer>();
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Debug");
+        CsgSphereBrush* brush =
+            AddProceduralSphere(root, "Sphere", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        CHECK(!debug->HasContent());
+        static_cast<Component*>(brush)->DrawDebugGeometry(debug, false);
+        CHECK(debug->HasContent());
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgSphereBrush rebuilds after an attribute change and reuses the fold steps before it", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    AddBoxModel(context, "Csg/BoxB.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    ea::vector<CsgBrush*> brushes = AddFoldBrushes(root);
+    brushes[2]->GetNode()->Remove();
+    CsgSphereBrush* third =
+        AddProceduralSphere(root, "Third", Vector3(1.2f, 0.0f, 0.0f), Vector3(0.5f, 0.5f, 0.5f), CsgOperation::Union);
+    BuildFully(root, workQueue);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 3);
+    CHECK(!root->GetLastBuildFailed());
+    double volume = root->GetLastBuildStats().volume_;
+
+    // The attribute path: SetAttribute and ApplyAttributes. The value is clamped.
+    Component* component = third;
+    CHECK(component->SetAttribute("Radius", Vector3(1.0f, 0.5f, 0.5f)));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetRadius() == Vector3(1.0f, 0.5f, 0.5f));
+    CHECK(root->GetLastBuildStats().valid_);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ > volume + 0.05);
+    volume = root->GetLastBuildStats().volume_;
+
+    CHECK(component->SetAttribute("Segments", 8));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetSegments() == 8);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().volume_ < volume);
+
+    CHECK(component->SetAttribute("Rings", 4));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(third->GetRings() == 4);
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+
+    CHECK(component->SetAttribute("Smooth Normals", false));
+    component->ApplyAttributes();
+    RunFrames(root, workQueue, 60);
+    CHECK(!third->GetSmoothNormals());
+    CHECK(!component->GetAttribute("Smooth Normals").GetBool());
+    CHECK(root->GetLastBuildStats().foldSteps_ == 1);
+    CHECK(root->GetLastBuildStats().valid_);
+
+    CHECK(component->SetAttribute("Radius", Vector3(-1.0f, 1e9f, 2.0f)));
+    CHECK(component->SetAttribute("Segments", 1000));
+    CHECK(component->SetAttribute("Rings", 0));
+    component->ApplyAttributes();
+    CHECK(third->GetRadius() == Vector3(CsgSphereParams::MinRadius, CsgSphereParams::MaxRadius, 2.0f));
+    CHECK(third->GetSegments() == 128);
+    CHECK(third->GetRings() == 2);
+    CHECK(component->GetAttribute("Segments").GetInt() == 128);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgSphereBrush keeps its parameters and the result after a save and a load", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    CsgSphereBrush* sphere = AddProceduralSphere(
+        root, "Sphere", Vector3(1.0f, 0.0f, 0.0f), Vector3(0.75f, 0.5f, 0.6f), CsgOperation::DifferenceAB);
+    sphere->SetSegments(10);
+    sphere->SetRings(5);
+    sphere->SetSmoothNormals(false);
+    BuildFully(root, workQueue);
+    const double volume = root->GetLastBuildStats().volume_;
+    CHECK(volume < 8.0);
+
+    VectorBuffer buffer;
+    REQUIRE(scene->Save(buffer));
+    auto loaded = MakeShared<Scene>(context);
+    buffer.Seek(0);
+    REQUIRE(loaded->Load(buffer));
+    Node* loadedRootNode = loaded->GetChild("Root");
+    REQUIRE(loadedRootNode);
+    auto* loadedRoot = loadedRootNode->GetComponent<CsgRoot>();
+    REQUIRE(loadedRoot);
+    Node* loadedNode = loadedRootNode->GetChild("Sphere");
+    REQUIRE(loadedNode);
+    auto* loadedSphere = loadedNode->GetComponent<CsgSphereBrush>();
+    REQUIRE(loadedSphere);
+    CHECK(loadedSphere->GetOperation() == CsgOperation::DifferenceAB);
+    CHECK(loadedSphere->GetRadius() == sphere->GetRadius());
+    CHECK(loadedSphere->GetSegments() == 10);
+    CHECK(loadedSphere->GetRings() == 5);
+    CHECK(!loadedSphere->GetSmoothNormals());
+
+    REQUIRE(RunUntilOutput(loadedRoot, workQueue, 1000));
+    RunFrames(loadedRoot, workQueue, 60);
+    CHECK(loadedRoot->GetLastBuildStats().volume_ == Catch::Approx(volume).epsilon(1e-9));
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgSphereBrush has one material slot and no Model attribute", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    context->RegisterSubsystem<VirtualFileSystem>();
+    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    SECTION("The attributes are the ones of a brush without Model")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgSphereBrush* sphere =
+            AddProceduralSphere(root, "Sphere", Vector3::ZERO, Vector3::ONE, CsgOperation::DifferenceAB);
+        Component* component = sphere;
+        CHECK(component->GetAttribute("Materials").GetResourceRefList().names_.size() == 1);
+        CHECK(component->GetAttribute("Operation").GetInt() == static_cast<int>(CsgOperation::DifferenceAB));
+        for (const AttributeInfo& info : *component->GetAttributes())
+            CHECK(info.name_ != "Model");
+        CHECK(component->GetAttribute("Radius").GetVector3() == Vector3::ONE);
+        CHECK(component->GetAttribute("Segments").GetInt() == 24);
+        CHECK(component->GetAttribute("Rings").GetInt() == 12);
+        CHECK(component->GetAttribute("Smooth Normals").GetBool());
+
+        sphere->SetMaterials(
+            ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(4u, ea::string("Materials/Top.xml"))));
+        CHECK(sphere->GetMaterialsAttr().names_.size() == 1);
+        CHECK(sphere->GetMaterialsAttr().names_[0] == "Materials/Top.xml");
+    }
+
+    SECTION("The material of the one slot reaches the result")
+    {
+        CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+        CsgSphereBrush* sphere =
+            AddProceduralSphere(root, "Sphere", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+        sphere->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+        BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+        CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Box.xml"});
+    }
+
+    SECTION("A subtract sphere gives its material to the cut faces")
+    {
+        CsgRoot* root = MakeBoxRoot(scene, "Root");
+        CsgSphereBrush* sphere = AddProceduralSphere(
+            root, "Sphere", Vector3(1.0f, 0.0f, 0.0f), Vector3(0.5f, 0.5f, 0.5f), CsgOperation::DifferenceAB);
+        sphere->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+        BuildFully(root, workQueue);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
+        CHECK(names.size() == 2);
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("CsgSphereBrush generates the model fast", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    const auto measure = [&](const CsgSphereParams& params)
+    {
+        // The best of several runs. The limits are generous, so a loaded CI machine does not fail.
+        double best = 1e9;
+        for (unsigned run = 0; run < 5; ++run)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            CsgShapeMesh mesh;
+            const bool generated = CsgGenerateSphere(params, mesh);
+            SharedPtr<Model> model = CsgBuildModelFromMesh(context, mesh);
+            const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - start;
+            REQUIRE(generated);
+            REQUIRE(model);
+            best = ea::min(best, elapsed.count());
+        }
+        return best;
+    };
+
+    const double defaultMs = measure(CsgSphereParams{});
+    CsgSphereParams fine;
+    fine.segments_ = 128;
+    fine.rings_ = 64;
+    const double fineMs = measure(fine);
+    WARN("Sphere generation and model build: default " << defaultMs << " ms, 128x64 " << fineMs << " ms");
+    // A sanitizer build is much slower, so it gets a wider limit.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    const double slowFactor = 10.0;
+#else
+    const double slowFactor = 1.0;
+#endif
+    CHECK(defaultMs < 5.0 * slowFactor);
+    CHECK(fineMs < 50.0 * slowFactor);
 }

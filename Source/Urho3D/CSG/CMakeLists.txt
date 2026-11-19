@@ -22,10 +22,12 @@ set (SOURCE_FILES
     CsgProceduralBrush.cpp
     CsgRoot.cpp
     CsgShapes.cpp
+    CsgSphereBrush.cpp
     CsgTriangulation.cpp
     Csg.h
     CsgBoolean.h
     CsgBoxBrush.h
+    CsgSphereBrush.h
     CsgBrush.h
     CsgPolygon.h
     CsgSolid.h

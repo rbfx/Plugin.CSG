@@ -35,6 +35,7 @@ set (CSG_DIR ${RbfxCsg_SOURCE_DIR}/Source/Urho3D/CSG)
 set (CSG_SOURCE_FILES
     ${CSG_DIR}/Csg.cpp
     ${CSG_DIR}/CsgBoxBrush.cpp
+    ${CSG_DIR}/CsgSphereBrush.cpp
     ${CSG_DIR}/CsgBrush.cpp
     ${CSG_DIR}/CsgComponent.cpp
     ${CSG_DIR}/CsgProceduralBrush.cpp
