@@ -21,6 +21,20 @@ namespace
 
 const StringHash ProceduralBrushType("CsgProceduralBrush");
 
+/// Read the group list of the reply. A missing or wrong value gives an empty list. An empty name is skipped.
+ea::vector<ea::string> ParseHandleGroups(const Variant& value)
+{
+    ea::vector<ea::string> groups;
+    if (value.GetType() != VAR_STRINGVECTOR)
+        return groups;
+    for (const ea::string& group : value.GetStringVector())
+    {
+        if (!group.empty())
+            groups.push_back(group);
+    }
+    return groups;
+}
+
 } // namespace
 
 bool IsShapeBrush(Component* component)
@@ -52,6 +66,7 @@ ShapeHandleSet QueryShapeHandles(Component* brush)
     eventData[P_VERSION] = 0;
     eventData[P_VALID] = false;
     eventData[P_HANDLES] = VariantVector{};
+    eventData[P_GROUPS] = StringVector{};
     brush->SendEvent(E_CSGSHAPEQUERYHANDLES, eventData);
 
     // A brush that does not answer keeps version 0.
@@ -76,8 +91,10 @@ ShapeHandleSet QueryShapeHandles(Component* brush)
             : CsgShapeHandleKind::Point;
         handle.position_ = get(CsgShapeProtocol::HandlePositionKey).GetVector3();
         handle.axis_ = get(CsgShapeProtocol::HandleAxisKey).GetVector3();
+        handle.group_ = get(CsgShapeProtocol::HandleGroupKey).GetString();
         result.handles_.push_back(handle);
     }
+    result.groups_ = ParseHandleGroups(eventData[P_GROUPS]);
     return result;
 }
 

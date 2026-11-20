@@ -66,6 +66,10 @@ public:
     /// Fill the list with the handles of the shape. The old content goes. The positions are in the local space of the brush.
     /// The default gives no handle. A shape with handles gives the ids that its header lists.
     virtual void GetHandles(ea::vector<CsgShapeHandle>& handles) const { handles.clear(); }
+    /// Fill the list with the group names of the handles, in the order of the mode bar.
+    /// The first entry is the default mode. The list is fixed for a shape type: a handle can go away
+    /// (for example at an apex) but the groups do not. The name 'All' is reserved. The default is empty.
+    virtual void GetHandleGroups(ea::vector<ea::string>& groups) const { groups.clear(); }
     /// Move handles by the TOTAL local delta from the drag start. The call is stateless.
     /// It applies the delta to the current parameters, so the caller restores the parameters before each call.
     /// A handle id that is repeated counts once. The handles apply in the given order.

@@ -35,6 +35,9 @@ struct ShapeHandleSet
     /// False if the component does not answer or the shape is not valid.
     bool valid_{};
     ea::vector<ShapeHandle> handles_;
+    /// The groups in the order of the mode bar. The first one is the default.
+    /// Empty if the runtime does not send groups (an old runtime).
+    ea::vector<ea::string> groups_;
 };
 
 /// The serializable attributes of a component in registration order.

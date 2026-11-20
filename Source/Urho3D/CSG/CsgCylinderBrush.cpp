@@ -195,6 +195,7 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.name_ = end ? "Top Center" : "Bottom Center";
         handle.kind_ = CsgShapeHandleKind::Point;
         handle.position_ = centers[end];
+        handle.group_ = (handle.id_ <= 1 || handle.id_ >= 11) ? "Ends" : "Radius";
         handles.push_back(handle);
     }
     for (unsigned end = 0; end < 2; ++end)
@@ -210,6 +211,7 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
             handle.axis_ = GetRadiusDirection(i);
             const float reach = static_cast<float>(GetPolygonRayDistance(params_, GetRadiusAngle(i)));
             handle.position_ = centers[end] + handle.axis_ * ((i < 2 ? radii[end].x_ : radii[end].y_) * reach);
+            handle.group_ = (handle.id_ <= 1 || handle.id_ >= 11) ? "Ends" : "Radius";
             handles.push_back(handle);
         }
     }
@@ -223,6 +225,7 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.axis_ = Vector3(1, 0, 0);
         handle.position_ = (params_.bottomCenter_ + params_.topCenter_) * 0.5f
             + handle.axis_ * (radiusMid * (1.0f + params_.bulge_));
+        handle.group_ = (handle.id_ <= 1 || handle.id_ >= 11) ? "Ends" : "Radius";
         handles.push_back(handle);
     }
     // The scale handles sit on the rim at 45 degrees. At an apex the handle sits at the end center.
@@ -244,8 +247,14 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
             handle.axis_ = offset.Normalized();
             handle.position_ = centers[end] + offset;
         }
+        handle.group_ = (handle.id_ <= 1 || handle.id_ >= 11) ? "Ends" : "Radius";
         handles.push_back(handle);
     }
+}
+
+void CsgCylinderBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Ends", "Radius"};
 }
 
 bool CsgCylinderBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)

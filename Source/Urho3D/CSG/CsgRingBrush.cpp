@@ -119,6 +119,7 @@ void CsgRingBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.kind_ = CsgShapeHandleKind::Axis;
         handle.position_ = position;
         handle.axis_ = axis;
+        handle.group_ = "Shape";
         handles.push_back(handle);
     };
     add(0, "Radius", Vector3(radius, 0.0f, 0.0f), Vector3(1, 0, 0));
@@ -130,6 +131,11 @@ void CsgRingBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
     const double s = std::sin(angle);
     add(3, "Arc End", Vector3(static_cast<float>(radius * c), 0.0f, static_cast<float>(radius * s)),
         Vector3(static_cast<float>(-s), 0.0f, static_cast<float>(c)));
+}
+
+void CsgRingBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Shape"};
 }
 
 bool CsgRingBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)

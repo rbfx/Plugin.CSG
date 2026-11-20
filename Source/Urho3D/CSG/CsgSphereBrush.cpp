@@ -96,8 +96,14 @@ void CsgSphereBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.kind_ = CsgShapeHandleKind::Axis;
         handle.axis_ = GetRadiusAxis(id);
         handle.position_ = handle.axis_ * params_.radius_.Data()[id / 2];
+        handle.group_ = "Radius";
         handles.push_back(handle);
     }
+}
+
+void CsgSphereBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Radius"};
 }
 
 bool CsgSphereBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)

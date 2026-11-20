@@ -68,6 +68,8 @@ public:
     ///   axis = the unit tangent (-r.x sin a1, r.y cos a1, 0) in the direction of a larger angle.
     /// The top handles are on the mesh if "Segments" is even. Otherwise they are on the ellipse, a little outside.
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// Groups: Shape. The first one is the default.
+    void GetHandleGroups(ea::vector<ea::string>& groups) const override;
     /// With d = dot(delta, axis): 0 radius.x += d; 1 radius.y += d; 2 thickness += d;
     /// 3 depth += d and center.z += d / 2, so the back stays fixed;
     /// 4 arc += 2 d / s in radians, with s = |(-r.x sin a1, r.y cos a1)|. Both ends move by d / s, so the handle

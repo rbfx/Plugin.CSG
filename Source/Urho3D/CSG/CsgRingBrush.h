@@ -68,6 +68,8 @@ public:
     /// (radius + tube x, 0, 0)), 2 the axial tube radius (axis +Y at (radius, tube y, 0)),
     /// 3 the arc end (axis is the tangent (-sin a, 0, cos a) at the point on the major circle at the arc angle a).
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    /// Groups: Shape. The first one is the default.
+    void GetHandleGroups(ea::vector<ea::string>& groups) const override;
     /// Each radius grows by dot(delta, axis). The arc grows by dot(delta, axis) / radius, in degrees.
     /// The sanitizer clamps the result. A shape that is not valid, or no change, returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;

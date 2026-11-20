@@ -124,6 +124,7 @@ void CsgProceduralBrush::HandleQueryHandles(StringHash eventType, VariantMap& ev
     using namespace CsgShapeProtocol;
 
     VariantVector list;
+    StringVector groupList;
     const bool valid = IsShapeValid();
     if (valid)
     {
@@ -137,12 +138,18 @@ void CsgProceduralBrush::HandleQueryHandles(StringHash eventType, VariantMap& ev
             entry[HandleKindKey] = static_cast<int>(handle.kind_);
             entry[HandlePositionKey] = handle.position_;
             entry[HandleAxisKey] = handle.axis_;
+            entry[HandleGroupKey] = handle.group_;
             list.push_back(Variant(entry));
         }
     }
     eventData[P_VERSION] = Version;
     eventData[P_VALID] = valid;
     eventData[P_HANDLES] = list;
+    ea::vector<ea::string> groups;
+    GetHandleGroups(groups);
+    for (const ea::string& group : groups)
+        groupList.push_back(group);
+    eventData[P_GROUPS] = groupList;
 }
 
 void CsgProceduralBrush::HandleMoveHandles(StringHash eventType, VariantMap& eventData)

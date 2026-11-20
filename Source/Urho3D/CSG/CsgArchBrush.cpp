@@ -116,6 +116,7 @@ void CsgArchBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.kind_ = CsgShapeHandleKind::Axis;
         handle.position_ = c + offset;
         handle.axis_ = axis;
+        handle.group_ = "Shape";
         handles.push_back(handle);
     };
     const double a0 = GetArchStartAngle(params_.arc_);
@@ -131,6 +132,11 @@ void CsgArchBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
     const double speed = std::sqrt(tx * tx + ty * ty);
     add(4, "Arc End", Vector3(static_cast<float>(r.x_ * std::cos(a1)), static_cast<float>(r.y_ * std::sin(a1)), 0.0f),
         Vector3(static_cast<float>(tx / speed), static_cast<float>(ty / speed), 0.0f));
+}
+
+void CsgArchBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Shape"};
 }
 
 bool CsgArchBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)

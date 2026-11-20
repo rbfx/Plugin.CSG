@@ -41,6 +41,9 @@ struct CsgShapeHandle
     Vector3 position_;
     /// The unit axis in the local space of the brush. Zero for a point.
     Vector3 axis_;
+    /// The group (adjustment mode) of the handle. It is one of the strings of `P_GROUPS`.
+    /// The name 'All' is reserved for the editor. A shape must not use it.
+    ea::string group_;
 };
 
 namespace CsgShapeProtocol
@@ -48,6 +51,8 @@ namespace CsgShapeProtocol
 
 /// The version of the protocol.
 /// Version 2 adds `E_CSGSHAPERECENTER`. The handle ids do not change.
+/// The handle key `HandleGroupKey` and the reply parameter `P_GROUPS` are optional additions.
+/// They do not change the version. A reader ignores a key that it does not know.
 inline constexpr int Version = 2;
 
 /// The keys of the VariantMap of one handle in `P_HANDLES`.
@@ -58,6 +63,8 @@ inline const StringHash HandleNameKey{"Name"};
 inline const StringHash HandleKindKey{"Kind"};
 inline const StringHash HandlePositionKey{"Position"};
 inline const StringHash HandleAxisKey{"Axis"};
+/// String. The group of the handle. See `CsgShapeHandle::group_`. A reader treats a missing key as no group.
+inline const StringHash HandleGroupKey{"Group"};
 /// @}
 
 } // namespace CsgShapeProtocol
@@ -65,11 +72,15 @@ inline const StringHash HandleAxisKey{"Axis"};
 /// Query the handles of a shape.
 /// Out: P_VERSION (int), P_VALID (bool) and P_HANDLES (VariantVector of VariantMap, see the keys above).
 /// If the shape is not valid, P_VALID is false and P_HANDLES is empty.
+/// Optional out: P_GROUPS (StringVector). The groups in the order of the mode bar.
+/// The first entry is the default mode. The list is fixed for a shape type, also if a handle is not present.
+/// An old runtime does not write P_GROUPS and the Group keys. Then the editor shows all handles.
 URHO3D_EVENT(E_CSGSHAPEQUERYHANDLES, CsgShapeQueryHandles)
 {
     URHO3D_PARAM(P_VERSION, Version); // int
     URHO3D_PARAM(P_VALID, Valid); // bool
     URHO3D_PARAM(P_HANDLES, Handles); // VariantVector
+    URHO3D_PARAM(P_GROUPS, Groups); // StringVector
 }
 
 /// Move handles of a shape.
