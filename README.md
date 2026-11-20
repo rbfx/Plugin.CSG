@@ -145,6 +145,11 @@ A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
   `Group` and `P_GROUPS` are optional keys. The version stays 2. A reader ignores a key that it does not know.
   A reader treats a missing `Group` as an empty group. A reply without `P_GROUPS` (an old runtime) gives no modes.
   The name "All" is reserved for the editor. A shape does not declare it.
+  The reply has also the optional `P_CAGE` (a `VariantVector` of `IntVector2`). Each entry is a pair of handle ids.
+  The editor draws a faint dashed line between the two handles. An id can name a handle that the mode hides.
+  The version stays 2. A reply without `P_CAGE` (an old runtime) gives no cage. The shape gives the pairs with `GetCageLines`.
+  The box gives 48 lines: each edge gives 2 lines through its midpoint dot and each face gives 4 lines to its center dot.
+  The cylinder gives its axis (handle 0 to handle 1). The other shapes give no cage.
   The positions and axes are in the local space of the brush. A shape that is not valid gives `P_VALID` false and no handle.
 - `E_CSGSHAPEMOVEHANDLES`. In: `P_INDICES` (a `VariantVector` of int ids) and `P_DELTA` (Vector3).
   The delta is the total delta from the drag start, in the local space of the brush.
@@ -548,6 +553,13 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 - The selection is parked for each mode. A mode switch keeps the selected handles of the old mode and loads those of the new mode. A new active brush clears all of them. Escape clears only the list of the active mode.
 - The mode "All" shows the face handle and the size handle at the same point. A click on a face picks the face handle (the lower id).
 - `GetFaceSlotOfHandle` maps only the box ids 20 to 25. The Ctrl material drop on a face needs the Face (or All) mode for the face handle to be selected.
+- All handles draw as round dots. A dot is light gray, brighter if hovered. A selected dot is white and larger.
+  An axis handle also has a short axis line.
+- The cage is a faint dashed wire between the dots. It uses all handles of the shape, also the ones that the mode hides.
+  So the Face mode shows the cage with only the face dots. The check box "Show cage" in the overlay sets it
+  (default on, setting `CsgEditor.ShowCage`). The cage draws only if the handles show. A line is skipped if an end is behind the camera.
+- The gizmo of a selected handle is the translate gizmo of the editor with the 3 arrows and the 3 plane squares.
+  A drag on a plane square moves the handle on two axes.
 
 ### Bake to asset
 
@@ -690,6 +702,10 @@ The editor has no test harness for addons. Do these checks by hand:
 115. In the Face mode, click the +Y face handle. Push M until Corner shows, then until Face shows. The +Y handle is still selected. Drag a material over the box with Ctrl: the face override works.
 116. Select a sphere. The overlay has no mode bar. M does nothing. Select a box again. The mode of the box is the same as before.
 117. Close the editor and open it again. The mode of the box and of the cylinder are the same as before.
+118. Add a box with B. The view shows 6 round gray face dots and a faint dashed cage with a cross on each face. Push M until "All" shows. Corner, edge and face dots are round and the dashed lines pass through the edge dots.
+119. Click a dot. The dot is white and larger. The gizmo shows 3 arrows and 3 small plane squares (red, green, blue). Drag a plane square. The handle moves on two axes.
+120. Clear "Show cage" in the overlay. The dashed lines go and the dots stay. Restart the editor. The check box stays clear. Clear "Show handles". Set "Show cage": no line shows.
+121. Select a cylinder. A dashed line joins the two center dots. Select a sphere. No dashed line shows.
 
 ## How to try the sample scene
 
