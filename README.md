@@ -487,7 +487,7 @@ Drag ownership: the scene view gives a whole drag to ONE addon, chosen on the fi
 
 Two stages decide a drop. The selection plays no role in either stage.
 
-1. Stage 1: the first relevant hit under the cursor is a CSG result (a brush node does not hide it). The CSG rules apply. The face decides the target: the brush that made the face. A plain drop sets all slots of that brush. Ctrl sets only the slot of that face.
+1. Stage 1: the first relevant hit under the cursor is a CSG result (a brush node does not hide it). The CSG rules apply. The face decides the target: the brush that made the face. A face of the base model of the root targets the root ("Materials" of `CsgRoot`). A plain drop sets all slots of the target. Ctrl sets only the slot of that face.
 2. Stage 2: the first hit is another geometry. The stock rules apply: the "Material" attribute of that geometry is set, with one undo step. With no hit, nothing happens.
 
 The pure functions `ChooseDropStage` and `DecideDrop` in CsgEditorOps.h implement the stages. The addon only calls them.
@@ -495,13 +495,14 @@ The pure functions `ChooseDropStage` and `DecideDrop` in CsgEditorOps.h implemen
 Targets:
 
 - The cursor is over the CSG result of any root: the brush that made the face under the cursor gets the edit. The selection does not matter. A union operand that is not selected accepts the drop, also if another brush is selected. The selection does not change.
-- The cursor is over a result but no brush made the face (the base model, or a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
+- The cursor is over a face of the base model of the root: the root gets the edit. A plain drop sets all base materials. Ctrl sets the slot of the base geometry under the cursor. The hint names it "base <slot>".
+- The cursor is over a result but no brush and no base model made the face (a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
 - The cursor is not over a result: a material is set on the geometry under the cursor, as the stock editor handler does. A texture drop does nothing.
 - The target is found each frame. If the cursor goes off a result during a drag, the preview goes and the release changes nothing.
 
 A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
 
-During the drag, the tooltip shows the hint line of the mode and one line with the modifiers. A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step.
+During the drag, a tooltip below the drag label shows the hint line of the mode and one line with the modifiers. A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step.
 
 The info tooltip of the active procedural brush shows one row "Materials: <face>: <name or none>, ...". The face names come from the face handles of the box. Other slots show "Face <n>".
 
@@ -759,6 +760,7 @@ popd
 131. Hover the info button on a box brush. The tooltip shows the root stats and the shape lines. On a root it shows only the root stats.
 132. Hover "Bake to Asset" while the result builds. The button is off and the tooltip gives the reason.
 133. Open "Shape settings", change "Snap step" and restart the editor. The value stays.
+134. Open a root with a base model and a subtract brush, for example "Floor" in Graybox.scene. Drag a material from the Resources panel onto the floor, away from the brush. A tooltip "Drop: all faces" shows below the drag label. Release. The floor takes the material. Hold Ctrl: the hint is "Ctrl: only face base 0".
 
 ## Screenshots
 
