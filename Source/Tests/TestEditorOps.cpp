@@ -1712,6 +1712,110 @@ TEST_CASE("PickRootSource gives the source operand of each union face", "[editor
     CHECK(errors.GetCount() == 0);
 }
 
+TEST_CASE("PickRootSource gives the source operand of each intersection face", "[editorops][pick]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = CreateRootNode(f.scene, Vector3::ZERO);
+    REQUIRE(rootNode);
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    REQUIRE(root);
+    root->SetDeferredDelaySec(0.0f);
+    const int unionOp = f.FindOperation("Union");
+    const int intersectionOp = f.FindOperation("Intersection");
+    // A is a box of size 1. B is a thin box from x = 0 to 1. The result is x in [0, 0.5], y and z in [-0.25, 0.25].
+    Node* a = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(0.0f, 0.0f, 0.0f));
+    Node* b = AddBrushNodeOfType(rootNode, "CsgBoxBrush", intersectionOp, Vector3(0.5f, 0.0f, 0.0f));
+    REQUIRE(a);
+    REQUIRE(b);
+    b->SetScale(Vector3(1.0f, 0.5f, 0.5f));
+    RunFrames(f.scene, 60);
+
+    // The top face is inside A: it comes from B.
+    const PickResult top = PickRootSource(root, Ray(Vector3(0.25f, 0, 5), Vector3(0, 0, -1)));
+    REQUIRE(top.hit_);
+    CHECK(Equals(top.position_.z_, 0.25f, 1e-3f));
+    CHECK(top.source_ == b->GetID());
+    // The end face at x = 0 is inside A: it comes from B.
+    const PickResult low = PickRootSource(root, Ray(Vector3(-5, 0, 0), Vector3(1, 0, 0)));
+    REQUIRE(low.hit_);
+    CHECK(Equals(low.position_.x_, 0.0f, 1e-3f));
+    CHECK(low.source_ == b->GetID());
+    // The end face at x = 0.5 is the face of A inside B.
+    const PickResult high = PickRootSource(root, Ray(Vector3(5, 0, 0), Vector3(-1, 0, 0)));
+    REQUIRE(high.hit_);
+    CHECK(Equals(high.position_.x_, 0.5f, 1e-3f));
+    CHECK(high.source_ == a->GetID());
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("PickRootSource gives the source operand with two unions and an intersection", "[editorops][pick]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = CreateRootNode(f.scene, Vector3::ZERO);
+    REQUIRE(rootNode);
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    REQUIRE(root);
+    root->SetDeferredDelaySec(0.0f);
+    const int unionOp = f.FindOperation("Union");
+    const int intersectionOp = f.FindOperation("Intersection");
+    Node* a = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(0.0f, 0.0f, 0.0f));
+    Node* b = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(1.0f, 0.0f, 0.0f));
+    // C keeps x in [0.25, 0.75]. The result is a box with the faces of A, B and C.
+    Node* c = AddBrushNodeOfType(rootNode, "CsgBoxBrush", intersectionOp, Vector3(0.5f, 0.0f, 0.0f));
+    REQUIRE(a);
+    REQUIRE(b);
+    REQUIRE(c);
+    c->SetScale(Vector3(0.5f, 2.0f, 2.0f));
+    RunFrames(f.scene, 60);
+
+    const auto pick = [&](const Vector3& origin, const Vector3& direction)
+    { return PickRootSource(root, Ray(origin, direction)); };
+    const PickResult onA = pick(Vector3(0.35f, 0, 5), Vector3(0, 0, -1));
+    REQUIRE(onA.hit_);
+    CHECK(onA.source_ == a->GetID());
+    const PickResult onB = pick(Vector3(0.65f, 0, 5), Vector3(0, 0, -1));
+    REQUIRE(onB.hit_);
+    CHECK(onB.source_ == b->GetID());
+    const PickResult low = pick(Vector3(-5, 0, 0), Vector3(1, 0, 0));
+    REQUIRE(low.hit_);
+    CHECK(Equals(low.position_.x_, 0.25f, 1e-3f));
+    CHECK(low.source_ == c->GetID());
+    const PickResult high = pick(Vector3(5, 0, 0), Vector3(-1, 0, 0));
+    REQUIRE(high.hit_);
+    CHECK(Equals(high.position_.x_, 0.75f, 1e-3f));
+    CHECK(high.source_ == c->GetID());
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("PickRootSource gives source 0 for the faces of the base model of an intersection", "[editorops][pick]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    REQUIRE(root);
+    const int intersectionOp = f.FindOperation("Intersection");
+    Node* b = AddBrushNodeOfType(rootNode, "CsgBoxBrush", intersectionOp, Vector3(0.0f, 0.0f, 0.0f));
+    REQUIRE(b);
+    b->SetScale(Vector3(0.5f, 0.5f, 0.5f));
+    RunFrames(f.scene, 60);
+    // The brush is inside the base. The result is the brush box: every face comes from the brush.
+    const PickResult top = PickRootSource(root, Ray(Vector3(0.1f, 0, 5), Vector3(0, 0, -1)));
+    REQUIRE(top.hit_);
+    INFO("source " << top.source_ << " brush " << b->GetID() << " z " << top.position_.z_);
+    CHECK(top.source_ == b->GetID());
+    // The brush is larger than the base. The result is the base box: every face comes from the base.
+    b->SetScale(Vector3(50.0f, 50.0f, 50.0f));
+    RunFrames(f.scene, 60);
+    const PickResult big = PickRootSource(root, Ray(Vector3(0.1f, 0, 50), Vector3(0, 0, -1)));
+    REQUIRE(big.hit_);
+    INFO("source " << big.source_ << " z " << big.position_.z_);
+    CHECK(big.source_ == 0u);
+    CHECK(errors.GetCount() == 0);
+}
+
 namespace
 {
 
