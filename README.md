@@ -253,7 +253,7 @@ Defaults: a `CsgBrush` with a model uses `Local`, scale 1 and offset 0. Old scen
 - In `Local` mode, uv = uv0 * scale + offset. A mesh without UV elements has no UV to change.
 - The projection uses the frame of the root. A move of the root does not change the textures. A scale of the root does.
 
-To line up the textures of many brushes, use `Root` on all of them and the same "UV Scale" and "UV Offset". The UV of a point then depends only on its position in the root. A brush that moves its faces does not make the texture slide. One material for each brush is the normal case. A procedural brush with empty slots uses slot 0.
+To line up the textures of many brushes, use `Root` on all of them and the same "UV Scale" and "UV Offset". The UV of a point then depends only on its position in the root. A brush that moves its faces does not make the texture slide. One material for each brush is the normal case. An empty slot of a procedural brush has no material: it uses the default material. A material whose shader builds the texture coordinate from the world position (for example a world-space grid shader) ignores the UV attributes, so "UV Scale" and "UV Offset" show no change with it.
 
 A change of a UV attribute folds again from that brush, as a change of the operation does.
 
