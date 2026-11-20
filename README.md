@@ -551,7 +551,7 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 - The mode is a UI state. It is not in the undo stack. Each shape type keeps its own mode. The setting `CsgEditor.HandleModes` saves them as `CsgBoxBrush=Face;CsgCylinderBrush=Ends`. An unknown mode gives the default mode.
 - The draw, the pick, the hover and the click on a face use only the handles of the active mode. A click on a face in the mode Size selects the Size handle of the axis. The modes Corner and Edge have no axis handle: the click selects the brush and no handle. The editor does not change the mode by itself.
 - The selection is parked for each mode. A mode switch keeps the selected handles of the old mode and loads those of the new mode. A new active brush clears all of them. Escape clears only the list of the active mode.
-- The mode "All" shows the face handle and the size handle at the same point. A click on a face picks the face handle (the lower id).
+- The mode "All" shows the face handle and the size handle at the same point. A click on a face picks the face handle (the lower id). In the mode "All" a Size handle lies exactly under its Face handle and the Face handle wins the click, so the Size handles work only in the Size mode.
 - `GetFaceSlotOfHandle` maps only the box ids 20 to 25. The Ctrl material drop on a face needs the Face (or All) mode for the face handle to be selected.
 - All handles draw as round dots. A dot is light gray, brighter if hovered. A selected dot is white and larger.
   An axis handle also has a short axis line.
