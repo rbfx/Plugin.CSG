@@ -472,12 +472,18 @@ The face under the cursor comes from the event `E_CSGSHAPEQUERYSLOT` (see CsgSha
 
 Drag ownership: the scene view gives a whole drag to ONE addon, chosen on the first frame. The stock material handler takes any material drag. So the CSG addon takes a material drag at once if the scene has a CSG root. It decides the target again in each frame and at the drop. A material over a geometry that is not a CSG result is set on that geometry, as the stock handler does. Brush nodes do not hide the result under the cursor.
 
+Two stages decide a drop. The selection plays no role in either stage.
+
+1. Stage 1: the first relevant hit under the cursor is a CSG result (a brush node does not hide it). The CSG rules apply. The face decides the target: the brush that made the face. A plain drop sets all slots of that brush. Ctrl sets only the slot of that face.
+2. Stage 2: the first hit is another geometry. The stock rules apply: the "Material" attribute of that geometry is set, with one undo step. With no hit, nothing happens.
+
+The pure functions `ChooseDropStage` and `DecideDrop` in CsgEditorOps.h implement the stages. The addon only calls them.
+
 Targets:
 
-- The cursor is over the CSG result of any root, and the brush under the cursor is selected: all selected brushes get the edit.
-- The brush under the cursor is not selected: only that brush gets the edit. The selection does not change.
+- The cursor is over the CSG result of any root: the brush that made the face under the cursor gets the edit. The selection does not matter. A union operand that is not selected accepts the drop, also if another brush is selected. The selection does not change.
 - The cursor is over a result but no brush made the face (the base model, or a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
-- The cursor is not over a result: a texture goes to the selected brushes. A material is set on the geometry under the cursor, as the stock editor handler does. Only a CSG root is selected, with no brush: a texture drop shows "Select a brush to assign a material" and does nothing.
+- The cursor is not over a result: a material is set on the geometry under the cursor, as the stock editor handler does. A texture drop does nothing.
 - The target is found each frame. If the cursor goes off a result during a drag, the preview goes and the release changes nothing.
 
 A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
@@ -634,9 +640,9 @@ The editor has no test harness for addons. Do these checks by hand:
 47. Add a `CsgBrush` with a model. Its "UV Mode" is `Local` and the texture looks as before. Set `Root`. The texture changes to the world projection.
 48. Select a brush. Drag a `.material` from the resource browser to the view. The tooltip shows "Material: <name>" and the brush shows the material. Release. Undo restores the old material. Redo sets it again.
 49. Drag a material onto a procedural box. All six slots get the material. Hold Ctrl: only the face under the cursor gets it.
-50. Select two brushes. Drop a material. Both get it. One undo step restores both.
+50. Select one brush of two union brushes. Drop a material on a face of the other brush. Only the other brush gets it. Drop on a face of the selected brush. Only that brush gets it.
 51. Drag a `.png` that has no `<name>.png.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.png.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
-52. Select only a CSG root. Drag a material over the result of the root. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
+52. Select only a CSG root. Drag a material over a face of the result. The brush of that face gets the material, as the selection does not matter.
 53. Select a brush, then drag a material onto another model that is not the CSG result. The stock editor assigns the material to that model, as before. Also select a plain node with a `StaticModel` and drag a material onto it. The stock editor assigns the material, as before.
 54. Select "Box" in the preset combo. Push B. The new box shows 8 white squares and 6 orange circles. The overlay shows "Shape: CsgBoxBrush" and "Valid".
 55. Click a corner. It turns cyan and a gizmo shows at the corner. The gizmo of the node goes. Drag the X arrow. The corner and the result follow. Push Ctrl+Z. The box comes back. Push Ctrl+Y. The move comes back.

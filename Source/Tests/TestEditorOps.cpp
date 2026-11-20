@@ -918,7 +918,7 @@ TEST_CASE("DecideDrop maps payload and selection to an action", "[editorops][mat
 {
     DropSelection none;
     DropSelection model;
-    model.activeIsModelBrush_ = model.activeIsBrush_ = model.anySelectedBrush_ = true;
+    model.activeIsModelBrush_ = model.activeIsBrush_ = true;
     DropSelection root;
     root.activeIsRoot_ = true;
     DropSelection other;
@@ -928,7 +928,7 @@ TEST_CASE("DecideDrop maps payload and selection to an action", "[editorops][mat
     {
         CHECK(DecideDrop(DropPayloadKind::Model, model, ctrl).action_ == DropAction::ReplaceModel);
         DropSelection procedural;
-        procedural.activeIsBrush_ = procedural.anySelectedBrush_ = true;
+        procedural.activeIsBrush_ = true;
         CHECK(DecideDrop(DropPayloadKind::Model, procedural, ctrl).action_ == DropAction::None);
         CHECK(DecideDrop(DropPayloadKind::Model, root, ctrl).action_ == DropAction::NewBrush);
         CHECK(DecideDrop(DropPayloadKind::Model, other, ctrl).action_ == DropAction::None);
@@ -941,7 +941,7 @@ TEST_CASE("DecideDrop maps payload and selection to an action", "[editorops][mat
 TEST_CASE("DecideDrop scope follows the modifiers", "[editorops][material]")
 {
     DropSelection hover;
-    hover.hoveringResult_ = hover.hoverBrush_ = hover.hoverBrushSelected_ = true;
+    hover.hoveringResult_ = hover.hoverBrush_ = true;
     for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
     {
         CHECK(DecideDrop(kind, hover, false).scope_ == MaterialScope::All);
@@ -954,26 +954,19 @@ TEST_CASE("DecideDrop target follows the brush under the cursor", "[editorops][m
     for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
     {
         const DropAction assign = kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-        // The hovered brush is selected: all selected brushes.
-        DropSelection selected;
-        selected.hoveringResult_ = selected.hoverBrush_ = selected.hoverBrushSelected_ = selected.anySelectedBrush_ = true;
-        CHECK(DecideDrop(kind, selected, false).action_ == assign);
-        CHECK(DecideDrop(kind, selected, false).target_ == DropTarget::Selected);
-
-        // The hovered brush is not selected: only that brush, with or without another selection.
-        DropSelection notSelected;
-        notSelected.hoveringResult_ = notSelected.hoverBrush_ = true;
-        CHECK(DecideDrop(kind, notSelected, false).action_ == assign);
-        CHECK(DecideDrop(kind, notSelected, false).target_ == DropTarget::Hovered);
-        notSelected.anySelectedBrush_ = true;
-        CHECK(DecideDrop(kind, notSelected, false).target_ == DropTarget::Hovered);
-        notSelected.activeIsRoot_ = true;
-        CHECK(DecideDrop(kind, notSelected, false).target_ == DropTarget::Hovered);
+        // The target is the brush under the cursor. The selection does not matter.
+        DropSelection hover;
+        hover.hoveringResult_ = hover.hoverBrush_ = true;
+        CHECK(DecideDrop(kind, hover, false).action_ == assign);
+        hover.activeIsBrush_ = true;
+        CHECK(DecideDrop(kind, hover, false).action_ == assign);
+        hover.activeIsRoot_ = true;
+        CHECK(DecideDrop(kind, hover, false).action_ == assign);
 
         // A result with no brush (source 0 or a missing node): hint, no change.
         DropSelection noBrush;
         noBrush.hoveringResult_ = true;
-        noBrush.anySelectedBrush_ = true;
+        noBrush.activeIsBrush_ = true;
         CHECK(DecideDrop(kind, noBrush, false).action_ == DropAction::HintNoBrush);
         CHECK(DecideDrop(kind, noBrush, true).action_ == DropAction::HintNoBrush);
     }
@@ -982,7 +975,7 @@ TEST_CASE("DecideDrop target follows the brush under the cursor", "[editorops][m
 TEST_CASE("DecideDrop away from a result", "[editorops][material]")
 {
     DropSelection brush;
-    brush.activeIsBrush_ = brush.anySelectedBrush_ = true;
+    brush.activeIsBrush_ = true;
     DropSelection root;
     root.activeIsRoot_ = true;
     DropSelection none;
@@ -993,16 +986,11 @@ TEST_CASE("DecideDrop away from a result", "[editorops][material]")
         CHECK(DecideDrop(DropPayloadKind::Material, brush, ctrl).action_ == DropAction::None);
         CHECK(DecideDrop(DropPayloadKind::Material, root, ctrl).action_ == DropAction::None);
         CHECK(DecideDrop(DropPayloadKind::Material, none, ctrl).action_ == DropAction::None);
-        // A texture goes to the selected brushes. A root with no brush shows a hint.
-        CHECK(DecideDrop(DropPayloadKind::Texture, brush, ctrl).action_ == DropAction::AssignTexture);
-        CHECK(DecideDrop(DropPayloadKind::Texture, brush, ctrl).target_ == DropTarget::Selected);
-        CHECK(DecideDrop(DropPayloadKind::Texture, root, ctrl).action_ == DropAction::HintSelectBrush);
+        // A texture away from a result is not handled. The selection does not matter.
+        CHECK(DecideDrop(DropPayloadKind::Texture, brush, ctrl).action_ == DropAction::None);
+        CHECK(DecideDrop(DropPayloadKind::Texture, root, ctrl).action_ == DropAction::None);
         CHECK(DecideDrop(DropPayloadKind::Texture, none, ctrl).action_ == DropAction::None);
     }
-    // A selected brush that is not the active node still counts.
-    DropSelection mixed = root;
-    mixed.anySelectedBrush_ = true;
-    CHECK(DecideDrop(DropPayloadKind::Texture, mixed, false).action_ == DropAction::AssignTexture);
 }
 
 namespace
@@ -2365,7 +2353,6 @@ TEST_CASE("DecideDrop with Ctrl gives the slot of the hit face", "[editorops][ma
 {
     DropSelection hover;
     hover.hoveringResult_ = hover.hoverBrush_ = true;
-    hover.hoverBrushSelected_ = true;
     hover.hoverSlot_ = 2u;
     for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
     {
@@ -2374,7 +2361,6 @@ TEST_CASE("DecideDrop with Ctrl gives the slot of the hit face", "[editorops][ma
         CHECK(d.scope_ == MaterialScope::Slot);
         CHECK(d.faceFromHit_);
         CHECK(d.slot_ == 2u);
-        CHECK(d.target_ == DropTarget::Hovered);
         // Without Ctrl, the hit slot is not used.
         const DropDecision plain = DecideDrop(kind, hover, false);
         CHECK_FALSE(plain.faceFromHit_);
@@ -2390,42 +2376,33 @@ TEST_CASE("DecideDrop with Ctrl gives the slot of the hit face", "[editorops][ma
     }
     // Ctrl away from a result: a texture has no face, a material goes to the stock handler.
     DropSelection away;
-    away.anySelectedBrush_ = true;
     CHECK(DecideDrop(DropPayloadKind::Material, away, true).action_ == DropAction::None);
     const DropDecision texture = DecideDrop(DropPayloadKind::Texture, away, true);
-    CHECK(texture.action_ == DropAction::AssignTexture);
-    CHECK(texture.faceFromHit_);
-    CHECK_FALSE(texture.slot_.has_value());
+    CHECK(texture.action_ == DropAction::None);
 }
 
-TEST_CASE("DecideDrop gives the drop to the brush under the cursor, not to the selected brush", "[editorops][material]")
+TEST_CASE("DecideDrop ignores the selection over a result", "[editorops][material]")
 {
-    // The brush B is selected. The cursor is over a face of the brush A that is not selected.
-    DropSelection overA;
-    overA.activeIsBrush_ = overA.anySelectedBrush_ = true;
-    overA.hoveringResult_ = overA.hoverBrush_ = true;
-    overA.hoverBrushSelected_ = false;
-    overA.hoverSlot_ = 3u;
-    // The cursor is over a face of the selected brush B.
-    DropSelection overB = overA;
-    overB.hoverBrushSelected_ = true;
     for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
     {
         const DropAction assign =
             kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-        const DropDecision plainA = DecideDrop(kind, overA, false);
-        CHECK(plainA.action_ == assign);
-        CHECK(plainA.target_ == DropTarget::Hovered);
-        CHECK(plainA.scope_ == MaterialScope::All);
-        const DropDecision plainB = DecideDrop(kind, overB, false);
-        CHECK(plainB.action_ == assign);
-        CHECK(plainB.target_ == DropTarget::Selected);
-        const DropDecision ctrlA = DecideDrop(kind, overA, true);
-        CHECK(ctrlA.target_ == DropTarget::Hovered);
-        CHECK(ctrlA.scope_ == MaterialScope::Slot);
-        CHECK(ctrlA.slot_ == 3u);
-        // Ctrl on a selected brush edits only that brush, not all selected brushes.
-        CHECK(DecideDrop(kind, overB, true).target_ == DropTarget::Hovered);
+        for (const bool anotherSelected : {false, true})
+        {
+            DropSelection over;
+            over.activeIsBrush_ = anotherSelected;
+            over.hoveringResult_ = over.hoverBrush_ = true;
+            over.hoverSlot_ = 3u;
+            const DropDecision plain = DecideDrop(kind, over, false);
+            CHECK(plain.action_ == assign);
+            CHECK(plain.scope_ == MaterialScope::All);
+            CHECK_FALSE(plain.faceFromHit_);
+            const DropDecision ctrl = DecideDrop(kind, over, true);
+            CHECK(ctrl.action_ == assign);
+            CHECK(ctrl.scope_ == MaterialScope::Slot);
+            CHECK(ctrl.faceFromHit_);
+            CHECK(ctrl.slot_ == 3u);
+        }
     }
 }
 
@@ -2526,7 +2503,6 @@ TEST_CASE("A material drag is taken on the first frame and the hit list skips br
 
     // The sequence: over nothing, over the base with no brush, over a brush. The decision follows the cursor.
     DropSelection over;
-    over.anySelectedBrush_ = true;
     CHECK(DecideDrop(DropPayloadKind::Material, over, false).action_ == DropAction::None);
     over.hoveringResult_ = true;
     CHECK(DecideDrop(DropPayloadKind::Material, over, false).action_ == DropAction::HintNoBrush);
@@ -2544,5 +2520,12 @@ TEST_CASE("A material drag is taken on the first frame and the hit list skips br
     CHECK(ChooseResultHit(resultFirst) == 0);
     const K brushOnly[] = {K::Brush, K::Brush};
     CHECK(ChooseResultHit(brushOnly) == -1);
+
+    // Stage 1: a result is the first relevant hit. Stage 2: another geometry is first. None: no hit.
+    CHECK(ChooseDropStage(brushFirst) == DropStage::Csg);
+    CHECK(ChooseDropStage(resultFirst) == DropStage::Csg);
+    CHECK(ChooseDropStage(otherFirst) == DropStage::Stock);
+    CHECK(ChooseDropStage(brushOnly) == DropStage::Stock);
+    CHECK(ChooseDropStage(ea::span<const K>{}) == DropStage::None);
     CHECK(ChooseResultHit({}) == -1);
 }

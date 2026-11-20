@@ -110,6 +110,8 @@ private:
     /// The drop state of the cursor: the decision and the brush under the cursor.
     struct DropEvaluation
     {
+        /// The stage of the drop rules. Stage 2 (Stock) leaves the decision empty: the stock preview handles it.
+        DropStage stage_{DropStage::None};
         DropDecision decision_;
         /// The brush node that made the face under the cursor, or null.
         Node* hoverBrushNode_{};
@@ -203,6 +205,8 @@ private:
     Variant dropNewModel_;
     /// The material case: the targets, their original values and the live preview.
     MaterialDropPreview materialPreview_;
+    /// The last diagnostic line of a drop evaluation. The log shows a line only if it changes.
+    mutable ea::string lastDropLog_;
     /// The material case: the material resource name, or the texture resource name.
     ea::string dropResourceName_;
     /// The material drop has a target brush in the last frame.

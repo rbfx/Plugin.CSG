@@ -442,27 +442,13 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
                 break;
             }
             result.action_ = assign;
-            result.target_ = selection.hoverBrushSelected_ ? DropTarget::Selected : DropTarget::Hovered;
             if (ctrl)
             {
                 // The slot of a face has a meaning only for the brush that has the face.
-                result.target_ = DropTarget::Hovered;
                 result.faceFromHit_ = true;
                 result.slot_ = selection.hoverSlot_;
             }
-            break;
         }
-        // The stock handler assigns a material to the geometry under the cursor.
-        if (kind == DropPayloadKind::Material)
-            break;
-        if (selection.anySelectedBrush_)
-        {
-            result.action_ = assign;
-            // No face is under the cursor.
-            result.faceFromHit_ = ctrl;
-        }
-        else if (selection.activeIsRoot_)
-            result.action_ = DropAction::HintSelectBrush;
         break;
     }
     case DropPayloadKind::Other: break;
@@ -480,6 +466,13 @@ int ChooseResultHit(ea::span<const DropHitKind> hits)
             return -1;
     }
     return -1;
+}
+
+DropStage ChooseDropStage(ea::span<const DropHitKind> hits)
+{
+    if (ChooseResultHit(hits) >= 0)
+        return DropStage::Csg;
+    return hits.empty() ? DropStage::None : DropStage::Stock;
 }
 
 bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction action)

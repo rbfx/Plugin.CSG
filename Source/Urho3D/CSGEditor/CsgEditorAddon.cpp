@@ -789,8 +789,8 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
         // The result node of a root is a temporary child. It maps to the root.
         selection.activeIsRoot_ = IsRootNode(activeNode) || (activeNode->IsTemporary() && IsRootNode(activeNode->GetParent()));
     }
-    selection.anySelectedBrush_ = !GetSelectedBrushes(page).empty();
 
+    ea::string diag;
     if (kind == DropPayloadKind::Material || kind == DropPayloadKind::Texture)
     {
         // The result of any root counts. The source brush comes from the pick event.
@@ -805,6 +805,10 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
                     : (hitNode && IsBrushNode(hitNode) ? DropHitKind::Brush : DropHitKind::Other));
         }
         const int resultIndex = ChooseResultHit(kinds);
+        evaluation.stage_ = ChooseDropStage(kinds);
+        diag = Format("stage={} hits={} first={}{} index={}", static_cast<int>(evaluation.stage_), hits.size(),
+            !hits.empty() && hits[0].node_ ? hits[0].node_->GetName() : ea::string("none"),
+            !hits.empty() && hits[0].node_ && hits[0].node_->IsTemporary() ? "(temp)" : "", resultIndex);
         if (resultIndex >= 0)
         {
             Node* rootNode = hits[resultIndex].node_->GetParent();
@@ -813,10 +817,12 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
                 selection.hoveringResult_ = true;
                 const PickResult pick = PickRootSource(rootNode->GetComponent(StringHash("CsgRoot")), page.cameraRay_);
                 Node* brushNode = pick.hit_ && pick.source_ != 0 ? page.scene_->GetNode(pick.source_) : nullptr;
+                diag += Format(" root={} pickHit={} source={} brush={} brushParentIsRoot={} isBrush={}", rootNode->GetName(),
+                    pick.hit_, pick.source_, brushNode ? brushNode->GetName() : ea::string("none"),
+                    brushNode && brushNode->GetParent() == rootNode, brushNode && IsBrushNode(brushNode));
                 if (brushNode && brushNode->GetParent() == rootNode && IsBrushNode(brushNode))
                 {
                     selection.hoverBrush_ = true;
-                    selection.hoverBrushSelected_ = page.selection_.IsSelected(brushNode);
                     evaluation.hoverBrushNode_ = brushNode;
                     // Ctrl targets the face under the cursor. Only then the slot query runs.
                     if (IsCtrlDown())
@@ -834,6 +840,17 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
         }
     }
     evaluation.decision_ = DecideDrop(kind, selection, IsCtrlDown());
+    if (!diag.empty())
+    {
+        diag += Format(" hovering={} hoverBrush={} ctrl={} action={} scope={}", selection.hoveringResult_,
+            selection.hoverBrush_, IsCtrlDown(), static_cast<int>(evaluation.decision_.action_),
+            static_cast<int>(evaluation.decision_.scope_));
+        if (diag != lastDropLog_)
+        {
+            lastDropLog_ = diag;
+            URHO3D_LOGINFO("CSG drop: {}", diag);
+        }
+    }
     return evaluation;
 }
 
@@ -848,10 +865,7 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     ea::vector<Node*> nodes;
     if (decision.action_ == DropAction::AssignMaterial || decision.action_ == DropAction::AssignTexture)
     {
-        if (decision.target_ == DropTarget::Hovered)
-            nodes.push_back(evaluation.hoverBrushNode_);
-        else
-            nodes = GetSelectedBrushes(page);
+        nodes.push_back(evaluation.hoverBrushNode_);
     }
 
     unsigned slot = 0;
@@ -872,8 +886,6 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     dropHint_ = DescribeMaterialDrop(decision, !noFace, evaluation.hoverFaceName_);
     if (decision.action_ == DropAction::HintNoBrush)
         dropHint_ = "No brush under the cursor";
-    else if (decision.action_ == DropAction::HintSelectBrush)
-        dropHint_ = "Select a brush to assign a material";
     dropHasTargets_ = !nodes.empty();
     UpdateStockPreview(page, decision.action_ == DropAction::None && dropMode_ == DropMode::AssignMaterial);
 

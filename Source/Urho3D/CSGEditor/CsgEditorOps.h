@@ -126,14 +126,10 @@ struct DropSelection
     bool activeIsBrush_{};
     /// The active node is a root, or the result node of a root.
     bool activeIsRoot_{};
-    /// At least one selected node is a brush.
-    bool anySelectedBrush_{};
     /// The nearest geometry under the cursor is the result node of ANY root.
     bool hoveringResult_{};
     /// The pick found a brush of that root under the cursor. False for source 0 or a missing node.
     bool hoverBrush_{};
-    /// The brush under the cursor is selected.
-    bool hoverBrushSelected_{};
     /// The material slot of the face under the cursor, from the slot query. Only needed with Ctrl.
     ea::optional<unsigned> hoverSlot_;
 };
@@ -149,19 +145,8 @@ enum class DropAction
     AssignMaterial,
     /// Make a material for the texture and set it on the target brushes.
     AssignTexture,
-    /// The addon takes the drop and shows a hint. The scene does not change.
-    HintSelectBrush,
     /// The cursor is over a result but no brush made the face. The hint is shown and nothing changes.
     HintNoBrush,
-};
-
-/// The brushes that get a material drop.
-enum class DropTarget
-{
-    /// All selected brushes.
-    Selected,
-    /// Only the brush under the cursor.
-    Hovered,
 };
 
 /// What a material edit changes on a brush.
@@ -177,9 +162,8 @@ enum class MaterialScope
 struct DropDecision
 {
     DropAction action_{DropAction::None};
-    DropTarget target_{DropTarget::Selected};
     MaterialScope scope_{MaterialScope::All};
-    /// True if the face is the face under the cursor (Ctrl). Then only the hovered brush gets the edit.
+    /// True if the face is the face under the cursor (Ctrl). The target is always the brush under the cursor.
     bool faceFromHit_{};
     /// The slot of the face under the cursor. Set only with `faceFromHit_`. Empty means no face: no change.
     ea::optional<unsigned> slot_;
@@ -200,6 +184,21 @@ enum class DropHitKind
 /// A brush hit is skipped. A hit of another kind in front of the result hides it.
 int ChooseResultHit(ea::span<const DropHitKind> hits);
 
+/// The rules that decide a material or texture drop. The selection plays no role in any stage.
+enum class DropStage
+{
+    /// Nothing is under the cursor. No drop.
+    None,
+    /// Stage 1: a CSG result is the first relevant hit. DecideDrop gives the edit of the brush that made the face.
+    Csg,
+    /// Stage 2: another geometry is the first hit. The stock rules set its "Material" attribute.
+    Stock,
+};
+
+/// Choose the stage for the hits under the cursor. The hits are sorted by distance. The function is pure.
+/// Stage 1 applies if ChooseResultHit finds a result. Else stage 2 applies if there is any hit.
+DropStage ChooseDropStage(ea::span<const DropHitKind> hits);
+
 /// Return true if the CSG addon takes a drag of a material or a texture. The function is pure.
 /// The tab gives the whole drag to ONE addon, chosen on the first frame. The stock handler for materials takes any
 /// material drag. So the addon must take it at once, also if the cursor is not over a result yet.
@@ -213,11 +212,10 @@ bool IsResultNodeOfRoot(Node* node, Node* rootNode);
 /// Decide what to do with a drop. The function is pure.
 /// Material and texture: the default scope is all slots of the shape.
 /// Ctrl sets only the face under the cursor: the scope is Slot, `faceFromHit_` is set and the slot is `hoverSlot_`.
-/// With Ctrl, the target is only the brush under the cursor.
+/// The selection does not matter. The target is the brush that made the face under the cursor (the pick source).
 /// - The cursor is over the result of any root and no brush made the face: hint, no change.
-/// - The brush under the cursor is selected: all selected brushes get the edit.
-/// - The brush under the cursor is not selected: only that brush gets the edit.
-/// - No result under the cursor: a texture goes to the selected brushes. A material goes to the stock handler.
+/// - The cursor is over a face of a brush: that brush gets the edit.
+/// - No result under the cursor: the stock handler takes the drop.
 DropDecision DecideDrop(
     DropPayloadKind kind, const DropSelection& selection, bool ctrl = false);
 
