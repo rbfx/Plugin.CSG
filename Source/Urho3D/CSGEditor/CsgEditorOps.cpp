@@ -580,6 +580,89 @@ bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea
     return changed;
 }
 
+void MaterialDropPreview::SetTargets(const ea::vector<Node*>& brushes, MaterialScope scope, unsigned slot)
+{
+    // The restore comes first. Else the baseline would take the previewed values.
+    Restore();
+    entries_.clear();
+    scope_ = scope;
+    slot_ = slot;
+    for (Node* node : brushes)
+    {
+        Component* component = GetBrushComponent(node);
+        ResourceRefList list;
+        if (!ReadMaterialList(component, list))
+            continue;
+        const Variant shape = component->GetAttribute("Shape Material");
+        entries_.push_back(Entry{WeakPtr<Component>(component), shape.GetType() == VAR_RESOURCEREF ? shape : Variant::EMPTY,
+            component->GetAttribute("Materials")});
+    }
+}
+
+void MaterialDropPreview::Apply(const ea::string& material)
+{
+    Restore();
+    for (const Entry& entry : entries_)
+    {
+        if (Component* component = entry.component_)
+            EditBrushMaterial(component->GetNode(), scope_, slot_, material);
+    }
+    applied_ = true;
+}
+
+void MaterialDropPreview::Restore()
+{
+    if (!applied_)
+        return;
+    for (const Entry& entry : entries_)
+    {
+        Component* component = entry.component_;
+        if (!component)
+            continue;
+        if (entry.oldShape_.GetType() == VAR_RESOURCEREF)
+            component->SetAttribute("Shape Material", entry.oldShape_);
+        component->SetAttribute("Materials", entry.oldMaterials_);
+        component->ApplyAttributes();
+    }
+    applied_ = false;
+}
+
+void MaterialDropPreview::Clear()
+{
+    Restore();
+    Forget();
+}
+
+void MaterialDropPreview::Forget()
+{
+    entries_.clear();
+    scope_ = MaterialScope::Shape;
+    slot_ = 0;
+    applied_ = false;
+}
+
+bool MaterialDropPreview::Matches(const ea::vector<Node*>& brushes, MaterialScope scope, unsigned slot) const
+{
+    if (scope != scope_ || slot != slot_)
+        return false;
+    ea::vector<Component*> components;
+    for (Node* node : brushes)
+    {
+        Component* component = GetBrushComponent(node);
+        ResourceRefList list;
+        if (ReadMaterialList(component, list))
+            components.push_back(component);
+    }
+    if (components.size() != entries_.size())
+        return false;
+    for (unsigned i = 0; i < components.size(); ++i)
+    {
+        if (entries_[i].component_ != components[i])
+            return false;
+    }
+    return true;
+}
+
 ea::vector<Node*> GetAllBrushChildren(Node* rootNode)
 {
     ea::vector<Node*> result;

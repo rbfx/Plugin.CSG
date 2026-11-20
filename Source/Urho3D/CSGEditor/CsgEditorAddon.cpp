@@ -816,9 +816,6 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
             nodes = GetSelectedBrushes(page);
     }
 
-    ea::vector<WeakPtr<Component>> components;
-    VariantVector oldMaterials;
-    VariantVector oldShape;
     unsigned slot = 0;
     bool noFace = false;
     if (decision.scope_ == MaterialScope::Slot && !nodes.empty())
@@ -837,32 +834,13 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
         nodes = single;
         noFace = nodes.empty();
     }
-    for (Node* node : nodes)
-    {
-        Component* component = FindBrushComponent(node);
-        if (!component || component->GetAttribute("Materials").GetType() != VAR_RESOURCEREFLIST)
-            continue;
-        components.emplace_back(component);
-        oldMaterials.push_back(component->GetAttribute("Materials"));
-        const Variant shape = component->GetAttribute("Shape Material");
-        oldShape.push_back(shape.GetType() == VAR_RESOURCEREF ? shape : Variant::EMPTY);
-    }
 
     // Keep the preview if nothing changed.
-    bool same = components.size() == dropComponents_.size() && decision.scope_ == dropScope_ && slot == dropSlot_
-        && noFace == dropNoFace_;
-    for (unsigned i = 0; same && i < components.size(); ++i)
-        same = components[i] == dropComponents_[i];
-    if (same)
+    if (materialPreview_.Matches(nodes, decision.scope_, slot) && noFace == dropNoFace_)
         return;
 
-    if (dropPreviewApplied_)
-        RestoreDropMaterials();
-    dropComponents_ = components;
-    dropOldMaterials_ = oldMaterials;
-    dropOldShape_ = oldShape;
-    dropScope_ = decision.scope_;
-    dropSlot_ = slot;
+    // SetTargets restores the old preview first. The baseline is then the original state.
+    materialPreview_.SetTargets(nodes, decision.scope_, slot);
     if (noFace && !dropNoFace_)
         URHO3D_LOGINFO("Select a face handle first");
     dropNoFace_ = noFace;
@@ -870,35 +848,7 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     // A texture has a preview only if its material file exists.
     // The drop never makes a file before the user releases the button.
     if (dropMode_ == DropMode::AssignMaterial || GetSubsystem<ResourceCache>()->Exists(dropResourceName_))
-    {
-        ApplyDropMaterial(dropResourceName_);
-        dropPreviewApplied_ = true;
-    }
-}
-
-void CsgEditorAddon::ApplyDropMaterial(const ea::string& materialName)
-{
-    for (Component* component : dropComponents_)
-    {
-        if (!component || !component->GetNode())
-            continue;
-        EditBrushMaterial(component->GetNode(), dropScope_, dropSlot_, materialName);
-    }
-}
-
-void CsgEditorAddon::RestoreDropMaterials()
-{
-    for (unsigned index = 0; index < dropComponents_.size() && index < dropOldMaterials_.size(); ++index)
-    {
-        if (Component* component = dropComponents_[index])
-        {
-            if (index < dropOldShape_.size() && dropOldShape_[index].GetType() == VAR_RESOURCEREF)
-                component->SetAttribute("Shape Material", dropOldShape_[index]);
-            component->SetAttribute("Materials", dropOldMaterials_[index]);
-            component->ApplyAttributes();
-        }
-    }
-    dropPreviewApplied_ = false;
+        materialPreview_.Apply(dropResourceName_);
 }
 
 bool CsgEditorAddon::IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const
@@ -1057,10 +1007,10 @@ void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
 
         if (dropPage_)
             RefreshDropTargets(*dropPage_);
-        RestoreDropMaterials();
+        materialPreview_.Restore();
         if (!materialName.empty())
         {
-            ApplyDropMaterial(materialName);
+            materialPreview_.Apply(materialName);
 
             // The action skips a component that is removed or that is not in the scene of the page.
             // It also skips a component with no change of the materials.
@@ -1070,25 +1020,25 @@ void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
             ea::vector<Component*> shapeComponents;
             VariantVector shapeOld;
             VariantVector shapeNew;
-            for (unsigned index = 0; index < dropComponents_.size(); ++index)
+            for (const MaterialDropPreview::Entry& entry : materialPreview_.GetEntries())
             {
-                Component* component = dropComponents_[index];
+                Component* component = entry.component_;
                 if (!component || !component->GetNode() || component->GetScene() != scene)
                     continue;
                 const Variant newMaterials = component->GetAttribute("Materials");
-                if (dropOldMaterials_[index] != newMaterials)
+                if (entry.oldMaterials_ != newMaterials)
                 {
                     materialComponents.push_back(component);
-                    materialOld.push_back(dropOldMaterials_[index]);
+                    materialOld.push_back(entry.oldMaterials_);
                     materialNew.push_back(newMaterials);
                 }
-                if (dropOldShape_[index].GetType() == VAR_RESOURCEREF)
+                if (entry.oldShape_.GetType() == VAR_RESOURCEREF)
                 {
                     const Variant newShape = component->GetAttribute("Shape Material");
-                    if (dropOldShape_[index] != newShape)
+                    if (entry.oldShape_ != newShape)
                     {
                         shapeComponents.push_back(component);
-                        shapeOld.push_back(dropOldShape_[index]);
+                        shapeOld.push_back(entry.oldShape_);
                         shapeNew.push_back(newShape);
                     }
                 }
@@ -1151,7 +1101,7 @@ void CsgEditorAddon::CancelDragDrop()
     }
     else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
     {
-        RestoreDropMaterials();
+        materialPreview_.Clear();
     }
 
     ResetDrop();
@@ -1167,13 +1117,10 @@ void CsgEditorAddon::ResetDrop()
     dropComponents_.clear();
     dropOldModels_.clear();
     dropNewModel_ = Variant::EMPTY;
-    dropOldMaterials_.clear();
-    dropOldShape_.clear();
+    // A commit keeps the scene. Cancel restores before this call.
+    materialPreview_.Forget();
     dropResourceName_.clear();
-    dropScope_ = MaterialScope::Shape;
-    dropSlot_ = 0;
     dropNoFace_ = false;
-    dropPreviewApplied_ = false;
 }
 
 void CsgEditorAddon::Render(SceneViewPage& page)

@@ -1158,6 +1158,123 @@ TEST_CASE("GetFaceSlotOfHandle maps only the box faces", "[editorops][materials]
     CHECK_FALSE(GetFaceSlotOfHandle("CsgCylinderBrush", 20).has_value());
 }
 
+namespace
+{
+
+Node* MakeBox(Fixture& f, Node* rootNode, const ea::vector<ea::string>& slots, const ea::string& shape)
+{
+    Node* node = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO);
+    Component* brush = FindBrushComponent(node);
+    brush->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), slots));
+    brush->SetAttribute("Shape Material", ResourceRef(Material::GetTypeStatic(), shape));
+    brush->ApplyAttributes();
+    return node;
+}
+
+struct MaterialState
+{
+    ea::string shape_;
+    ea::vector<ea::string> slots_;
+    bool operator==(const MaterialState& other) const { return shape_ == other.shape_ && slots_ == other.slots_; }
+};
+
+MaterialState GetState(Node* node)
+{
+    BrushMaterials m;
+    ReadBrushMaterials(node, m);
+    return MaterialState{m.shape_, m.slots_};
+}
+
+} // namespace
+
+TEST_CASE("MaterialDropPreview keeps the original baseline when the targets change", "[editorops][materials][preview]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    // An old brush: only slot 0 is set. A restore to the preview state would lose it.
+    Node* a = MakeBox(f, rootNode, {"A", "", "", "T", "", ""}, "");
+    Node* b = MakeBox(f, rootNode, {"", "", "", "", "", ""}, "SB");
+    const MaterialState originalA = GetState(a);
+    const MaterialState originalB = GetState(b);
+    MaterialDropPreview preview;
+
+    SECTION("Shape, then Shift on the same brush, then cancel")
+    {
+        preview.SetTargets({a}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        CHECK(GetState(a).shape_ == "N");
+        preview.SetTargets({a}, MaterialScope::ShapeClearOverrides, 0);
+        preview.Apply("N");
+        CHECK(GetState(a).slots_ == Slots6({}));
+        preview.Clear();
+        CHECK(GetState(a) == originalA);
+    }
+    SECTION("Shape, then Ctrl on the same brush, then cancel")
+    {
+        preview.SetTargets({a}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        preview.SetTargets({a}, MaterialScope::Slot, 2);
+        preview.Apply("N");
+        CHECK(GetState(a).slots_[2] == "N");
+        preview.Clear();
+        CHECK(GetState(a) == originalA);
+    }
+    SECTION("Hovered becomes Selected with an overlapping brush")
+    {
+        preview.SetTargets({a}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        preview.SetTargets({a, b}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        CHECK(GetState(b).shape_ == "N");
+        preview.Clear();
+        CHECK(GetState(a) == originalA);
+        CHECK(GetState(b) == originalB);
+    }
+    SECTION("A disjoint target set restores the first brush")
+    {
+        preview.SetTargets({a}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        preview.SetTargets({b}, MaterialScope::Shape, 0);
+        CHECK(GetState(a) == originalA);
+        preview.Apply("N");
+        CHECK(GetState(b).shape_ == "N");
+        preview.Clear();
+        CHECK(GetState(b) == originalB);
+    }
+    SECTION("A drop after a change gives the original old values")
+    {
+        preview.SetTargets({a}, MaterialScope::Shape, 0);
+        preview.Apply("N");
+        preview.SetTargets({a}, MaterialScope::ShapeClearOverrides, 0);
+        preview.Apply("N");
+        // The commit: restore, apply the final edit, read the baseline.
+        preview.Restore();
+        preview.Apply("N");
+        REQUIRE(preview.GetEntries().size() == 1);
+        const MaterialDropPreview::Entry& entry = preview.GetEntries()[0];
+        CHECK(entry.oldMaterials_.GetResourceRefList().names_ == originalA.slots_);
+        CHECK(entry.oldShape_.GetResourceRef().name_ == originalA.shape_);
+        CHECK(GetState(a).shape_ == "N");
+        // Undo writes the old values back.
+        Component* component = entry.component_;
+        component->SetAttribute("Shape Material", entry.oldShape_);
+        component->SetAttribute("Materials", entry.oldMaterials_);
+        component->ApplyAttributes();
+        CHECK(GetState(a) == originalA);
+    }
+    SECTION("Matches follows the targets, the scope and the slot")
+    {
+        preview.SetTargets({a}, MaterialScope::Slot, 1);
+        CHECK(preview.Matches({a}, MaterialScope::Slot, 1));
+        CHECK_FALSE(preview.Matches({a}, MaterialScope::Slot, 2));
+        CHECK_FALSE(preview.Matches({a}, MaterialScope::Shape, 1));
+        CHECK_FALSE(preview.Matches({a, b}, MaterialScope::Slot, 1));
+        CHECK_FALSE(preview.Matches({b}, MaterialScope::Slot, 1));
+    }
+    CHECK(errors.GetCount() == 0);
+}
+
 TEST_CASE("EditBrushMaterial writes both attributes", "[editorops][materials]")
 {
     Fixture f;

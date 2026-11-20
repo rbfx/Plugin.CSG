@@ -126,10 +126,6 @@ private:
     ea::optional<unsigned> GetCtrlFaceSlot(Component* brush) const;
     /// Find the target brush components for the cursor. Restore the old preview and set the new one.
     void RefreshDropTargets(SceneViewPage& page);
-    /// Set the material on the brush components of the drop with the scope and slot of the drop.
-    void ApplyDropMaterial(const ea::string& materialName);
-    /// Set the old "Shape Material" and "Materials" values back on the brush components of the drop.
-    void RestoreDropMaterials();
     /// Move the preview brush to the cursor hit point.
     void UpdateDropBrushPosition();
     /// Clear the drag and drop state. The function does not change the scene.
@@ -197,19 +193,12 @@ private:
     ea::vector<WeakPtr<Component>> dropComponents_;
     VariantVector dropOldModels_;
     Variant dropNewModel_;
-    /// The material case: the old "Materials" values of the components in dropComponents_.
-    VariantVector dropOldMaterials_;
-    /// The material case: the old "Shape Material" values. Empty for a brush without the attribute.
-    VariantVector dropOldShape_;
+    /// The material case: the targets, their original values and the live preview.
+    MaterialDropPreview materialPreview_;
     /// The material case: the material resource name, or the texture resource name.
     ea::string dropResourceName_;
-    /// The material case: the preview has this scope and slot.
-    MaterialScope dropScope_{MaterialScope::Shape};
-    unsigned dropSlot_{};
     /// The material case: a Ctrl drop had no face handle. The hint shows.
     bool dropNoFace_{};
-    /// The material case: the preview material is set on the brushes.
-    bool dropPreviewApplied_{};
 
     /// The settings of the shape handles. A grid step of 0 turns off the Ctrl snap.
     bool showHandles_{true};

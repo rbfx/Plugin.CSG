@@ -217,6 +217,46 @@ bool PlanMaterialEdit(BrushMaterials& io, MaterialScope scope, unsigned slot, co
 /// With no shape material, slot 0 is the shape material (old brush). A model brush gives none.
 ea::vector<unsigned> GetOverriddenSlots(const BrushMaterials& materials);
 
+/// The live preview of a material drop. It keeps the original attribute values of the target brushes.
+/// The baseline is always the state before the first preview. A change of the targets restores the
+/// preview first, so the baseline never holds a previewed value. The class uses no ImGui.
+class MaterialDropPreview
+{
+public:
+    /// The original values of one target brush. The shape value is empty for a brush without "Shape Material".
+    struct Entry
+    {
+        WeakPtr<Component> component_;
+        Variant oldShape_;
+        Variant oldMaterials_;
+    };
+
+    /// Restore the preview, take the new targets and keep their baseline. Do not apply the material.
+    /// A node without a brush or without a material list is skipped.
+    void SetTargets(const ea::vector<Node*>& brushes, MaterialScope scope, unsigned slot);
+    /// Apply the edit to the targets. Restore first if a preview is applied.
+    void Apply(const ea::string& material);
+    /// Write the original values back to the targets. The targets stay.
+    void Restore();
+    /// Restore and forget all targets.
+    void Clear();
+    /// Forget all targets and keep the scene as it is. Use it after a commit.
+    void Forget();
+
+    bool IsApplied() const { return applied_; }
+    MaterialScope GetScope() const { return scope_; }
+    unsigned GetSlot() const { return slot_; }
+    const ea::vector<Entry>& GetEntries() const { return entries_; }
+    /// Return true if the targets, the scope and the slot are the same as the current ones.
+    bool Matches(const ea::vector<Node*>& brushes, MaterialScope scope, unsigned slot) const;
+
+private:
+    ea::vector<Entry> entries_;
+    MaterialScope scope_{MaterialScope::Shape};
+    unsigned slot_{};
+    bool applied_{};
+};
+
 /// Return the face slot of a handle of a shape type, or nothing if the shape has no known mapping.
 /// Only the box has one: the face handles 20 to 25 are the face groups 0 to 5 (id minus 20).
 ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsigned handleId);

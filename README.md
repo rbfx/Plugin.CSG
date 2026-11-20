@@ -465,7 +465,7 @@ Targets:
 
 Ctrl (face) in phase 1: the addon cannot find the face under the cursor yet. It uses the face handle that the last click selected on the brush. The face handle gives the slot through the face-group order. The box maps its face handles 20 to 25 to the slots 0 to 5. The other shapes have no mapping yet. With no mapping or no selected face handle, Ctrl changes nothing. The tooltip shows "Select a face handle first" and the log has the same hint once for each drag. A Ctrl drop edits only the brush with the selected face handle.
 
-An old brush (no shape material, slot 0 set) changes on the first write: slot 0 becomes the shape material, and the slots equal to it become empty. The render result stays the same. The edit then applies in the same undo step.
+An old brush (no shape material, slot 0 set) changes on the first write: slot 0 becomes the shape material, and the slots equal to it become empty. The render result stays the same. The edit then applies in the same undo step. The rule reads the slots as they are: a brush with the slots `[A, B, A]` reads as legacy, so slot 2 (equal to slot 0) follows the shape material after a plain drop and loses its own `A`.
 
 A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
 
@@ -643,13 +643,16 @@ The editor has no test harness for addons. Do these checks by hand:
 98. Select box A. Drop a material on box B (not selected). Only B changes and the selection stays on A. Select A and B, then drop on A. Both change.
 99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
 100. Hold Ctrl and drop on a sphere with no selected face handle. Nothing changes and the tooltip shows "Select a face handle first".
-101. Open an old scene whose box has only slot 0 set. It renders as before. Drop a plain material. The box shows the new material on all faces.
+101. Open an old scene whose box has only slot 0 set. It renders as before. Drop a plain material. The box shows the new material on all faces that have no override.
 102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The overlay line shows "CsgCylinderBrush".
 103. Select the pyramid. Select "Cone" and push B. A cone with a smooth side appears. Select "Hex Prism" and push B. A prism with 6 flat sides appears.
 104. Select the pyramid. Set "Face Radius" off and "Start Angle" to 0. The base becomes a diamond that touches the old square in the middle of its sides. Set "Start Angle" to 45 and "Face Radius" on. The square comes back.
 105. Select the pyramid. Drag the handle "Bottom Radius +X". It stays on the face of the base. Drag "Bottom Scale". Both radii change with one ratio and the handle follows the cursor.
 106. Drag "Top Scale" of a cylinder toward its center. The top becomes an apex and the cylinder becomes a cone. Drag the handle at the apex outward. The top grows back and the handle stays under the cursor.
 107. Add a box and a pyramid on its top face (the base of the pyramid has the size of the face). The result has no gap and no open edge.
+108. Drag a material over a box and hold Shift, then release Shift while the mouse stays down. The preview goes from "shape and clear overrides" back to "shape only". Push Escape. The box has its original materials, also an old box with only slot 0 set.
+109. Select a box and click its +Y face handle. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
+110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials. An old box keeps its slot 0.
 
 ## How to try the sample scene
 
