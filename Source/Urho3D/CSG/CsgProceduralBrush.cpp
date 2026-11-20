@@ -249,9 +249,7 @@ void CsgProceduralBrush::UpdateMaterialSlots()
 
 ea::string ResolveSlotMaterial(const ResourceRefList& faces, unsigned slot)
 {
-    if (slot < faces.names_.size() && !faces.names_[slot].empty())
-        return faces.names_[slot];
-    return faces.names_.empty() ? ea::string() : faces.names_[0];
+    return slot < faces.names_.size() ? faces.names_[slot] : ea::string();
 }
 
 } // namespace Urho3D

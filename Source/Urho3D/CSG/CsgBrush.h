@@ -66,7 +66,7 @@ public:
     /// Get the generated model of a procedural brush. Return false when the brush uses the `Model` attribute.
     /// Return true when the brush is procedural. Then the root uses `model` and ignores the `Model` attribute.
     /// A procedural brush with a null `model` is invalid. It gives no operand until it is valid again.
-    /// For a generated model, an empty or missing material slot uses the material of slot 0.
+    /// For a generated model, an empty or missing material slot uses the default material.
     /// @nobind
     virtual bool GetGeneratedModel(SharedPtr<Model>& model) const { return false; }
 

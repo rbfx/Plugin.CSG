@@ -3175,7 +3175,9 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
     {
         CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
         CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
-        ResourceRefList materials(Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml"});
+        ResourceRefList materials(Material::GetTypeStatic(),
+            {"Materials/Box.xml", "Materials/Box.xml", "Materials/Box.xml", "Materials/Top.xml", "Materials/Box.xml",
+                "Materials/Box.xml"});
         box->SetMaterials(materials);
         BuildFully(root, workQueue);
 
@@ -3205,7 +3207,7 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
         CsgRoot* root = MakeBoxRoot(scene, "Root");
         CsgBoxBrush* box = AddProceduralBox(
             root, "Box", Vector3(1.0f, 1.0f, 1.0f), Vector3(2.0f, 2.0f, 2.0f), CsgOperation::DifferenceAB);
-        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml"}));
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(6u, ea::string("Materials/Box.xml"))));
         BuildFully(root, workQueue);
         const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
         CHECK(ea::find(names.begin(), names.end(), "Materials/Box.xml") != names.end());
@@ -3235,7 +3237,7 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
     CHECK(errors.GetCount() == 0);
 }
 
-TEST_CASE("ResolveSlotMaterial uses the slot, then slot 0", "[shapes][materials]")
+TEST_CASE("ResolveSlotMaterial gives the slot material and no fallback", "[shapes][materials]")
 {
     const ResourceRefList faces(Material::GetTypeStatic(), {"A", "", "C", ""});
     const ResourceRefList noneSet(Material::GetTypeStatic(), {"", "", "", ""});
@@ -3243,14 +3245,14 @@ TEST_CASE("ResolveSlotMaterial uses the slot, then slot 0", "[shapes][materials]
 
     CHECK(ResolveSlotMaterial(faces, 0) == "A");
     CHECK(ResolveSlotMaterial(faces, 2) == "C");
-    // An empty slot uses slot 0 (old scenes).
-    CHECK(ResolveSlotMaterial(faces, 1) == "A");
-    CHECK(ResolveSlotMaterial(faces, 3) == "A");
+    // An empty slot has no material.
+    CHECK(ResolveSlotMaterial(faces, 1).empty());
+    CHECK(ResolveSlotMaterial(faces, 3).empty());
     // All empty.
     CHECK(ResolveSlotMaterial(noneSet, 2).empty());
     CHECK(ResolveSlotMaterial(empty, 0).empty());
-    // A slot out of range uses slot 0.
-    CHECK(ResolveSlotMaterial(faces, 9) == "A");
+    // A slot out of range has no material.
+    CHECK(ResolveSlotMaterial(faces, 9).empty());
 }
 
 TEST_CASE("A box brush has no Shape Material attribute and ignores a saved one", "[shapes][materials]")
@@ -3289,7 +3291,7 @@ TEST_CASE("A box brush has no Shape Material attribute and ignores a saved one",
         CHECK(loadedBox->GetMaterialsAttr().names_ == box->GetMaterialsAttr().names_);
     }
 
-    SECTION("An old XML scene with only slot 0 set resolves as before")
+    SECTION("An XML scene with only slot 0 set keeps the other slots empty")
     {
         box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml"}));
         VectorBuffer buffer;
@@ -3305,10 +3307,10 @@ TEST_CASE("A box brush has no Shape Material attribute and ignores a saved one",
         REQUIRE(loadedBox);
         const ResourceRefList& faces = loadedBox->GetMaterialsAttr();
         REQUIRE(faces.names_.size() == 6);
-        // Slot 0 fills the empty slots, as before.
-        CHECK(ResolveSlotMaterial(faces, 1) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(faces, 0) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(faces, 1).empty());
         CHECK(ResolveSlotMaterial(faces, 3) == "Materials/Top.xml");
-        CHECK(ResolveSlotMaterial(faces, 5) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(faces, 5).empty());
     }
 
     CHECK(errors.GetCount() == 0);
@@ -3361,12 +3363,23 @@ TEST_CASE("The root applies the slot materials to the faces of a box", "[root][m
         }
     }
 
-    SECTION("An old brush with only slot 0 set renders slot 0 on all faces")
+    SECTION("Slot 0 set and the other slots empty give separate geometries")
     {
         box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Shape.xml", "", "", "", "", ""}));
         BuildFully(root, workQueue);
-        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
-        CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Shape.xml"});
+        const Model* output = GetOutput(root)->GetModel();
+        REQUIRE(output->GetNumGeometries() == 2);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        REQUIRE(names.size() == 2);
+        const unsigned leftGeometry = names[0] == "Materials/Shape.xml" ? 0 : 1;
+        CHECK(names[1 - leftGeometry].empty());
+        for (const CsgPolygon& polygon : CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY))
+        {
+            bool onLeft = true;
+            for (const ModelVertex& vertex : polygon.vertices_)
+                onLeft = onLeft && Abs(vertex.GetPosition().x_ + 0.5f) < 1e-4f;
+            CHECK(onLeft == ((polygon.shared_ & 0xFFFFu) == leftGeometry));
+        }
     }
 
     CHECK(errors.GetCount() == 0);
@@ -6219,13 +6232,17 @@ void CheckSlotMaterials(Scene* scene, WorkQueue* workQueue, const P& params, con
     brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(9u, names[0])));
     CHECK(brush->GetMaterialsAttr().names_.size() == numSlots);
 
-    // Only slot 0: the empty slots fall back to it. One output geometry with the material has all faces.
+    // Only slot 0: the empty slots have no material. They do not take the material of slot 0.
+    // Slot 0 and the empty slots are separate geometries, unless the shape has one slot.
     brush->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {names[0]}));
     BuildFully(root, workQueue);
     CHECK(!root->GetLastBuildFailed());
     REQUIRE(GetOutput(root)->GetModel());
-    CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
-    CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{names[0]});
+    {
+        const ea::vector<ea::string>& zeroNames = GetOutput(root)->GetMaterialsAttr().names_;
+        CHECK(ea::find(zeroNames.begin(), zeroNames.end(), names[0]) != zeroNames.end());
+        CHECK(zeroNames.size() == (numSlots > 1 ? 2u : 1u));
+    }
 
     // The tested slot has its material and all other slots have one other material.
     // The material of the slot reaches only the triangles of its face group.

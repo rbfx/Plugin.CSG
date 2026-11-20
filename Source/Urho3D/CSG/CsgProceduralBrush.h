@@ -24,8 +24,7 @@ struct CsgShapeMesh;
 /// - Each face group of the mesh is one geometry of the model and one material slot.
 ///   The "Materials" attribute always has one entry for each slot. See `GetNumMaterialSlots`.
 ///   Equal materials merge into one output geometry.
-/// - A slot uses its own material, else the material of slot 0. The last step keeps old scenes the same.
-///   See `ResolveSlotMaterial`.
+/// - An empty slot has no material. The root then uses the default material for it. See `ResolveSlotMaterial`.
 ///
 /// To add a shape: add a generator function in CsgShapes.h and a subclass that calls it.
 class PLUGIN_RBFXCSG_API CsgProceduralBrush : public CsgBrush
@@ -130,8 +129,7 @@ private:
 };
 
 /// Return the material name of a slot. Pure function.
-/// The result is the material of the slot, else the material of slot 0 (legacy scenes).
-/// A slot out of range uses slot 0.
+/// The result is the material of the slot. An empty slot or a slot out of range gives an empty name (no material).
 PLUGIN_RBFXCSG_API ea::string ResolveSlotMaterial(const ResourceRefList& faces, unsigned slot);
 
 } // namespace Urho3D

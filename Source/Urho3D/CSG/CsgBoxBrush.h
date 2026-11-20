@@ -18,7 +18,7 @@ namespace Urho3D
 /// A corner that goes through the opposite face makes the box not valid. Then the brush gives no operand.
 ///
 /// The box has 6 material slots, one for each nominal face, in this order: -X, +X, -Y, +Y, -Z, +Z.
-/// The order is a file contract. An empty slot uses the material of slot 0.
+/// The order is a file contract. An empty slot has no material.
 class PLUGIN_RBFXCSG_API CsgBoxBrush : public CsgProceduralBrush
 {
     URHO3D_OBJECT(CsgBoxBrush, CsgProceduralBrush);

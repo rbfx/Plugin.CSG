@@ -1776,7 +1776,7 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
             return true;
         }
 
-        // The slot material wins, then the material of slot 0. This is done before
+        // An empty slot stays empty: it has the default material. This is done before
         // the material names are compared for the output geometries, so equal faces merge into one output geometry.
         ResourceRefList resolved(materialsAttr.type_);
         const unsigned numGeometries = generatedModel->GetNumGeometries();

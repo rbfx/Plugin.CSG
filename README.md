@@ -314,7 +314,7 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - "Size": the box size. Each component is in [0.001, 16384]. The default is (1, 1, 1).
 - "Corner 0" to "Corner 7": the corners. Index bit 0 is +X, bit 1 is +Y and bit 2 is +Z. Each component is in [-64, 64]. The default is (+-0.5, +-0.5, +-0.5). The local corner position is Size * Corner, per component.
 - The scale of the node applies as for a model brush. The operand transform is `rootFrame * brush world transform`, with the root frame equal to the metric scale of the root times the inverse world transform of the root. A box of size 1 on a node with the scale 0.5 under a root with the scale 1 has the volume 0.125. Under a root with the scale 2 it has the world scale 1, so the volume in the fold space is 1. The output model is in the node space of the root, so its volume there is 0.125.
-- "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot uses the material of slot 0. Faces with equal materials share one output geometry.
+- "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot has no material: it uses the default material. Faces with equal materials share one output geometry.
 - Each face is two triangles with a fixed diagonal. A moved corner can make a face that is not planar. The CSG accepts this.
 - UV 0 is a planar projection in local units, so the texel density does not change with the size. UV 1 puts each face in one cell of a 3x2 atlas.
 - Validity: at each corner, the three edges to the neighbor corners must give a positive triple product, and the volume must be positive. A corner that goes through the opposite face makes the box not valid. A box that is not valid gives no operand and logs one warning.
@@ -457,7 +457,7 @@ A procedural brush has one material attribute:
 
 - "Materials": the material of each face group. It keeps one slot for each face group. The slot count and the order do not change.
 
-A slot uses its own material if it is set. Else it uses slot 0. The last step is the legacy fallback: a scene that has only slot 0 set renders as before. Equal materials merge into one output geometry. A model brush uses its "Materials" slots as before. A scene that still has a saved "Shape Material" value loses it on load. There is no migration.
+A slot uses its own material. An empty slot has no material: it uses the default material, not the material of slot 0. Equal materials merge into one output geometry. A model brush uses its "Materials" slots as before. A scene that still has a saved "Shape Material" value loses it on load. There is no migration.
 
 Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.dds`, `.bmp`, `.webp`, `.ktx`) from the resource browser onto the scene view. The default is ALL FACES of the target brush.
 
@@ -618,7 +618,7 @@ The editor has no test harness for addons. Do these checks by hand:
 28. Select "Box" in the preset combo. Push B. A `CsgBoxBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgBoxBrush".
 29. Change "Size" of the box in the inspector. The wireframe and the result change at once.
 30. Move "Corner 7" to (-1, 0.5, 0.5). The box is not valid: the wireframe goes, the result loses the brush and the log shows one warning. Set the corner back. The brush comes back.
-31. Set a material in slot 3 (+Y) of the box. Only the top face of the box gets the material. Clear slot 3. The top face uses the material of slot 0.
+31. Set a material in slot 3 (+Y) of the box. Only the top face of the box gets the material. Clear slot 3. The top face uses the default material.
 32. Select a box brush and drop a model on it. The box does not change.
 33. Select "Sphere" in the preset combo. Push B. A `CsgSphereBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgSphereBrush".
 34. Change "Radius", "Segments", "Rings" and "Smooth Normals" in the inspector. The wireframe and the result change at once. A value outside the range is clamped.
@@ -688,16 +688,16 @@ The editor has no test harness for addons. Do these checks by hand:
 98. Select box A. Drop a material on box B (not selected). Only B changes and the selection stays on A. Select A and B, then drop on A. Both change.
 99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
 100. Hold Ctrl and drop on a sphere with no selected face handle. Nothing changes and the tooltip shows "Select a face handle first".
-101. Open an old scene whose box has only slot 0 set. It renders as before. Drop a plain material. The box shows the new material on all faces.
+101. Open a scene whose box has only slot 0 set. Only the -X face shows the material. Drop a plain material. The box shows the new material on all faces.
 102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The overlay line shows "CsgCylinderBrush".
 103. Select the pyramid. Select "Cone" and push B. A cone with a smooth side appears. Select "Hex Prism" and push B. A prism with 6 flat sides appears.
 104. Select the pyramid. Set "Face Radius" off and "Start Angle" to 0. The base becomes a diamond that touches the old square in the middle of its sides. Set "Start Angle" to 45 and "Face Radius" on. The square comes back.
 105. Select the pyramid. Drag the handle "Bottom Radius +X". It stays on the face of the base. Drag "Bottom Scale". Both radii change with one ratio and the handle follows the cursor.
 106. Drag "Top Scale" of a cylinder toward its center. The top becomes an apex and the cylinder becomes a cone. Drag the handle at the apex outward. The top grows back and the handle stays under the cursor.
 107. Add a box and a pyramid on its top face (the base of the pyramid has the size of the face). The result has no gap and no open edge.
-108. Drag a material over a box and hold Alt over one face, then release Alt while the mouse stays down. The preview goes from "only that face" back to "all faces". Push Escape. The box has its original materials, also an old box with only slot 0 set.
+108. Drag a material over a box and hold Alt over one face, then release Alt while the mouse stays down. The preview goes from "only that face" back to "all faces". Push Escape. The box has its original materials, also a box with only slot 0 set.
 109. Select a box and click its +Y face handle. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
-110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials. An old box keeps its slot 0.
+110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials.
 111. Add a box with B. The view shows 6 face handles. The overlay "Shape" section shows "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29".
 112. Push M three times. The view shows the size handles, then the edges, then the corners. Push M two times more. All handles show, then the Face mode comes back.
 113. Push Shift+M. The mode "All" shows. Click a button of the mode bar. The mode changes. Drag a handle, push M during the drag. The mode does not change.

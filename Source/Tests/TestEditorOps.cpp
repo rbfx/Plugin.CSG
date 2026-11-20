@@ -1039,7 +1039,7 @@ TEST_CASE("PlanMaterialEdit All sets every slot", "[editorops][materials]")
         REQUIRE(PlanMaterialEdit(m, MaterialScope::All, 0, "S"));
         CHECK(m.slots_ == ea::vector<ea::string>(6u, ea::string("S")));
     }
-    SECTION("A legacy brush with only slot 0 set is overwritten on all slots")
+    SECTION("A brush with only slot 0 set is overwritten on all slots")
     {
         BrushMaterials m = Slots(Slots6({"A"}));
         REQUIRE(PlanMaterialEdit(m, MaterialScope::All, 0, "S"));
@@ -1069,12 +1069,21 @@ TEST_CASE("PlanMaterialEdit Slot sets one slot", "[editorops][materials]")
         CHECK(m.slots_[0] == "S");
         CHECK(m.slots_[5] == "S");
     }
-    SECTION("A legacy slot 0 edit keeps the other slots as they are")
+    SECTION("A slot 0 edit keeps the other slots empty")
     {
         BrushMaterials m = Slots(Slots6({"A"}));
         REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 0, "B"));
         CHECK(m.slots_[0] == "B");
         CHECK(m.slots_[1].empty());
+    }
+    SECTION("Alt on face 0 and on face 3 set only that slot")
+    {
+        BrushMaterials m = Slots(Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 0, "B"));
+        CHECK(m.slots_ == Slots6({"B"}));
+        m = Slots(Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 3, "C"));
+        CHECK(m.slots_ == Slots6({"", "", "", "C"}));
     }
     SECTION("An invalid slot returns false and keeps the brush")
     {
@@ -1127,7 +1136,7 @@ TEST_CASE("MaterialDropPreview keeps the original baseline when the targets chan
     Fixture f;
     EditorErrorCounter errors(f.context);
     Node* rootNode = f.MakeRoot();
-    // An old brush: only slot 0 is set. A restore to the preview state would lose it.
+    // Only slot 0 is set. A restore to the preview state would lose it.
     Node* a = MakeBox(f, rootNode, {"A", "", "", "T", "", ""});
     Node* b = MakeBox(f, rootNode, {"", "", "", "", "", ""});
     const auto originalA = GetState(a);
