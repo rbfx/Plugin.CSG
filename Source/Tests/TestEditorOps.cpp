@@ -1685,6 +1685,45 @@ TEST_CASE("PickRootSource finds the subtract brush through the cavity", "[editor
     CHECK(errors.GetCount() == 0);
 }
 
+TEST_CASE("PickRootSource gives the source operand of each union face", "[editorops][pick]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = CreateRootNode(f.scene, Vector3::ZERO);
+    REQUIRE(rootNode);
+    auto* root = rootNode->GetComponent<CsgRoot>();
+    REQUIRE(root);
+    root->SetDeferredDelaySec(0.0f);
+    const int unionOp = f.FindOperation("Union");
+    // A chain of three boxes of size 1. B overlaps A and C. B is higher than A and C.
+    Node* a = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(0.0f, 0.0f, 0.0f));
+    Node* b = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(0.75f, 0.0f, 0.25f));
+    Node* c = AddBrushNodeOfType(rootNode, "CsgBoxBrush", unionOp, Vector3(1.5f, 0.0f, 0.0f));
+    REQUIRE(a);
+    REQUIRE(b);
+    REQUIRE(c);
+    RunFrames(f.scene, 60);
+
+    const auto pick = [&](float x) { return PickRootSource(root, Ray(Vector3(x, 0, 5), Vector3(0, 0, -1))); };
+    const PickResult onA = pick(-0.3f);
+    REQUIRE(onA.hit_);
+    CHECK(onA.source_ == a->GetID());
+    const PickResult onAUnderB = pick(0.1f);
+    REQUIRE(onAUnderB.hit_);
+    CHECK(onAUnderB.source_ == a->GetID());
+    const PickResult onB = pick(0.6f);
+    REQUIRE(onB.hit_);
+    CHECK(onB.source_ == b->GetID());
+    CHECK(onB.position_.z_ > 0.7f);
+    const PickResult onBOverC = pick(1.1f);
+    REQUIRE(onBOverC.hit_);
+    CHECK(onBOverC.source_ == b->GetID());
+    const PickResult onC = pick(1.6f);
+    REQUIRE(onC.hit_);
+    CHECK(onC.source_ == c->GetID());
+    CHECK(errors.GetCount() == 0);
+}
+
 namespace
 {
 
@@ -2357,6 +2396,37 @@ TEST_CASE("DecideDrop with Ctrl gives the slot of the hit face", "[editorops][ma
     CHECK(texture.action_ == DropAction::AssignTexture);
     CHECK(texture.faceFromHit_);
     CHECK_FALSE(texture.slot_.has_value());
+}
+
+TEST_CASE("DecideDrop gives the drop to the brush under the cursor, not to the selected brush", "[editorops][material]")
+{
+    // The brush B is selected. The cursor is over a face of the brush A that is not selected.
+    DropSelection overA;
+    overA.activeIsBrush_ = overA.anySelectedBrush_ = true;
+    overA.hoveringResult_ = overA.hoverBrush_ = true;
+    overA.hoverBrushSelected_ = false;
+    overA.hoverSlot_ = 3u;
+    // The cursor is over a face of the selected brush B.
+    DropSelection overB = overA;
+    overB.hoverBrushSelected_ = true;
+    for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
+    {
+        const DropAction assign =
+            kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
+        const DropDecision plainA = DecideDrop(kind, overA, false);
+        CHECK(plainA.action_ == assign);
+        CHECK(plainA.target_ == DropTarget::Hovered);
+        CHECK(plainA.scope_ == MaterialScope::All);
+        const DropDecision plainB = DecideDrop(kind, overB, false);
+        CHECK(plainB.action_ == assign);
+        CHECK(plainB.target_ == DropTarget::Selected);
+        const DropDecision ctrlA = DecideDrop(kind, overA, true);
+        CHECK(ctrlA.target_ == DropTarget::Hovered);
+        CHECK(ctrlA.scope_ == MaterialScope::Slot);
+        CHECK(ctrlA.slot_ == 3u);
+        // Ctrl on a selected brush edits only that brush, not all selected brushes.
+        CHECK(DecideDrop(kind, overB, true).target_ == DropTarget::Hovered);
+    }
 }
 
 TEST_CASE("DescribeMaterialDrop names the mode", "[editorops][materials][ctrl]")
