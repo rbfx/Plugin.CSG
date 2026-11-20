@@ -114,7 +114,7 @@ The baselines for the float build and the double build are in the header of `Sou
 ## Components
 
 `CsgRoot` builds one `Model` from the `CsgBrush` components in its subtree. A `CsgBrush` has a model and an operation (`Union`, `DifferenceAB` or `Intersection`).
-A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`, `CsgArchBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder", "Procedural ring", "Procedural wedge", "Procedural stairs" and "Procedural arch".
+A procedural brush (`CsgBoxBrush`, `CsgSphereBrush`, `CsgCylinderBrush`, `CsgRingBrush`, `CsgWedgeBrush`, `CsgStairsBrush`, `CsgArchBrush`) generates its model from parameters. See "Procedural box", "Procedural sphere", "Procedural cylinder, cone, prism and pyramid", "Procedural ring", "Procedural wedge", "Procedural stairs" and "Procedural arch".
 The root writes the result to a `StaticModel` on the same node.
 
 - The build runs on the `WorkQueue`. The main thread applies the result. A result that is older than a later change still shows, and the root starts a new wait for the newer state. The root drops a stale result of a failed build, of a job with a model that reloaded, or when auto-apply is off.
@@ -170,9 +170,11 @@ A corner moves once by the delta, also if a corner handle and an edge handle nam
 | Box | 30 to 41 | Edges (points) at the midpoint of the 2 corners. Ids 30 to 33 are parallel to X, 34 to 37 to Y, 38 to 41 to Z. In a group the order is ascending by the bits of the other two axes (the lower axis is bit 0, 0 is the minus side). The names are "Edge X -Y -Z", "Edge X +Y -Z", "Edge X -Y +Z", "Edge X +Y +Z", then "Edge -X Y -Z" and so on. An edge moves its 2 corners by the delta. |
 | Sphere | 0 to 5 | Radius at +X, -X, +Y, -Y, +Z, -Z. The + and - handles of one axis edit one component. |
 | Cylinder | 0, 1 | Bottom center and top center (points). |
-| Cylinder | 2 to 5 | Bottom radius at +X, -X, +Z, -Z. Not offered if the bottom is an apex. |
-| Cylinder | 6 to 9 | Top radius at +X, -X, +Z, -Z. Not offered if the top is an apex. |
+| Cylinder | 2 to 5 | Bottom radius at +X, -X, +Z, -Z. On the polygon boundary along the axis. Not offered if the bottom is an apex. |
+| Cylinder | 6 to 9 | Top radius at +X, -X, +Z, -Z. On the polygon boundary along the axis. Not offered if the top is an apex. |
 | Cylinder | 10 | Bulge (axis +X at the middle of the center line). Not offered if the mean X radius is 0.001 or less. |
+| Cylinder | 11 | Bottom scale. On the bottom rim at 45 degrees in XZ. A drag scales both radii. At an apex it sits at the bottom center. |
+| Cylinder | 12 | Top scale. On the top rim at 45 degrees in XZ. A drag scales both radii. At an apex it sits at the top center. |
 | Ring | 0 | Major radius (axis +X). |
 | Ring | 1 | Radial tube radius (axis +X). |
 | Ring | 2 | Axial tube radius (axis +Y). |
@@ -279,6 +281,9 @@ The toolbar combo in front of the "add" buttons selects the shape of a new brush
 - `Box`: a procedural `CsgBoxBrush`. It has no model file.
 - `Sphere`: a procedural `CsgSphereBrush`. It has no model file.
 - `Cylinder`: a procedural `CsgCylinderBrush`. It has no model file.
+- `Cone`: a `CsgCylinderBrush` with the top radius (0, 0). The side is smooth, as in the cylinder.
+- `Pyramid`: a `CsgCylinderBrush` with 4 segments, "Start Angle" 45, "Face Radius" on, the top radius (0, 0) and flat normals. The base is a square of the size (2 * radius x, 2 * radius z).
+- `Hex Prism`: a `CsgCylinderBrush` with 6 segments and flat normals.
 - `Ring`: a procedural `CsgRingBrush`. It has no model file.
 - `Wedge`: a procedural `CsgWedgeBrush`. It has no model file.
 - `Stairs`: a procedural `CsgStairsBrush`. It has no model file.
@@ -316,9 +321,9 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - The mesh is a polyhedron that is inscribed in the ellipsoid. Its volume is a little less than the ellipsoid volume.
 - A value that is not finite gets its default value. The parameters are always valid after clamping.
 
-### Procedural cylinder
+### Procedural cylinder, cone, prism and pyramid
 
-`CsgCylinderBrush` generates a cylinder, a cone or a frustum from parameters. It has no "Model" attribute. See `CsgGenerateCylinder`.
+`CsgCylinderBrush` generates a cylinder, a cone, a frustum, a prism or a pyramid from parameters. It is one class: the "Segments", "Start Angle" and "Face Radius" attributes and the radius pair give each shape. It has no "Model" attribute. See `CsgGenerateCylinder`.
 
 - "Bottom Center" and "Top Center": the ends of the axis, in local space. Each component is in [-16384, 16384]. The defaults are (0, -0.5, 0) and (0, 0.5, 0). The axis can be sheared or tilted.
 - "Bottom Radius" and "Top Radius": the two radii of an end along the local X and Z axes. The end lies in the plane perpendicular to the Y axis, not to the tilted axis. Each component is in [0, 16384]. The default is (0.5, 0.5).
@@ -326,6 +331,10 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - "Segments": 3 to 128. The default is 24. "Height Segments": 1 to 64. The default is 1.
 - "Bulge": from -0.95 to 4. The default is 0. The radius at the height fraction t is lerp(bottom, top, t) * (1 + bulge * 4 * t * (1 - t)). The center line stays straight.
 - "Smooth Normals": the default is on. Off gives a flat normal for each triangle. A cap normal is always flat.
+- "Start Angle": the angle of the first vertex around the Y axis, in degrees. The default is 0. A value is wrapped into [0, 360). Vertex k is at 2pi * k / n + the start angle. A value that is not finite gives 0. A scene without this attribute loads with 0.
+- "Face Radius": the default is off. Off: the radii reach the corners of the polygon. On: the radii reach the middle of each side face. The polygon has the apothem 1 and the radius pair scales it. The corner distance is then 1 / cos(pi / n). The area of the end is n * tan(pi / n) * rx * rz. A scene without this attribute loads with off.
+- The default values (start 0, no face radius) give the same positions as before, bit for bit.
+- Shapes: Cone = top radius (0, 0). Frustum = different radii. Hex prism = 6 segments. Pyramid = 4 segments, "Start Angle" 45, "Face Radius" on and one end radius (0, 0). A pyramid with the base radius (rx, rz) has the base corners at (+-rx, +-rz). The base is flush with a box of the size (2 * rx, 2 * rz). The volume is 4 * rx * rz * height / 3.
 - "Materials": three slots, in this order: 0 the side, 1 the top cap, 2 the bottom cap. An apex end has no cap, and its slot stays free. The other slots keep their numbers.
 - UV 0 of the side is (angle / 2pi, height fraction). UV 0 of a cap is the planar (x + 0.5, z + 0.5). UV 1 is equal to UV 0.
 - Validity: the centers must be at least 0.001 apart, and also at least 0.001 apart in Y. A horizontal axis is not valid. Both ends must not be apexes. The volume must be positive. A shape that is not valid gives no operand and logs one warning.
@@ -504,7 +513,7 @@ The handles of each shape:
 | --- | --- |
 | Box | 8 corners (points), 6 faces (axes) and 12 edges (points): 26 handles. A face moves its 4 corners. An edge moves its 2 corners. |
 | Sphere | 6 radii (axes) at +X, -X, +Y, -Y, +Z and -Z. |
-| Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes) and the bulge (axis). A radius at an apex and a bulge on a thin body are not offered. |
+| Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes), the bulge (axis) and the bottom and top scale (axes). A radius at an apex and a bulge on a thin body are not offered. A radius handle sits on the polygon boundary: a drag divides the move by the ray distance k. |
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
 | Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. |
 | Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. |
@@ -635,6 +644,12 @@ The editor has no test harness for addons. Do these checks by hand:
 99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
 100. Hold Ctrl and drop on a sphere with no selected face handle. Nothing changes and the tooltip shows "Select a face handle first".
 101. Open an old scene whose box has only slot 0 set. It renders as before. Drop a plain material. The box shows the new material on all faces.
+102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The overlay line shows "CsgCylinderBrush".
+103. Select the pyramid. Select "Cone" and push B. A cone with a smooth side appears. Select "Hex Prism" and push B. A prism with 6 flat sides appears.
+104. Select the pyramid. Set "Face Radius" off and "Start Angle" to 0. The base becomes a diamond that touches the old square in the middle of its sides. Set "Start Angle" to 45 and "Face Radius" on. The square comes back.
+105. Select the pyramid. Drag the handle "Bottom Radius +X". It stays on the face of the base. Drag "Bottom Scale". Both radii change with one ratio and the handle follows the cursor.
+106. Drag "Top Scale" of a cylinder toward its center. The top becomes an apex and the cylinder becomes a cone. Drag the handle at the apex outward. The top grows back and the handle stays under the cursor.
+107. Add a box and a pyramid on its top face (the base of the pyramid has the size of the face). The result has no gap and no open edge.
 
 ## How to try the sample scene
 
