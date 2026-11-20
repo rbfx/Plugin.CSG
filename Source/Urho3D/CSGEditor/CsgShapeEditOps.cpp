@@ -11,6 +11,8 @@
 #include <Urho3D/Scene/Component.h>
 #include <Urho3D/Scene/Node.h>
 
+#include <EASTL/sort.h>
+
 #include <cmath>
 
 namespace Urho3D
@@ -96,6 +98,111 @@ ShapeHandleSet QueryShapeHandles(Component* brush)
     }
     result.groups_ = ParseHandleGroups(eventData[P_GROUPS]);
     return result;
+}
+
+ea::vector<ea::string> GetHandleModes(const ShapeHandleSet& set)
+{
+    ea::vector<ea::string> modes;
+    if (set.groups_.size() < 2)
+        return modes;
+    modes = set.groups_;
+    modes.push_back(HandleModeAll);
+    return modes;
+}
+
+ea::string ResolveHandleMode(const ea::vector<ea::string>& modes, const ea::string& remembered)
+{
+    if (modes.empty())
+        return {};
+    return ea::find(modes.begin(), modes.end(), remembered) != modes.end() ? remembered : modes.front();
+}
+
+ea::string CycleHandleMode(const ea::vector<ea::string>& modes, const ea::string& current, int step)
+{
+    if (modes.empty())
+        return {};
+    const int count = static_cast<int>(modes.size());
+    const auto iter = ea::find(modes.begin(), modes.end(), current);
+    const int index = iter != modes.end() ? static_cast<int>(iter - modes.begin()) : 0;
+    return modes[(((index + step) % count) + count) % count];
+}
+
+ea::vector<ShapeHandle> FilterHandlesByMode(const ea::vector<ShapeHandle>& handles, const ea::string& mode)
+{
+    if (mode.empty() || mode == HandleModeAll)
+        return handles;
+    ea::vector<ShapeHandle> result;
+    for (const ShapeHandle& handle : handles)
+    {
+        if (handle.group_ == mode)
+            result.push_back(handle);
+    }
+    return result;
+}
+
+ea::string FormatHandleModesIni(const ea::unordered_map<ea::string, ea::string>& modes)
+{
+    ea::vector<ea::pair<ea::string, ea::string>> entries;
+    for (const auto& [type, mode] : modes)
+    {
+        if (!type.empty() && !mode.empty())
+            entries.emplace_back(type, mode);
+    }
+    ea::sort(entries.begin(), entries.end());
+    ea::string result;
+    for (const auto& [type, mode] : entries)
+    {
+        if (!result.empty())
+            result += ';';
+        result += type + "=" + mode;
+    }
+    return result;
+}
+
+ea::unordered_map<ea::string, ea::string> ParseHandleModesIni(const ea::string& text)
+{
+    ea::unordered_map<ea::string, ea::string> result;
+    unsigned start = 0;
+    while (start <= text.size())
+    {
+        unsigned end = text.find(';', start);
+        if (end == ea::string::npos)
+            end = text.size();
+        const ea::string entry = text.substr(start, end - start);
+        const unsigned equals = entry.find('=');
+        if (equals != ea::string::npos)
+        {
+            const ea::string type = entry.substr(0, equals).trimmed();
+            const ea::string mode = entry.substr(equals + 1).trimmed();
+            if (!type.empty() && !mode.empty())
+                result[type] = mode;
+        }
+        start = end + 1;
+    }
+    return result;
+}
+
+void HandleSelectionParking::Switch(ea::vector<unsigned>& active, const ea::string& from, const ea::string& to)
+{
+    if (from == to)
+        return;
+    if (active.empty())
+        parked_.erase(from);
+    else
+        parked_[from] = active;
+    active.clear();
+    const auto iter = parked_.find(to);
+    if (iter != parked_.end())
+    {
+        active = iter->second;
+        parked_.erase(iter);
+    }
+}
+
+const ea::vector<unsigned>* HandleSelectionParking::Find(const ea::string& mode) const
+{
+    const auto iter = parked_.find(mode);
+    return iter != parked_.end() ? &iter->second : nullptr;
 }
 
 bool MoveShapeHandles(Component* brush, const ea::vector<unsigned>& ids, const Vector3& localDelta)

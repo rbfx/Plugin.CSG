@@ -14,6 +14,7 @@
 #include <Urho3D/Container/Str.h>
 
 #include <EASTL/optional.h>
+#include <EASTL/unordered_map.h>
 #include <EASTL/utility.h>
 #include <EASTL/vector.h>
 
@@ -61,6 +62,45 @@ inline constexpr float HandlePickTieEpsilon = 1.0f;
 bool IsShapeBrush(Component* component);
 /// Return the first shape brush component of the node, or null.
 Component* FindShapeBrush(Node* node);
+
+/// The name of the mode that shows all handles. The editor adds it. A shape does not declare it.
+inline const char* const HandleModeAll = "All";
+
+/// Return the modes of a handle set: the groups in order, then "All".
+/// Return an empty list if the set has fewer than 2 groups. Then the editor shows all handles and no mode bar.
+ea::vector<ea::string> GetHandleModes(const ShapeHandleSet& set);
+/// Return the remembered mode if it is in the list. Otherwise return the first mode (the default).
+/// An empty list gives an empty string.
+ea::string ResolveHandleMode(const ea::vector<ea::string>& modes, const ea::string& remembered);
+/// Return the mode `step` places after the current one. The list wraps in both directions.
+/// "All" is the last one. An unknown current mode counts as the first mode. An empty list gives an empty string.
+ea::string CycleHandleMode(const ea::vector<ea::string>& modes, const ea::string& current, int step);
+/// Return the handles of the mode. An empty mode or "All" gives all handles. Otherwise only the handles
+/// with this group stay, in the same order.
+ea::vector<ShapeHandle> FilterHandlesByMode(const ea::vector<ShapeHandle>& handles, const ea::string& mode);
+/// Write the modes of the shape types: "CsgBoxBrush=Face;CsgCylinderBrush=Ends". The order is by type name.
+/// An entry with an empty name or an empty mode is skipped.
+ea::string FormatHandleModesIni(const ea::unordered_map<ea::string, ea::string>& modes);
+/// Read the text of `FormatHandleModesIni`. An entry that is not "type=mode" with two non-empty parts is skipped.
+ea::unordered_map<ea::string, ea::string> ParseHandleModesIni(const ea::string& text);
+
+/// The selected handles that the editor parks while another mode is active. Each mode has its own list.
+/// The class uses no ImGui. The active list stays in the caller.
+class HandleSelectionParking
+{
+public:
+    /// Park the active list under `from` and load the list of `to` into `active`.
+    /// The list of `to` leaves the parking. A switch to the same mode does nothing.
+    void Switch(ea::vector<unsigned>& active, const ea::string& from, const ea::string& to);
+    /// Forget all parked lists. The active list stays in the caller.
+    void Clear() { parked_.clear(); }
+    /// Return the parked list of the mode, or null.
+    const ea::vector<unsigned>* Find(const ea::string& mode) const;
+    unsigned GetCount() const { return parked_.size(); }
+
+private:
+    ea::unordered_map<ea::string, ea::vector<unsigned>> parked_;
+};
 
 /// Query the handles of the brush with the event E_CSGSHAPEQUERYHANDLES.
 ShapeHandleSet QueryShapeHandles(Component* brush);

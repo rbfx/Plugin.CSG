@@ -2172,3 +2172,138 @@ TEST_CASE("QueryRootStats reads the root and formats the overlay line", "[editor
     Node* brushNode = GetOperands(rootNode)[0];
     CHECK(!QueryRootStats(FindBrushComponent(brushNode), stats));
 }
+
+TEST_CASE("Handle modes cycle in both directions and All is last", "[editorops][modes]")
+{
+    const ea::vector<ea::string> modes = {"Face", "Size", "Edge", "Corner", "All"};
+    CHECK(CycleHandleMode(modes, "Face", 1) == "Size");
+    CHECK(CycleHandleMode(modes, "Corner", 1) == "All");
+    CHECK(CycleHandleMode(modes, "All", 1) == "Face");
+    CHECK(CycleHandleMode(modes, "Face", -1) == "All");
+    CHECK(CycleHandleMode(modes, "All", -1) == "Corner");
+    CHECK(CycleHandleMode(modes, "Size", -1) == "Face");
+    CHECK(CycleHandleMode(modes, "Unknown", 1) == "Size");
+    CHECK(CycleHandleMode(modes, "Face", 10) == "Face");
+    CHECK(CycleHandleMode({}, "Face", 1).empty());
+}
+
+TEST_CASE("An unknown remembered mode gives the default", "[editorops][modes]")
+{
+    const ea::vector<ea::string> modes = {"Ends", "Radius", "All"};
+    CHECK(ResolveHandleMode(modes, "Radius") == "Radius");
+    CHECK(ResolveHandleMode(modes, "All") == "All");
+    CHECK(ResolveHandleMode(modes, "Face") == "Ends");
+    CHECK(ResolveHandleMode(modes, "") == "Ends");
+    CHECK(ResolveHandleMode({}, "Face").empty());
+}
+
+TEST_CASE("The handle modes ini text round trips and skips bad entries", "[editorops][modes]")
+{
+    ea::unordered_map<ea::string, ea::string> modes;
+    modes["CsgCylinderBrush"] = "Ends";
+    modes["CsgBoxBrush"] = "Face";
+    const ea::string text = FormatHandleModesIni(modes);
+    CHECK(text == "CsgBoxBrush=Face;CsgCylinderBrush=Ends");
+    CHECK(ParseHandleModesIni(text) == modes);
+    CHECK(ParseHandleModesIni("").empty());
+
+    const auto parsed = ParseHandleModesIni("bad;=Face;CsgBoxBrush=;;CsgRingBrush=Shape;x=y=z;CsgWedgeBrush=Size");
+    CHECK(parsed.size() == 3);
+    CHECK(parsed.at("CsgRingBrush") == "Shape");
+    CHECK(parsed.at("CsgWedgeBrush") == "Size");
+    CHECK(parsed.at("x") == "y=z");
+
+    ea::unordered_map<ea::string, ea::string> bad;
+    bad[""] = "Face";
+    bad["CsgBoxBrush"] = "";
+    CHECK(FormatHandleModesIni(bad).empty());
+}
+
+TEST_CASE("Handle modes count the handles of a box and filter them", "[editorops][modes]")
+{
+    Fixture f;
+    const ShapeHandleSet set = QueryShapeHandles(AddShapeBrush<CsgBoxBrush>(f));
+    REQUIRE(set.valid_);
+    const ea::vector<ea::string> modes = GetHandleModes(set);
+    CHECK(modes == ea::vector<ea::string>{"Face", "Size", "Edge", "Corner", "All"});
+    CHECK(FilterHandlesByMode(set.handles_, "Face").size() == 6);
+    CHECK(FilterHandlesByMode(set.handles_, "Size").size() == 3);
+    CHECK(FilterHandlesByMode(set.handles_, "Edge").size() == 12);
+    CHECK(FilterHandlesByMode(set.handles_, "Corner").size() == 8);
+    CHECK(FilterHandlesByMode(set.handles_, "All").size() == 29);
+    CHECK(FilterHandlesByMode(set.handles_, "").size() == 29);
+    CHECK(FilterHandlesByMode(set.handles_, "Nothing").empty());
+    for (const ShapeHandle& handle : FilterHandlesByMode(set.handles_, "Size"))
+        CHECK(handle.id_ >= 50);
+
+    // A face click in the Size mode picks the size handle. The Corner and Edge modes have no axis handle.
+    const Vector3 normal(0, 1, 0);
+    const Vector3 point(0.1f, 0.5f, 0.1f);
+    CHECK(*ChooseFaceHandle(FilterHandlesByMode(set.handles_, "Size"), point, normal) == 51);
+    CHECK(*ChooseFaceHandle(FilterHandlesByMode(set.handles_, "Face"), point, normal) == 23);
+    CHECK(*ChooseFaceHandle(set.handles_, point, normal) == 23);
+    CHECK_FALSE(ChooseFaceHandle(FilterHandlesByMode(set.handles_, "Corner"), point, normal));
+    CHECK_FALSE(ChooseFaceHandle(FilterHandlesByMode(set.handles_, "Edge"), point, normal));
+}
+
+TEST_CASE("A shape with one group and a reply without groups show no modes", "[editorops][modes]")
+{
+    Fixture f;
+    const ShapeHandleSet sphere = QueryShapeHandles(AddShapeBrush<CsgSphereBrush>(f));
+    REQUIRE(sphere.valid_);
+    CHECK(sphere.groups_.size() == 1);
+    CHECK(GetHandleModes(sphere).empty());
+    CHECK(FilterHandlesByMode(sphere.handles_, "").size() == sphere.handles_.size());
+
+    // An old runtime sends no groups and no Group keys.
+    ShapeHandleSet old = QueryShapeHandles(AddShapeBrush<CsgBoxBrush>(f));
+    old.groups_.clear();
+    for (ShapeHandle& handle : old.handles_)
+        handle.group_.clear();
+    CHECK(GetHandleModes(old).empty());
+    CHECK(ResolveHandleMode(GetHandleModes(old), "Face").empty());
+    CHECK(FilterHandlesByMode(old.handles_, ResolveHandleMode(GetHandleModes(old), "Face")).size() == 29);
+}
+
+TEST_CASE("The handle selection is parked for each mode", "[editorops][modes]")
+{
+    HandleSelectionParking parking;
+    ea::vector<unsigned> active = {21, 23};
+
+    // Face to Corner: the face list parks. The corner list is empty.
+    parking.Switch(active, "Face", "Corner");
+    CHECK(active.empty());
+    REQUIRE(parking.Find("Face"));
+    CHECK(*parking.Find("Face") == ea::vector<unsigned>{21, 23});
+
+    // Select a corner. Corner to Face: the face list comes back and the corner list parks.
+    active = {3};
+    parking.Switch(active, "Corner", "Face");
+    CHECK(active == ea::vector<unsigned>{21, 23});
+    CHECK(parking.Find("Face") == nullptr);
+    REQUIRE(parking.Find("Corner"));
+    CHECK(*parking.Find("Corner") == ea::vector<unsigned>{3});
+
+    // The same mode does nothing.
+    parking.Switch(active, "Face", "Face");
+    CHECK(active == ea::vector<unsigned>{21, 23});
+
+    // Escape clears only the active list. The parked list stays.
+    active.clear();
+    CHECK(parking.GetCount() == 1);
+    parking.Switch(active, "Face", "Corner");
+    CHECK(active == ea::vector<unsigned>{3});
+
+    // An empty active list parks nothing.
+    active.clear();
+    parking.Switch(active, "Corner", "Edge");
+    CHECK(parking.GetCount() == 0);
+
+    // A new active brush clears all.
+    active = {1};
+    parking.Switch(active, "Edge", "Face");
+    CHECK(parking.GetCount() == 1);
+    parking.Clear();
+    CHECK(parking.GetCount() == 0);
+    CHECK(parking.Find("Edge") == nullptr);
+}
