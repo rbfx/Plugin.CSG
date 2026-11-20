@@ -464,16 +464,23 @@ Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.d
 
 | Modifier | Scope |
 | --- | --- |
-| none | Set the shape material. The face overrides stay. |
+| none | Set the shape material: all faces that have no override get it. The face overrides stay. |
+| Alt | Set the override of only the face under the cursor. Alt wins over Ctrl and Shift. |
 | Shift | Set the shape material and clear all face overrides. |
-| Ctrl | Set the override of one face. Ctrl wins over Shift. |
+| Ctrl | Set the override of the face of the selected face handle. Ctrl wins over Shift. |
+
+The hint line of the drag shows the mode: "Drop: all unassigned faces", "Alt: only face <name>", "Shift: all faces, clear face overrides", "Ctrl: only the selected face". With Alt and no face under the cursor, the hint is "No face under the cursor" and nothing changes. The face names: box Left, Right, Bottom, Top, Back, Front (slots 0 to 5); cylinder Side, Top, Bottom; ring Outer, Inner, Top, Bottom, Start cap, End cap; wedge Bottom, Back, Slope, Left, Right; stairs Treads, Risers, Sides, Bottom, Back; arch Outer, Inner, Front, Back, Ends; sphere Surface.
+
+The face under the cursor comes from the event `E_CSGSHAPEQUERYSLOT` (see CsgShapeProtocol.h). The editor picks the brush with `E_CSGROOTPICK`, converts the hit to the local space of the brush and sends the query. The brush finds the nearest triangle whose normal fits (|dot| > 0.9). The preview shows the new material on the target face at once. There is no outline of the face yet. Alt can also toggle the menu bar navigation of ImGui in some builds. A drag has no click, so this does not change the drop.
+
+Drag ownership: the scene view gives a whole drag to ONE addon, chosen on the first frame. The stock material handler takes any material drag. So the CSG addon takes a material drag at once if the scene has a CSG root. It decides the target again in each frame and at the drop. A material over a geometry that is not a CSG result is set on that geometry, as the stock handler does. Brush nodes do not hide the result under the cursor.
 
 Targets:
 
 - The cursor is over the CSG result of any root, and the brush under the cursor is selected: all selected brushes get the edit.
 - The brush under the cursor is not selected: only that brush gets the edit. The selection does not change.
 - The cursor is over a result but no brush made the face (the base model, or a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
-- The cursor is not over a result: a texture goes to the selected brushes. A material goes to the stock editor handler, which assigns it to the geometry under the cursor. Only a CSG root is selected, with no brush: a texture drop shows "Select a brush to assign a material" and does nothing.
+- The cursor is not over a result: a texture goes to the selected brushes. A material is set on the geometry under the cursor, as the stock editor handler does. Only a CSG root is selected, with no brush: a texture drop shows "Select a brush to assign a material" and does nothing.
 - The target is found each frame. If the cursor goes off a result during a drag, the preview goes and the release changes nothing.
 
 Ctrl (face) in phase 1: the addon cannot find the face under the cursor yet. It uses the face handle that the last click selected on the brush. The face handle gives the slot through the face-group order. The box maps its face handles 20 to 25 to the slots 0 to 5. The other shapes have no mapping yet. With no mapping or no selected face handle, Ctrl changes nothing. The tooltip shows "Select a face handle first" and the log has the same hint once for each drag. A Ctrl drop edits only the brush with the selected face handle.
@@ -482,11 +489,11 @@ An old brush (no shape material, slot 0 set) changes on the first write: slot 0 
 
 A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
 
-During the drag, the tooltip shows "Drop: shape material. Ctrl: selected face only. Shift: shape material and clear face overrides." A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step, also when both attributes change.
+During the drag, the tooltip shows the hint line of the mode and one line with the modifiers. A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step, also when both attributes change.
 
 The "Shape" section of the overlay of the active procedural brush shows "Shape material: <name or none>" and "Face overrides: <n> (<names>)". The button "Clear face overrides" clears the overrides and keeps the shape material. It is one undo step.
 
-Phase 2 (later): find the face under the cursor, an outline of the target, an eyedropper, and drop targets on the overlay rows.
+Later: an outline of the target face, an eyedropper, and drop targets on the overlay rows.
 
 The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the texture projection. See "UV projection".
 
@@ -727,6 +734,11 @@ popd
 # 1. Load the plugin
 # 2. Open Data/Scenes/CsgShowcase.scene
 ```
+
+122. Drag a material from the resource browser into the view. Start over empty space, then move over a procedural box (also a subtract box, with another node selected). The box shows the material at once on all faces with no override. Drop. The material stays. Push Ctrl+Z. The old state comes back.
+123. Repeat check 122 and hold Alt over the top face. Only the top face shows the material and the hint shows "Alt: only face Top". Move to the front face. The top face goes back and the front face changes. Release Alt. The whole box shows the material again. Push Escape. The box has its original materials.
+124. Hold Alt and drop on a face. Push Ctrl+Z. Only that face goes back. Hold Alt and aim at the empty space beside a result face: the hint shows "No face under the cursor" and the drop changes nothing.
+125. Drag a material over a normal model (not CSG) in a scene that has a CSG root. The model shows the material. Drop. Push Ctrl+Z. The old material comes back.
 
 ## Screenshots
 
