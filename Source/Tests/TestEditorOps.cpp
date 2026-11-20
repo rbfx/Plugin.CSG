@@ -972,6 +972,49 @@ TEST_CASE("DecideDrop target follows the brush under the cursor", "[editorops][m
     }
 }
 
+TEST_CASE("DecideDrop targets the base model of the root", "[editorops][material]")
+{
+    // The floor of a root with no brush on it: the pick gives source 0 on the base model.
+    DropSelection base;
+    base.hoveringResult_ = base.hoverBase_ = true;
+    DropDecision decision = DecideDrop(DropPayloadKind::Material, base, false);
+    CHECK(decision.action_ == DropAction::AssignMaterial);
+    CHECK(decision.scope_ == MaterialScope::All);
+    CHECK_FALSE(decision.faceFromHit_);
+    CHECK(DecideDrop(DropPayloadKind::Texture, base, false).action_ == DropAction::AssignTexture);
+
+    // Ctrl gives the slot of the base geometry under the cursor.
+    base.hoverSlot_ = 0u;
+    decision = DecideDrop(DropPayloadKind::Material, base, true);
+    CHECK(decision.action_ == DropAction::AssignMaterial);
+    CHECK(decision.faceFromHit_);
+    REQUIRE(decision.slot_);
+    CHECK(*decision.slot_ == 0u);
+}
+
+TEST_CASE("The material edit and the preview write the base materials of a root", "[editorops][materials]")
+{
+    // The root loads its materials at once. The test has no material files, so no error count here.
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    Component* root = GetMaterialOwner(rootNode);
+    REQUIRE(root);
+    CHECK(root == rootNode->GetComponent<CsgRoot>());
+    root->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), {"Materials/Old.xml"}));
+    const Variant original = root->GetAttribute("Materials");
+
+    MaterialDropPreview preview;
+    preview.SetTargets({rootNode}, MaterialScope::All, 0);
+    REQUIRE(preview.GetEntries().size() == 1);
+    preview.Apply("Materials/New.xml");
+    CHECK(root->GetAttribute("Materials").GetResourceRefList().names_ == StringVector{"Materials/New.xml"});
+    preview.Clear();
+    CHECK(root->GetAttribute("Materials") == original);
+
+    CHECK(EditBrushMaterial(rootNode, MaterialScope::Slot, 0, "Materials/Slot.xml"));
+    CHECK(root->GetAttribute("Materials").GetResourceRefList().names_ == StringVector{"Materials/Slot.xml"});
+}
+
 TEST_CASE("DecideDrop away from a result", "[editorops][material]")
 {
     DropSelection brush;

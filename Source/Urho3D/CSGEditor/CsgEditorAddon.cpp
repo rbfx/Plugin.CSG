@@ -20,6 +20,7 @@
 #include <Urho3D/Graphics/Camera.h>
 #include <Urho3D/Graphics/DebugRenderer.h>
 #include <Urho3D/Graphics/Drawable.h>
+#include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Graphics/Material.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/StaticModel.h>
@@ -321,6 +322,52 @@ const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
 }
 
 bool IsCtrlDown() { return ui::IsKeyDown(KEY_LCTRL) || ui::IsKeyDown(KEY_RCTRL); }
+
+/// Return the slot of the base model geometry at the pick position of the root, or none.
+/// The geometry with the hit nearest to the pick position wins.
+ea::optional<unsigned> FindBaseSlotForHit(Context* context, Component* root, const Ray& worldRay, const Vector3& worldPosition)
+{
+    const Variant value = root ? root->GetAttribute("Model") : Variant::EMPTY;
+    if (value.GetType() != VAR_RESOURCEREF || value.GetResourceRef().name_.empty())
+        return ea::nullopt;
+    auto model = context->GetSubsystem<ResourceCache>()->GetResource<Model>(value.GetResourceRef().name_);
+    if (!model)
+        return ea::nullopt;
+
+    const Matrix3x4 toLocal = root->GetNode()->GetWorldTransform().Inverse();
+    const Ray localRay = worldRay.Transformed(toLocal);
+    const float pickDistance = ((toLocal * worldPosition) - localRay.origin_).Length();
+    ea::optional<unsigned> best;
+    float bestError = M_INFINITY;
+    for (unsigned index = 0; index < model->GetNumGeometries(); ++index)
+    {
+        const Geometry* geometry = model->GetGeometry(index, 0);
+        const float distance = geometry ? geometry->GetHitDistance(localRay) : M_INFINITY;
+        if (distance == M_INFINITY)
+            continue;
+        const float error = Abs(distance - pickDistance);
+        if (error < bestError)
+        {
+            bestError = error;
+            best = index;
+        }
+    }
+    return best;
+}
+
+/// Show the drop hint in its own tooltip window. A tooltip of the drop target is hidden when the
+/// drag source draws its label later in the frame. A window with its own name stays visible.
+void ShowDropHint(const char* text)
+{
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_Tooltip | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoTitleBar
+        | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings
+        | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoFocusOnAppearing;
+    // The label of the drag source is near the cursor. The hint is below it.
+    ui::SetNextWindowPos(ui::GetIO().MousePos + ImVec2(16.0f, 44.0f));
+    if (ui::Begin("##CsgDropHint", nullptr, flags))
+        ui::TextUnformatted(text);
+    ui::End();
+}
 
 } // namespace
 
@@ -934,7 +981,21 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
                 diag += Format(" root={} pickHit={} source={} brush={} brushParentIsRoot={} isBrush={}", rootNode->GetName(),
                     pick.hit_, pick.source_, brushNode ? brushNode->GetName() : ea::string("none"),
                     brushNode && brushNode->GetParent() == rootNode, brushNode && IsBrushNode(brushNode));
-                if (brushNode && brushNode->GetParent() == rootNode && IsBrushNode(brushNode))
+                Component* rootComponent = rootNode->GetComponent(StringHash("CsgRoot"));
+                if (pick.hit_ && pick.source_ == 0 && rootComponent
+                    && rootComponent->GetAttribute("Materials").GetType() == VAR_RESOURCEREFLIST)
+                {
+                    // The face is on the base model of the root. The root owns its materials.
+                    selection.hoverBase_ = true;
+                    evaluation.hoverBrushNode_ = rootNode;
+                    if (IsCtrlDown())
+                    {
+                        selection.hoverSlot_ = FindBaseSlotForHit(context_, rootComponent, page.cameraRay_, pick.position_);
+                        if (selection.hoverSlot_)
+                            evaluation.hoverFaceName_ = Format("base {}", *selection.hoverSlot_);
+                    }
+                }
+                else if (brushNode && brushNode->GetParent() == rootNode && IsBrushNode(brushNode))
                 {
                     selection.hoverBrush_ = true;
                     evaluation.hoverBrushNode_ = brushNode;
@@ -956,8 +1017,8 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
     evaluation.decision_ = DecideDrop(kind, selection, IsCtrlDown());
     if (!diag.empty())
     {
-        diag += Format(" hovering={} hoverBrush={} ctrl={} action={} scope={}", selection.hoveringResult_,
-            selection.hoverBrush_, IsCtrlDown(), static_cast<int>(evaluation.decision_.action_),
+        diag += Format(" hovering={} hoverBrush={} hoverBase={} ctrl={} action={} scope={}", selection.hoveringResult_,
+            selection.hoverBrush_, selection.hoverBase_, IsCtrlDown(), static_cast<int>(evaluation.decision_.action_),
             static_cast<int>(evaluation.decision_.scope_));
         if (diag != lastDropLog_)
         {
@@ -1163,10 +1224,9 @@ void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
         if (dropPage_)
             RefreshDropTargets(*dropPage_);
         if (stockPreview_.drawable_)
-            ui::SetTooltip("Drop: set the material of the geometry");
+            ShowDropHint("Drop: set the material of the geometry");
         else
-            ui::SetTooltip("%s\nCtrl: only the face under the cursor.",
-                dropHint_.c_str());
+            ShowDropHint(Format("{}\nCtrl: only the face under the cursor.", dropHint_).c_str());
     }
 }
 

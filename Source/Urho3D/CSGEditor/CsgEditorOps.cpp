@@ -447,7 +447,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
         result.scope_ = ctrl ? MaterialScope::Slot : MaterialScope::All;
         if (selection.hoveringResult_)
         {
-            if (!selection.hoverBrush_)
+            if (!selection.hoverBrush_ && !selection.hoverBase_)
             {
                 result.action_ = DropAction::HintNoBrush;
                 break;
@@ -532,9 +532,16 @@ ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsi
     return ea::nullopt;
 }
 
+Component* GetMaterialOwner(Node* node)
+{
+    // A root node gives the materials of its base model.
+    Component* component = GetBrushComponent(node);
+    return component ? component : GetRootComponent(node);
+}
+
 bool ReadBrushMaterials(Node* brush, BrushMaterials& materials)
 {
-    Component* component = GetBrushComponent(brush);
+    Component* component = GetMaterialOwner(brush);
     ResourceRefList list;
     if (!ReadMaterialList(component, list))
         return false;
@@ -545,7 +552,7 @@ bool ReadBrushMaterials(Node* brush, BrushMaterials& materials)
 
 bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea::string& material)
 {
-    Component* component = GetBrushComponent(brush);
+    Component* component = GetMaterialOwner(brush);
     BrushMaterials before;
     if (!ReadBrushMaterials(brush, before))
         return false;
@@ -570,7 +577,7 @@ void MaterialDropPreview::SetTargets(const ea::vector<Node*>& brushes, MaterialS
     slot_ = slot;
     for (Node* node : brushes)
     {
-        Component* component = GetBrushComponent(node);
+        Component* component = GetMaterialOwner(node);
         ResourceRefList list;
         if (!ReadMaterialList(component, list))
             continue;
@@ -625,7 +632,7 @@ bool MaterialDropPreview::Matches(const ea::vector<Node*>& brushes, MaterialScop
     ea::vector<Component*> components;
     for (Node* node : brushes)
     {
-        Component* component = GetBrushComponent(node);
+        Component* component = GetMaterialOwner(node);
         ResourceRefList list;
         if (ReadMaterialList(component, list))
             components.push_back(component);

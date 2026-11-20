@@ -147,6 +147,8 @@ struct DropSelection
     bool hoveringResult_{};
     /// The pick found a brush of that root under the cursor. False for source 0 or a missing node.
     bool hoverBrush_{};
+    /// The pick found the base model of that root (source 0) and the root has a material list.
+    bool hoverBase_{};
     /// The material slot of the face under the cursor, from the slot query. Only needed with Ctrl.
     ea::optional<unsigned> hoverSlot_;
 };
@@ -162,7 +164,7 @@ enum class DropAction
     AssignMaterial,
     /// Make a material for the texture and set it on the target brushes.
     AssignTexture,
-    /// The cursor is over a result but no brush made the face. The hint is shown and nothing changes.
+    /// The cursor is over a result but no brush and no base model made the face. The hint is shown and nothing changes.
     HintNoBrush,
 };
 
@@ -295,9 +297,12 @@ private:
 /// Only the box has one: the face handles 20 to 25 are the face groups 0 to 5 (id minus 20).
 ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsigned handleId);
 
-/// Read the materials of the brush node. Return false if the node has no brush or no material list.
+/// Return the component that owns the material list of the node: the brush, else the root (its base model).
+Component* GetMaterialOwner(Node* node);
+/// Read the materials of the brush node or of the base model of a root node.
+/// Return false if the node has no brush, no root or no material list.
 bool ReadBrushMaterials(Node* brush, BrushMaterials& materials);
-/// Plan the edit on the attributes of the brush node and write the attribute "Materials".
+/// Plan the edit on the attributes of the brush node or root node and write the attribute "Materials".
 /// Return true if an attribute changed. Return false with no change for an invalid edit.
 bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea::string& material);
 
