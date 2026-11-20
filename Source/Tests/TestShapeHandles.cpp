@@ -171,7 +171,7 @@ TEST_CASE("The box brush has 8 corner handles and 6 face handles with stable ids
 {
     HandleFixture<CsgBoxBrush> f;
     const auto handles = f.Handles();
-    REQUIRE(handles.size() == 26);
+    REQUIRE(handles.size() == 29);
 
     ea::vector<unsigned> expected;
     for (unsigned i = 0; i < 8; ++i)
@@ -179,6 +179,8 @@ TEST_CASE("The box brush has 8 corner handles and 6 face handles with stable ids
     for (unsigned i = 20; i < 26; ++i)
         expected.push_back(i);
     for (unsigned i = 30; i < 42; ++i)
+        expected.push_back(i);
+    for (unsigned i = 50; i < 53; ++i)
         expected.push_back(i);
     CHECK(GetIds(handles) == expected);
 
@@ -212,7 +214,7 @@ bool MeshHasVertexNearAny(const CsgShapeMesh& mesh, const Vector3& p) { return M
 void CheckEdgeHandles(const HandleFixture<CsgBoxBrush>& f)
 {
     const auto handles = f.Handles();
-    REQUIRE(handles.size() == 26);
+    REQUIRE(handles.size() == 29);
     for (unsigned edge = 0; edge < 12; ++edge)
     {
         const CsgShapeHandle* h = FindHandle(handles, 30 + edge);
@@ -235,7 +237,7 @@ TEST_CASE("Box edge handles have ids 30 to 41, names and midpoint positions", "[
 {
     HandleFixture<CsgBoxBrush> f;
     const auto handles = f.Handles();
-    REQUIRE(handles.size() == 26);
+    REQUIRE(handles.size() == 29);
     const char* names[12] = {"Edge X -Y -Z", "Edge X +Y -Z", "Edge X -Y +Z", "Edge X +Y +Z", "Edge -X Y -Z",
         "Edge +X Y -Z", "Edge -X Y +Z", "Edge +X Y +Z", "Edge -X -Y Z", "Edge +X -Y Z", "Edge -X +Y Z",
         "Edge +X +Y Z"};
@@ -986,7 +988,7 @@ TEST_CASE("Recenter after an edge move keeps world positions and the events work
     HandleFixture<CsgBoxBrush>& g = f;
     g.brush->SetParams(CsgBoxParams());
     const VariantMap data = Query(g.brush);
-    CHECK(data.at(CsgShapeQueryHandles::P_HANDLES).GetVariantVector().size() == 26);
+    CHECK(data.at(CsgShapeQueryHandles::P_HANDLES).GetVariantVector().size() == 29);
     CHECK(SendMove(g.brush, {37}, Vector3(0.1f, 0.0f, 0.0f)));
     CHECK(CountChangedCorners(CsgBoxParams(), g.brush->GetParams()) == 2);
     CHECK_FALSE(SendMove(g.brush, {37}, Vector3(0.0f, 0.0f, 0.0f)));
@@ -1195,7 +1197,9 @@ template <class T, class G> void CheckBoxResizeHandles(HandleFixture<T>& f, G ge
     node->SetScale(Vector3(1.0f, 2.0f, 0.5f));
     const auto start = f.brush->GetParams();
     const auto startHandles = f.Handles();
-    REQUIRE(GetIds(startHandles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5});
+    REQUIRE(startHandles.size() >= 6);
+    for (unsigned i = 0; i < 6; ++i)
+        REQUIRE(startHandles[i].id_ == i);
     const Vector3 axes[6] = {Vector3::LEFT, Vector3::RIGHT, Vector3::BACK, Vector3::FORWARD, Vector3::UP, Vector3::DOWN};
     const unsigned axisIndex[6] = {0, 0, 2, 2, 1, 1};
 
@@ -1206,6 +1210,8 @@ template <class T, class G> void CheckBoxResizeHandles(HandleFixture<T>& f, G ge
     {
         INFO("Handle " << handle.id_);
         CHECK(handle.kind_ == CsgShapeHandleKind::Axis);
+        if (handle.id_ >= 6)
+            continue; // The size handles have their own test.
         CHECK(handle.axis_ == axes[handle.id_]);
         CHECK(IsPointOnMesh(mesh, handle.position_));
     }
@@ -1249,7 +1255,7 @@ template <class T, class G> void CheckBoxResizeHandles(HandleFixture<T>& f, G ge
 
     // Moves that are not valid or give no change return false and keep the parameters.
     f.brush->SetParams(start);
-    CHECK_FALSE(f.brush->MoveHandles({6}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({9}, Vector3(0.1f, 0.0f, 0.0f)));
     CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(INFINITY, 0.0f, 0.0f)));
     CHECK_FALSE(f.brush->MoveHandles({0}, Vector3(0.0f, 0.3f, 0.0f)));
     CHECK_FALSE(f.brush->MoveHandles({}, Vector3(0.3f, 0.0f, 0.0f)));
@@ -1259,7 +1265,7 @@ template <class T, class G> void CheckBoxResizeHandles(HandleFixture<T>& f, G ge
     // The events give the same handles.
     const VariantMap data = Query(f.brush);
     CHECK(data.find(CsgShapeQueryHandles::P_VALID)->second.GetBool());
-    CHECK(data.find(CsgShapeQueryHandles::P_HANDLES)->second.GetVariantVector().size() == 6);
+    CHECK(data.find(CsgShapeQueryHandles::P_HANDLES)->second.GetVariantVector().size() == 9);
     CHECK(SendMove(f.brush, {3}, Vector3(0.0f, 0.0f, 0.5f)));
     CHECK(f.brush->GetParams().size_.z_ == Catch::Approx(start.size_.z_ + 0.5f));
     CHECK(f.errors.GetCount() == 0);
@@ -1316,7 +1322,7 @@ TEST_CASE("The wedge brush has 6 resize handles that keep the opposite face", "[
     params.center_ = Vector3(0.5f, -0.25f, 1.0f);
     f.brush->SetParams(params);
     const auto handles = f.Handles();
-    REQUIRE(handles.size() == 6);
+    REQUIRE(handles.size() == 9);
     CHECK(IsNear(handles[0].position_, Vector3(-0.5f, -0.25f - 0.5f / 3.0f, 1.0f + 0.5f), 1e-5f));
     CHECK(IsNear(handles[2].position_, Vector3(0.5f, -0.75f, -0.5f), 1e-5f));
     CHECK(IsNear(handles[3].position_, Vector3(0.5f, -0.25f, 2.5f), 1e-5f));
@@ -1343,7 +1349,7 @@ TEST_CASE("The stairs brush has 6 resize handles that keep the opposite face", "
         params.steps_ = steps;
         f.brush->SetParams(params);
         const auto handles = f.Handles();
-        REQUIRE(handles.size() == 6);
+        REQUIRE(handles.size() == 9);
         CHECK(IsNear(handles[0].position_, Vector3(-0.5f, -0.25f, 1.0f), 1e-5f));
         CHECK(IsNear(handles[2].position_, Vector3(0.5f, -0.75f + 0.5f / steps, -0.5f), 1e-5f));
         CHECK(IsNear(handles[4].position_, Vector3(0.5f, 0.25f, 2.5f - 1.5f / steps), 1e-5f));
@@ -1795,4 +1801,301 @@ TEST_CASE("Cylinder handles restore without state and recenter keeps start and f
     for (unsigned i = 0; i < original.size(); ++i)
         CHECK(IsNear(recentered[i].position_, original[i].position_ - offset, 1e-5f));
     CHECK(f.errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// The documented groups of a shape: the group name and its handle ids, in the order of the mode bar.
+using GroupTable = ea::vector<ea::pair<ea::string, ea::vector<unsigned>>>;
+
+ea::vector<unsigned> IdRange(unsigned first, unsigned last)
+{
+    ea::vector<unsigned> ids;
+    for (unsigned id = first; id <= last; ++id)
+        ids.push_back(id);
+    return ids;
+}
+
+/// Check the group rules of a brush against the table. Handles that are absent (an apex) are allowed.
+/// If `full` is true all ids of the table must be present.
+template <class T> void CheckGroupTable(HandleFixture<T>& f, const GroupTable& table, bool full)
+{
+    ea::vector<ea::string> groups;
+    f.brush->GetHandleGroups(groups);
+    REQUIRE(groups.size() == table.size());
+    for (unsigned i = 0; i < table.size(); ++i)
+        CHECK(groups[i] == table[i].first);
+    // The first entry is the default mode. No duplicate. No reserved name.
+    for (unsigned i = 0; i < groups.size(); ++i)
+    {
+        CHECK(groups[i] != "All");
+        CHECK_FALSE(groups[i].empty());
+        for (unsigned j = i + 1; j < groups.size(); ++j)
+            CHECK(groups[i] != groups[j]);
+    }
+
+    const auto handles = f.Handles();
+    ea::hash_set<unsigned> seen;
+    for (const CsgShapeHandle& handle : handles)
+    {
+        INFO("Handle " << handle.id_);
+        CHECK_FALSE(handle.group_.empty());
+        CHECK(ea::find(groups.begin(), groups.end(), handle.group_) != groups.end());
+        CHECK(seen.insert(handle.id_).second);
+        unsigned owners = 0;
+        for (const auto& [name, ids] : table)
+        {
+            if (ea::find(ids.begin(), ids.end(), handle.id_) != ids.end())
+            {
+                ++owners;
+                CHECK(handle.group_ == name);
+            }
+        }
+        CHECK(owners == 1);
+    }
+    if (full)
+    {
+        unsigned total = 0;
+        for (const auto& entry : table)
+            total += entry.second.size();
+        CHECK(handles.size() == total);
+    }
+
+    // The event round trip carries the groups and the Group keys.
+    const VariantMap data = Query(f.brush);
+    const StringVector& sent = data.at(CsgShapeQueryHandles::P_GROUPS).GetStringVector();
+    CHECK(sent == groups);
+    const VariantVector& list = data.at(CsgShapeQueryHandles::P_HANDLES).GetVariantVector();
+    REQUIRE(list.size() == handles.size());
+    for (unsigned i = 0; i < list.size(); ++i)
+        CHECK(list[i].GetVariantMap().at(CsgShapeProtocol::HandleGroupKey).GetString() == handles[i].group_);
+}
+
+} // namespace
+
+TEST_CASE("Every shape declares handle groups that partition its handle ids", "[shapes][handles][modes]")
+{
+    SECTION("Box")
+    {
+        HandleFixture<CsgBoxBrush> f;
+        CheckGroupTable(f,
+            {{"Face", IdRange(20, 25)}, {"Size", IdRange(50, 52)}, {"Edge", IdRange(30, 41)},
+                {"Corner", IdRange(0, 7)}},
+            true);
+    }
+    SECTION("Sphere")
+    {
+        HandleFixture<CsgSphereBrush> f;
+        CheckGroupTable(f, {{"Radius", IdRange(0, 5)}}, true);
+    }
+    SECTION("Ring")
+    {
+        HandleFixture<CsgRingBrush> f;
+        CheckGroupTable(f, {{"Shape", IdRange(0, 3)}}, true);
+    }
+    SECTION("Arch")
+    {
+        HandleFixture<CsgArchBrush> f;
+        CheckGroupTable(f, {{"Shape", IdRange(0, 4)}}, true);
+    }
+    SECTION("Wedge")
+    {
+        HandleFixture<CsgWedgeBrush> f;
+        CheckGroupTable(f, {{"Face", IdRange(0, 5)}, {"Size", IdRange(6, 8)}}, true);
+    }
+    SECTION("Stairs")
+    {
+        HandleFixture<CsgStairsBrush> f;
+        CheckGroupTable(f, {{"Face", IdRange(0, 5)}, {"Size", IdRange(6, 8)}}, true);
+    }
+
+    const GroupTable cylinderTable = {{"Ends", {0, 1, 11, 12}}, {"Radius", IdRange(2, 10)}};
+    SECTION("Cylinder default")
+    {
+        HandleFixture<CsgCylinderBrush> f;
+        CheckGroupTable(f, cylinderTable, false);
+    }
+    SECTION("Cylinder with a bulge")
+    {
+        HandleFixture<CsgCylinderBrush> f;
+        f.brush->SetBulge(0.5f);
+        CheckGroupTable(f, cylinderTable, true);
+        CHECK(f.Handles().size() == 13);
+    }
+    SECTION("Cylinder with an apex")
+    {
+        HandleFixture<CsgCylinderBrush> f;
+        CsgCylinderParams params;
+        params.topRadius_ = Vector2::ZERO;
+        f.brush->SetParams(params);
+        CheckGroupTable(f, cylinderTable, false);
+        CHECK(f.Handles().size() < 13);
+    }
+}
+
+TEST_CASE("The box size handles move the two faces of an axis", "[shapes][handles][modes]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    f.brush->GetNode()->SetRotation(Quaternion(20.0f, 30.0f, 40.0f));
+    f.brush->GetNode()->SetScale(Vector3(1.0f, 2.0f, 0.5f));
+    CsgBoxParams params;
+    params.size_ = Vector3(2.0f, 1.0f, 3.0f);
+    f.brush->SetParams(params);
+    // A skew: move one corner. The skew must stay.
+    REQUIRE(f.brush->MoveHandles({7}, Vector3(0.2f, 0.1f, -0.1f)));
+    const CsgBoxParams start = f.brush->GetParams();
+    const auto startHandles = f.Handles();
+    const Vector3 axes[3] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD};
+    const char* const names[3] = {"Size X", "Size Y", "Size Z"};
+
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        INFO("Axis " << a);
+        f.brush->SetParams(start);
+        const CsgShapeHandle* handle = FindHandle(startHandles, 50 + a);
+        REQUIRE(handle);
+        CHECK(handle->name_ == names[a]);
+        CHECK(handle->kind_ == CsgShapeHandleKind::Axis);
+        CHECK(handle->axis_ == axes[a]);
+        CHECK(IsNear(handle->position_, FindHandle(startHandles, 21 + 2 * a)->position_));
+
+        const float d = 0.25f;
+        const Vector3 across = axes[a].CrossProduct(Vector3(0.3f, 0.5f, 0.7f));
+        REQUIRE(f.brush->MoveHandles({50 + a}, axes[a] * d + across));
+        const CsgBoxParams moved = f.brush->GetParams();
+        CHECK(moved.size_ == start.size_);
+        for (unsigned corner = 0; corner < 8; ++corner)
+        {
+            const float sign = (corner >> a) & 1u ? 1.0f : -1.0f;
+            Vector3 expected = start.corners_[corner];
+            expected.MutableData()[a] += sign * d / start.size_.Data()[a];
+            CHECK(IsNear(moved.corners_[corner], expected));
+        }
+        // The centroid of the box stays.
+        Vector3 before, after;
+        for (unsigned corner = 0; corner < 8; ++corner)
+        {
+            before += start.size_ * start.corners_[corner];
+            after += moved.size_ * moved.corners_[corner];
+        }
+        CHECK(IsNear(before / 8.0f, after / 8.0f));
+        // The size handle follows the cursor on its axis.
+        CHECK(IsNear(FindHandle(f.Handles(), 50 + a)->position_, handle->position_ + axes[a] * d, 1e-5f));
+
+        // Stateless: the same delta after a restore gives the same parameters.
+        f.brush->SetParams(start);
+        REQUIRE(f.brush->MoveHandles({50 + a, 50 + a}, axes[a] * d + across));
+        CHECK(f.brush->GetParams().corners_ == moved.corners_);
+
+        // Zero move: false. An inversion is refused and keeps the parameters.
+        f.brush->SetParams(start);
+        CHECK_FALSE(f.brush->MoveHandles({50 + a}, Vector3::ZERO));
+        CHECK_FALSE(f.brush->MoveHandles({50 + a}, across));
+        CHECK_FALSE(f.brush->MoveHandles({50 + a}, axes[a] * -10.0f));
+        CHECK(f.brush->GetParams().corners_ == start.corners_);
+        CHECK_FALSE(f.brush->MoveHandles({50 + a}, axes[a] * std::numeric_limits<float>::infinity()));
+    }
+    CHECK_FALSE(f.brush->MoveHandles({53}, Vector3(0.1f, 0, 0)));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+namespace
+{
+
+template <class T> void CheckSizeHandlesOfBoxLikeShape(HandleFixture<T>& f)
+{
+    const auto start = f.brush->GetParams();
+    const auto startHandles = f.Handles();
+    REQUIRE(startHandles.size() == 9);
+    const Vector3 axes[3] = {Vector3::RIGHT, Vector3::UP, Vector3::FORWARD};
+    const unsigned faceOfAxis[3] = {1, 4, 3};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        INFO("Axis " << a);
+        f.brush->SetParams(start);
+        const CsgShapeHandle& handle = startHandles[6 + a];
+        CHECK(handle.id_ == 6 + a);
+        CHECK(handle.kind_ == CsgShapeHandleKind::Axis);
+        CHECK(handle.axis_ == axes[a]);
+        CHECK(handle.group_ == "Size");
+        CHECK(IsNear(handle.position_, startHandles[faceOfAxis[a]].position_));
+
+        const float d = 0.25f;
+        const Vector3 across = axes[a].CrossProduct(Vector3(0.3f, 0.5f, 0.7f));
+        REQUIRE(f.brush->MoveHandles({6 + a}, axes[a] * d + across));
+        const auto moved = f.brush->GetParams();
+        CHECK(moved.size_.Data()[a] == Catch::Approx(start.size_.Data()[a] + 2.0f * d));
+        CHECK(moved.center_ == start.center_);
+        for (unsigned other = 0; other < 3; ++other)
+        {
+            if (other != a)
+                CHECK(moved.size_.Data()[other] == start.size_.Data()[other]);
+        }
+
+        // Stateless.
+        f.brush->SetParams(start);
+        REQUIRE(f.brush->MoveHandles({6 + a, 6 + a}, axes[a] * d + across));
+        CHECK(f.brush->GetParams().size_ == moved.size_);
+
+        // A shrink clamps. No move is false.
+        f.brush->SetParams(start);
+        CHECK_FALSE(f.brush->MoveHandles({6 + a}, Vector3::ZERO));
+        CHECK_FALSE(f.brush->MoveHandles({6 + a}, across));
+        REQUIRE(f.brush->MoveHandles({6 + a}, axes[a] * -100.0f));
+        CHECK(f.brush->GetParams().size_.Data()[a] == Catch::Approx(0.001f));
+        CHECK(f.brush->GetParams().center_ == start.center_);
+    }
+    CHECK_FALSE(f.brush->MoveHandles({9}, Vector3(0.1f, 0, 0)));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+} // namespace
+
+TEST_CASE("The wedge and stairs size handles grow the size around the center", "[shapes][handles][modes]")
+{
+    SECTION("Wedge")
+    {
+        CsgWedgeParams wedge;
+        wedge.size_ = Vector3(2.0f, 1.0f, 3.0f);
+        wedge.center_ = Vector3(0.5f, -0.25f, 1.0f);
+        HandleFixture<CsgWedgeBrush> w;
+        w.brush->SetParams(wedge);
+        CheckSizeHandlesOfBoxLikeShape(w);
+    }
+    SECTION("Stairs")
+    {
+        CsgStairsParams stairs;
+        stairs.size_ = Vector3(2.0f, 1.0f, 3.0f);
+        stairs.center_ = Vector3(0.5f, -0.25f, 1.0f);
+        HandleFixture<CsgStairsBrush> s;
+        s.brush->SetParams(stairs);
+        CheckSizeHandlesOfBoxLikeShape(s);
+    }
+}
+
+TEST_CASE("The face pick keeps the face handle in the full set and finds the size handle in the size set",
+    "[shapes][handles][modes]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    const auto all = f.Handles();
+    ea::vector<CsgShapeHandle> sizeOnly;
+    for (const CsgShapeHandle& handle : all)
+    {
+        if (handle.group_ == "Size")
+            sizeOnly.push_back(handle);
+    }
+    REQUIRE(sizeOnly.size() == 3);
+    const Vector3 normals[6] = {Vector3(-1, 0, 0), Vector3(1, 0, 0), Vector3(0, -1, 0), Vector3(0, 1, 0),
+        Vector3(0, 0, -1), Vector3(0, 0, 1)};
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        INFO("Face " << face);
+        const Vector3 point = normals[face] * 0.5f;
+        // The size handle and the + face handle tie. The lower id, the face, wins.
+        REQUIRE(ChooseFaceHandle(all, point, normals[face]));
+        CHECK(*ChooseFaceHandle(all, point, normals[face]) == 20 + face);
+        REQUIRE(ChooseFaceHandle(sizeOnly, point, normals[face]));
+        CHECK(*ChooseFaceHandle(sizeOnly, point, normals[face]) == 50 + face / 2);
+    }
 }

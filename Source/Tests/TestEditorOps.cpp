@@ -1346,7 +1346,7 @@ TEST_CASE("QueryShapeHandles and MoveShapeHandles work on a box in a scene", "[e
 
     const ShapeHandleSet set = QueryShapeHandles(box);
     CHECK(set.valid_);
-    CHECK(set.handles_.size() == 26);
+    CHECK(set.handles_.size() == 29);
     REQUIRE(FindShapeHandle(set, 7));
     CHECK(FindShapeHandle(set, 7)->kind_ == CsgShapeHandleKind::Point);
     CHECK(FindShapeHandle(set, 7)->position_.Equals(Vector3(0.5f, 0.5f, 0.5f)));
@@ -1620,7 +1620,7 @@ TEST_CASE("ChooseFaceHandle picks the box face of the normal", "[editorops][pick
 {
     Fixture f;
     const ea::vector<ShapeHandle> handles = HandlesOf<CsgBoxBrush>(f);
-    REQUIRE(handles.size() == 26);
+    REQUIRE(handles.size() == 29);
 
     // The face ids are 20 to 25: -X, +X, -Y, +Y, -Z, +Z.
     const Vector3 normals[6] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};

@@ -73,6 +73,7 @@ void CsgWedgeBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.kind_ = CsgShapeHandleKind::Axis;
         handle.position_ = c + offset;
         handle.axis_ = axis;
+        handle.group_ = id < 6 ? "Face" : "Size";
         handles.push_back(handle);
     };
     add(0, "Left", Vector3(-h.x_, -h.y_ / 3.0f, h.z_ / 3.0f), Vector3::LEFT);
@@ -81,6 +82,15 @@ void CsgWedgeBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
     add(3, "Back", Vector3(0.0f, 0.0f, h.z_), Vector3::FORWARD);
     add(4, "Top", Vector3(0.0f, h.y_, h.z_), Vector3::UP);
     add(5, "Bottom", Vector3(0.0f, -h.y_, 0.0f), Vector3::DOWN);
+    // The size handles sit at the + face handles of the axes X, Y and Z.
+    add(6, "Size X", handles[1].position_ - c, Vector3::RIGHT);
+    add(7, "Size Y", handles[4].position_ - c, Vector3::UP);
+    add(8, "Size Z", handles[3].position_ - c, Vector3::FORWARD);
+}
+
+void CsgWedgeBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Face", "Size"};
 }
 
 bool CsgWedgeBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
@@ -96,6 +106,13 @@ bool CsgWedgeBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& 
     {
         if (id >= handles.size())
             return false;
+        if (id >= 6)
+        {
+            // A size handle grows the size on its axis by 2 d. The center stays.
+            const unsigned axisIndex = id - 6;
+            params.size_.MutableData()[axisIndex] += 2.0f * localDelta.DotProduct(handles[id].axis_);
+            continue;
+        }
         const float change = localDelta.DotProduct(handles[id].axis_);
         MoveBoxFace(params.size_, params.center_, WedgeHandleAxis[id], WedgeHandleSign[id], change,
             CsgWedgeParams::MinSize, CsgWedgeParams::MaxSize);

@@ -68,6 +68,8 @@ ea::string GetEdgeName(unsigned edge)
     return name;
 }
 
+const char* const SizeNames[3] = {"Size X", "Size Y", "Size Z"};
+
 const char* const FaceNames[6] = {"Face -X", "Face +X", "Face -Y", "Face +Y", "Face -Z", "Face +Z"};
 
 } // namespace
@@ -129,6 +131,7 @@ void CsgBoxBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
     {
         CsgShapeHandle handle;
         handle.id_ = corner;
+        handle.group_ = "Corner";
         handle.name_ = GetCornerName(corner);
         handle.kind_ = CsgShapeHandleKind::Point;
         handle.position_ = params_.size_ * params_.corners_[corner];
@@ -144,6 +147,7 @@ void CsgBoxBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         }
         CsgShapeHandle handle;
         handle.id_ = FirstFaceHandle + face;
+        handle.group_ = "Face";
         handle.name_ = FaceNames[face];
         handle.kind_ = CsgShapeHandleKind::Axis;
         handle.position_ = sum / 4.0f;
@@ -156,11 +160,36 @@ void CsgBoxBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         GetEdgeCorners(edge, low, high);
         CsgShapeHandle handle;
         handle.id_ = FirstEdgeHandle + edge;
+        handle.group_ = "Edge";
         handle.name_ = GetEdgeName(edge);
         handle.kind_ = CsgShapeHandleKind::Point;
         handle.position_ = params_.size_ * (params_.corners_[low] + params_.corners_[high]) * 0.5f;
         handles.push_back(handle);
     }
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        // The size handle sits at the centroid of the + face. Its axis is the + axis.
+        const unsigned face = 2 * axis + 1;
+        Vector3 sum;
+        for (unsigned corner = 0; corner < 8; ++corner)
+        {
+            if (IsCornerOnFace(corner, face))
+                sum += params_.size_ * params_.corners_[corner];
+        }
+        CsgShapeHandle handle;
+        handle.id_ = FirstSizeHandle + axis;
+        handle.group_ = "Size";
+        handle.name_ = SizeNames[axis];
+        handle.kind_ = CsgShapeHandleKind::Axis;
+        handle.position_ = sum / 4.0f;
+        handle.axis_ = GetFaceAxis(face);
+        handles.push_back(handle);
+    }
+}
+
+void CsgBoxBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
+{
+    groups = {"Face", "Size", "Edge", "Corner"};
 }
 
 bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
@@ -195,6 +224,17 @@ bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& lo
             {
                 if (IsCornerOnFace(corner, face))
                     params.corners_[corner] += axis * distance / size;
+            }
+        }
+        else if (id >= FirstSizeHandle && id < FirstSizeHandle + 3)
+        {
+            // The + face moves by +d and the - face moves by -d. The centroid stays.
+            const unsigned axisIndex = id - FirstSizeHandle;
+            const float distance = localDelta.DotProduct(GetFaceAxis(2 * axisIndex + 1));
+            for (unsigned corner = 0; corner < 8; ++corner)
+            {
+                const float sign = ((corner >> axisIndex) & 1u) ? 1.0f : -1.0f;
+                params.corners_[corner].MutableData()[axisIndex] += sign * distance / size.Data()[axisIndex];
             }
         }
         else

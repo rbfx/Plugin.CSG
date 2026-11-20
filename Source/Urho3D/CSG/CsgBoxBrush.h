@@ -50,7 +50,14 @@ public:
     /// Ids 30 to 41 are the 12 edges (points) at the midpoint of the 2 corner positions. The id is 30
     /// plus 4 * A plus K. A is the axis of the edge (0 X, 1 Y, 2 Z). K is bit 0 and bit 1 of the
     /// positions on the other two axes, in ascending axis order (0 is the minus side). The ids are a file contract.
+    /// Ids 50 to 52 are the size handles (axes). The id is 50 plus the axis A (0 X, 1 Y, 2 Z). The handle is
+    /// at the centroid of the + face of the axis. Its axis is +e_A. The names are 'Size X', 'Size Y', 'Size Z'.
+    /// The ids are a file contract.
+    /// Groups: Face (20 to 25, default), Size (50 to 52), Edge (30 to 41), Corner (0 to 7).
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    void GetHandleGroups(ea::vector<ea::string>& groups) const override;
+    /// A size handle with d = dot(delta, e_A) moves the 4 corners of the + face by +d / size and the 4 corners
+    /// of the - face by -d / size on the axis A. The box grows by 2 d and the centroid stays.
     /// A corner handle adds delta / size to the corner. A face handle moves its 4 corners along the axis by
     /// dot(delta, axis) / size. An edge handle adds delta / size to its 2 corners. A corner is moved by the
     /// delta only once, also if a corner handle and an edge handle name it. A face handle adds on top.
@@ -61,6 +68,7 @@ public:
 
     static constexpr unsigned FirstFaceHandle = 20;
     static constexpr unsigned FirstEdgeHandle = 30;
+    static constexpr unsigned FirstSizeHandle = 50;
 
 protected:
     void SanitizeParameters() override;

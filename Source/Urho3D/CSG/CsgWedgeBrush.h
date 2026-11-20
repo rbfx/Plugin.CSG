@@ -49,7 +49,12 @@ public:
     /// 3 +Z at the center of the back face (c.x, c.y, c.z + h.z), axis +Z;
     /// 4 +Y at the middle of the back top edge (c.x, c.y + h.y, c.z + h.z), axis +Y;
     /// 5 -Y at the center of the bottom face (c.x, c.y - h.y, c.z), axis -Y.
+    /// Ids 6 to 8 are the size handles (axes) +X, +Y and +Z, named 'Size X', 'Size Y' and 'Size Z'.
+    /// Each one is at the position of the + face handle of its axis (ids 1, 4 and 3), with the + axis.
+    /// A size handle grows the size on its axis by 2 d, d = dot(delta, axis). The center stays.
+    /// Groups: Face (0 to 5, default) and Size (6 to 8). The ids are a file contract.
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
+    void GetHandleGroups(ea::vector<ea::string>& groups) const override;
     /// The size on the axis of the handle grows by d = dot(delta, axis). The center moves by axis * d / 2,
     /// so the opposite face stays fixed. The sanitizer clamps the result. No change returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
