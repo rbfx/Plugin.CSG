@@ -82,6 +82,12 @@ public:
     void MoveActiveBrush(int step);
     /// Toggle the enabled state of all selected brushes. One undo step reverts the change.
     void ToggleSelectedBrushes();
+    /// Show the next or the previous handle mode of the active shape. It does nothing during a drag.
+    void NextHandleMode();
+    void PreviousHandleMode();
+    void CycleActiveHandleMode(int step);
+    /// Draw the line of the mode buttons in the overlay. It draws nothing if the shape has fewer than 2 modes.
+    void RenderHandleModeBar(Component* brush);
     /// Save the result of the active root as a model file, add a sibling node with the model and disable the root.
     /// One undo step removes the node and enables the root again. The file stays.
     void BakeToAsset();
@@ -210,6 +216,15 @@ private:
     ShapeHandleSet handleSet_;
     /// The selected handle ids. The first id is the primary handle of the Ctrl snap.
     ea::vector<unsigned> selectedHandles_;
+    /// The handle mode of each shape type name. A mode is UI state: it is not in the undo stack.
+    ea::unordered_map<ea::string, ea::string> handleModes_;
+    /// The mode of this frame for the active brush, and the modes of its shape. Empty if the shape has no modes.
+    ea::string activeMode_;
+    ea::vector<ea::string> handleModeList_;
+    /// The handles of the active mode. The draw, the pick and the selection use only these.
+    ea::vector<ShapeHandle> visibleHandles_;
+    /// The selected handles of the other modes.
+    HandleSelectionParking parkedSelections_;
     ea::optional<unsigned> hoveredHandle_;
     /// A left click was consumed by the handles. The mouse stays consumed until the button is released.
     bool handleClickPending_{};

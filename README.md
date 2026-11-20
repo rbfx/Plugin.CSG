@@ -139,7 +139,12 @@ A bad id or a bad delta gives no log message. The answer is `P_ACCEPTED` false.
 
 - `E_CSGSHAPEQUERYHANDLES`. Out: `P_VERSION` (int, 2), `P_VALID` (bool) and `P_HANDLES` (a `VariantVector`).
   Each element is a `VariantMap` with the keys `Id` (int), `Name` (string), `Kind` (int: 0 point, 1 axis),
-  `Position` (Vector3) and `Axis` (unit Vector3, zero for a point). The key constants are in `CsgShapeProtocol`.
+  `Position` (Vector3), `Axis` (unit Vector3, zero for a point) and `Group` (string, the adjustment mode of the handle).
+  The key constants are in `CsgShapeProtocol`. The reply has also `P_GROUPS` (a `StringVector`): the groups in the order of the mode bar.
+  The first entry is the default mode. The list is fixed for a shape type, also if a handle is not present (an apex).
+  `Group` and `P_GROUPS` are optional keys. The version stays 2. A reader ignores a key that it does not know.
+  A reader treats a missing `Group` as an empty group. A reply without `P_GROUPS` (an old runtime) gives no modes.
+  The name "All" is reserved for the editor. A shape does not declare it.
   The positions and axes are in the local space of the brush. A shape that is not valid gives `P_VALID` false and no handle.
 - `E_CSGSHAPEMOVEHANDLES`. In: `P_INDICES` (a `VariantVector` of int ids) and `P_DELTA` (Vector3).
   The delta is the total delta from the drag start, in the local space of the brush.
@@ -168,6 +173,7 @@ A corner moves once by the delta, also if a corner handle and an edge handle nam
 | Box | 0 to 7 | Corners (points). Bit 0 is +X, bit 1 is +Y, bit 2 is +Z. |
 | Box | 20 to 25 | Faces (axes) in the order -X, +X, -Y, +Y, -Z, +Z. The face moves its 4 corners along the axis. |
 | Box | 30 to 41 | Edges (points) at the midpoint of the 2 corners. Ids 30 to 33 are parallel to X, 34 to 37 to Y, 38 to 41 to Z. In a group the order is ascending by the bits of the other two axes (the lower axis is bit 0, 0 is the minus side). The names are "Edge X -Y -Z", "Edge X +Y -Z", "Edge X -Y +Z", "Edge X +Y +Z", then "Edge -X Y -Z" and so on. An edge moves its 2 corners by the delta. |
+| Box | 50 to 52 | Size (axes) at the centroid of the +X, +Y, +Z face, with the + axis. The id is 50 plus the axis (0 X, 1 Y, 2 Z). The names are "Size X", "Size Y", "Size Z". A move d along the axis moves the 4 corners of the + face by +d and the 4 corners of the - face by -d. The box grows by 2 d and the centroid stays. |
 | Sphere | 0 to 5 | Radius at +X, -X, +Y, -Y, +Z, -Z. The + and - handles of one axis edit one component. |
 | Cylinder | 0, 1 | Bottom center and top center (points). |
 | Cylinder | 2 to 5 | Bottom radius at +X, -X, +Z, -Z. On the polygon boundary along the axis. Not offered if the bottom is an apex. |
@@ -179,7 +185,9 @@ A corner moves once by the delta, also if a corner handle and an edge handle nam
 | Ring | 1 | Radial tube radius (axis +X). |
 | Ring | 2 | Axial tube radius (axis +Y). |
 | Ring | 3 | Arc end (axis is the tangent at the arc end). The arc is in the range 1 to 360 degrees. |
+| Wedge | 6 to 8 | Size (axes) "Size X", "Size Y", "Size Z" at the position of the +X, +Y and +Z face handle (ids 1, 4 and 3), with the + axis. A move d grows the size on the axis by 2 d. "Center" stays. |
 | Wedge | 0 to 5 | Faces (axes) in the order -X, +X, -Z (front edge), +Z (back), +Y (top edge), -Y (bottom). The size on the axis grows by the move and "Center" moves by half of it, so the opposite face stays. |
+| Stairs | 6 to 8 | Size (axes) "Size X", "Size Y", "Size Z" at the position of the +X, +Y and +Z face handle (ids 1, 4 and 3), with the + axis. A move d grows the size on the axis by 2 d. "Center" stays. |
 | Stairs | 0 to 5 | Faces (axes) in the order -X (side center), +X (side center), -Z (first riser), +Z (back), +Y (top tread), -Y (bottom). The move is as for the wedge. There is no handle for "Steps". |
 | Arch | 0 | Outer X radius at the start end of the outer curve (axis +X). The radius grows by the move. |
 | Arch | 1 | Outer Y radius at the top of the outer curve (axis +Y). |
@@ -511,13 +519,35 @@ The handles of each shape:
 
 | Shape | Handles |
 | --- | --- |
-| Box | 8 corners (points), 6 faces (axes) and 12 edges (points): 26 handles. A face moves its 4 corners. An edge moves its 2 corners. |
+| Box | 8 corners (points), 6 faces (axes), 12 edges (points) and 3 size handles (axes): 29 handles. A face moves its 4 corners. An edge moves its 2 corners. A size handle grows the box on its axis, on both sides. |
 | Sphere | 6 radii (axes) at +X, -X, +Y, -Y, +Z and -Z. |
 | Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes), the bulge (axis) and the bottom and top scale (axes). A radius at an apex and a bulge on a thin body are not offered. A radius handle sits on the polygon boundary: a drag divides the move by the ray distance k. |
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
-| Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. |
-| Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. |
+| Wedge | 6 faces (axes): the side triangles, the front edge, the back face, the top edge and the bottom. 3 size handles (axes). |
+| Stairs | 6 faces (axes): the sides, the first riser, the back face, the top tread and the bottom. 3 size handles (axes). |
 | Arch | The X and Y radius, the thickness, the depth and the arc end (axes). |
+
+#### Adjustment modes
+
+A shape has many handles. A mode shows only one group of them. The brush declares the groups at run time (`GetHandleGroups`, `P_GROUPS`). The editor filters by group.
+
+| Shape | Groups (the first is the default) |
+| --- | --- |
+| Box | Face (20 to 25), Size (50 to 52), Edge (30 to 41), Corner (0 to 7) |
+| Cylinder, cone, prism | Ends (0, 1, 11, 12), Radius (2 to 10) |
+| Wedge, Stairs | Face (0 to 5), Size (6 to 8) |
+| Sphere | Radius (0 to 5). One group: no mode bar. |
+| Ring | Shape (0 to 3). One group: no mode bar. |
+| Arch | Shape (0 to 4). One group: no mode bar. |
+
+- The editor adds the mode "All" at the end. It shows all handles. A shape with fewer than 2 groups has no modes: all handles show.
+- Push M for the next mode and Shift+M for the previous mode. The list wraps. The hotkeys are "Csg.NextHandleMode" and "Csg.PreviousHandleMode". They do nothing during a drag or while the right mouse button is down.
+- The "Shape" section of the overlay has the mode bar, for example "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29". A click on a button sets the mode. The tooltip names the hotkeys. The bar is off during a drag or if "Show handles" is off. A narrow overlay wraps the bar.
+- The mode is a UI state. It is not in the undo stack. Each shape type keeps its own mode. The setting `CsgEditor.HandleModes` saves them as `CsgBoxBrush=Face;CsgCylinderBrush=Ends`. An unknown mode gives the default mode.
+- The draw, the pick, the hover and the click on a face use only the handles of the active mode. A click on a face in the mode Size selects the Size handle of the axis. The modes Corner and Edge have no axis handle: the click selects the brush and no handle. The editor does not change the mode by itself.
+- The selection is parked for each mode. A mode switch keeps the selected handles of the old mode and loads those of the new mode. A new active brush clears all of them. Escape clears only the list of the active mode.
+- The mode "All" shows the face handle and the size handle at the same point. A click on a face picks the face handle (the lower id).
+- `GetFaceSlotOfHandle` maps only the box ids 20 to 25. The Ctrl material drop on a face needs the Face (or All) mode for the face handle to be selected.
 
 ### Bake to asset
 
@@ -653,6 +683,13 @@ The editor has no test harness for addons. Do these checks by hand:
 108. Drag a material over a box and hold Shift, then release Shift while the mouse stays down. The preview goes from "shape and clear overrides" back to "shape only". Push Escape. The box has its original materials, also an old box with only slot 0 set.
 109. Select a box and click its +Y face handle. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
 110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials. An old box keeps its slot 0.
+111. Add a box with B. The view shows 6 face handles. The overlay "Shape" section shows "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29".
+112. Push M three times. The view shows the size handles, then the edges, then the corners. Push M two times more. All handles show, then the Face mode comes back.
+113. Push Shift+M. The mode "All" shows. Click a button of the mode bar. The mode changes. Drag a handle, push M during the drag. The mode does not change.
+114. In the Size mode, drag "Size X" by 0.5. The box grows by 1 on X and the center stays. Ctrl+Z reverts it.
+115. In the Face mode, click the +Y face handle. Push M until Corner shows, then until Face shows. The +Y handle is still selected. Drag a material over the box with Ctrl: the face override works.
+116. Select a sphere. The overlay has no mode bar. M does nothing. Select a box again. The mode of the box is the same as before.
+117. Close the editor and open it again. The mode of the box and of the cylinder are the same as before.
 
 ## How to try the sample scene
 

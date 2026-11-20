@@ -64,6 +64,8 @@ const auto Hotkey_SetIntersection = EditorHotkey{"Csg.SetIntersection"}.Press(KE
 const auto Hotkey_MoveEarlier = EditorHotkey{"Csg.MoveEarlier"}.MaybeCtrl().MaybeAlt().Press(KEY_LEFTBRACKET);
 const auto Hotkey_MoveLater = EditorHotkey{"Csg.MoveLater"}.MaybeCtrl().MaybeAlt().Press(KEY_RIGHTBRACKET);
 const auto Hotkey_ToggleBrush = EditorHotkey{"Csg.ToggleBrush"}.Press(KEY_H);
+const auto Hotkey_NextHandleMode = EditorHotkey{"Csg.NextHandleMode"}.Press(KEY_M);
+const auto Hotkey_PreviousHandleMode = EditorHotkey{"Csg.PreviousHandleMode"}.Shift().Press(KEY_M);
 
 const StringHash RootType("CsgRoot");
 const StringHash BrushType("CsgBrush");
@@ -83,6 +85,7 @@ const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeo
 const char* const ShowHandlesIniKey = "CsgEditor.ShowHandles";
 const char* const AutoRecenterIniKey = "CsgEditor.AutoRecenter";
 const char* const HandleGridStepIniKey = "CsgEditor.HandleGridStep";
+const char* const HandleModesIniKey = "CsgEditor.HandleModes";
 const float DefaultHandleGridStep = 0.125f;
 /// The size of a handle and the pick radius in pixels.
 const float HandleSize = 8.0f;
@@ -337,6 +340,8 @@ CsgEditorAddon::CsgEditorAddon(SceneViewTab* owner)
     hotkeyManager->BindHotkey(this, Hotkey_MoveEarlier, &CsgEditorAddon::MoveEarlier);
     hotkeyManager->BindHotkey(this, Hotkey_MoveLater, &CsgEditorAddon::MoveLater);
     hotkeyManager->BindHotkey(this, Hotkey_ToggleBrush, &CsgEditorAddon::ToggleSelectedBrushes);
+    hotkeyManager->BindHotkey(this, Hotkey_NextHandleMode, &CsgEditorAddon::NextHandleMode);
+    hotkeyManager->BindHotkey(this, Hotkey_PreviousHandleMode, &CsgEditorAddon::PreviousHandleMode);
 
     URHO3D_LOGDEBUG("CSG editor addon is registered");
 }
@@ -707,6 +712,7 @@ void CsgEditorAddon::WriteIniSettings(ImGuiTextBuffer& output)
     WriteIntToIni(output, ShowHandlesIniKey, showHandles_);
     WriteIntToIni(output, AutoRecenterIniKey, autoRecenter_);
     WriteStringToIni(output, HandleGridStepIniKey, Format("{}", handleGridStep_));
+    WriteStringToIni(output, HandleModesIniKey, FormatHandleModesIni(handleModes_));
 }
 
 void CsgEditorAddon::ReadIniSettings(const char* line)
@@ -731,6 +737,8 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
         const float step = ToFloat(*value);
         handleGridStep_ = std::isfinite(step) ? ea::max(0.0f, step) : DefaultHandleGridStep;
     }
+    if (const auto value = ReadStringFromIni(line, HandleModesIniKey))
+        handleModes_ = ParseHandleModesIni(*value);
 }
 
 CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDropPayload* payload) const
@@ -1363,7 +1371,25 @@ void CsgEditorAddon::SetActiveShapeBrush(Component* brush)
     handleBrush_ = brush;
     handleSet_ = {};
     selectedHandles_.clear();
+    parkedSelections_.Clear();
+    activeMode_.clear();
+    handleModeList_.clear();
+    visibleHandles_.clear();
     hoveredHandle_.reset();
+}
+
+void CsgEditorAddon::NextHandleMode() { CycleActiveHandleMode(1); }
+
+void CsgEditorAddon::PreviousHandleMode() { CycleActiveHandleMode(-1); }
+
+void CsgEditorAddon::CycleActiveHandleMode(int step)
+{
+    // The mode does not change during a drag or the camera navigation. The next frame applies the new mode.
+    if (!handleBrush_ || !showHandles_ || dragState_ != HandleDragState::None || ui::IsMouseDown(MOUSEB_RIGHT))
+        return;
+    if (handleModeList_.empty())
+        return;
+    handleModes_[handleBrush_->GetTypeName()] = CycleHandleMode(handleModeList_, activeMode_, step);
 }
 
 void CsgEditorAddon::BeginHandleDrag()
@@ -1505,12 +1531,26 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     }
 
     handleSet_ = QueryShapeHandles(brush);
+    // The mode of the shape type. A mode switch parks the selection of the old mode.
+    handleModeList_ = GetHandleModes(handleSet_);
+    {
+        const auto remembered = handleModes_.find(brush->GetTypeName());
+        const ea::string mode =
+            ResolveHandleMode(handleModeList_, remembered != handleModes_.end() ? remembered->second : ea::string{});
+        if (mode != activeMode_)
+        {
+            parkedSelections_.Switch(selectedHandles_, activeMode_, mode);
+            activeMode_ = mode;
+            hoveredHandle_.reset();
+        }
+    }
+    visibleHandles_ = FilterHandlesByMode(handleSet_.handles_, activeMode_);
     dropPendingFace(brush);
     if (pendingFace_ && showHandles_)
     {
         // The hit of the click chooses the face. No match keeps the selection as it is.
         if (const auto id = ChooseFaceHandleForWorldHit(
-                brush->GetNode(), handleSet_.handles_, pendingFace_->worldPoint_, pendingFace_->worldNormal_))
+                brush->GetNode(), visibleHandles_, pendingFace_->worldPoint_, pendingFace_->worldNormal_))
             selectedHandles_ = {*id};
     }
     pendingFace_.reset();
@@ -1526,7 +1566,7 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
 
     const auto findHandle = [this](unsigned id) -> const ShapeHandle*
     {
-        for (const ShapeHandle& handle : handleSet_.handles_)
+        for (const ShapeHandle& handle : visibleHandles_)
         {
             if (handle.id_ == id)
                 return &handle;
@@ -1566,7 +1606,7 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     const Vector2 mousePos = ToVector2(ui::GetMousePos());
 
     ea::vector<HandleScreenPoint> points;
-    for (const ShapeHandle& handle : handleSet_.handles_)
+    for (const ShapeHandle& handle : visibleHandles_)
     {
         const Vector3 worldPos = worldTransform * handle.position_;
         const auto screenPos = ProjectToView(camera, area, worldPos);
@@ -1590,7 +1630,7 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
         && (dragState_ != HandleDragState::None || (!consumedOnEntry && !ui::IsMouseDown(MOUSEB_RIGHT)));
     if (runGizmo)
     {
-        const auto centroid = ComputeSelectionCentroid(handleSet_.handles_, selectedHandles_)
+        const auto centroid = ComputeSelectionCentroid(visibleHandles_, selectedHandles_)
             .value_or(ComputeSelectionCentroid(dragStartHandles_, selectedHandles_).value_or(Vector3::ZERO));
         const bool local = IsTransformGizmoLocal();
         const Quaternion rotation = local ? node->GetWorldRotation() : Quaternion::IDENTITY;
@@ -1652,9 +1692,9 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     ImDrawList* drawList = ui::GetWindowDrawList();
     drawList->PushClipRect(ToImGui(area.min_), ToImGui(area.max_), true);
     const float half = HandleSize * 0.5f;
-    for (unsigned index = 0; index < handleSet_.handles_.size(); ++index)
+    for (unsigned index = 0; index < visibleHandles_.size(); ++index)
     {
-        const ShapeHandle& handle = handleSet_.handles_[index];
+        const ShapeHandle& handle = visibleHandles_[index];
         if (!points[index].visible_)
             continue;
 
@@ -1734,6 +1774,7 @@ void CsgEditorAddon::RenderShapeSection()
         ui::TextUnformatted("Valid");
     else
         ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: parameters are not valid");
+    RenderHandleModeBar(brush);
 
     Vector3 size;
     if (ComputeShapeWorldSize(brush, size))
@@ -1763,6 +1804,49 @@ void CsgEditorAddon::RenderShapeSection()
     }
     RenderMaterialRows(brush);
     RenderShapeSettings();
+}
+
+void CsgEditorAddon::RenderHandleModeBar(Component* brush)
+{
+    if (handleModeList_.empty())
+        return;
+
+    const bool enabled = showHandles_ && dragState_ == HandleDragState::None;
+    auto hotkeyManager = owner_->GetHotkeyManager();
+    ui::BeginDisabled(!enabled);
+    for (unsigned index = 0; index < handleModeList_.size(); ++index)
+    {
+        const ea::string& mode = handleModeList_[index];
+        const unsigned count = FilterHandlesByMode(handleSet_.handles_, mode).size();
+        const ea::string label = Format("{} {}##HandleMode{}", mode, count, index);
+        if (index > 0)
+        {
+            // Wrap to the next line if the button does not fit.
+            const ImGuiStyle& style = ui::GetStyle();
+            const float buttonWidth = ui::CalcTextSize(Format("{} {}", mode, count).c_str()).x + style.FramePadding.x * 2.0f;
+            const float separatorWidth = ui::CalcTextSize("|").x + style.ItemSpacing.x * 2.0f;
+            if (ui::GetContentRegionAvail().x >= separatorWidth + buttonWidth)
+            {
+                ui::SameLine();
+                ui::TextDisabled("|");
+                ui::SameLine();
+            }
+        }
+        const bool active = mode == activeMode_;
+        if (active)
+            ui::PushStyleColor(ImGuiCol_Button, ui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+        if (ui::SmallButton(label.c_str()))
+            handleModes_[brush->GetTypeName()] = mode;
+        if (active)
+            ui::PopStyleColor();
+        if (ui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ui::SetTooltip("Handle mode %s. Next mode: %s. Previous mode: %s.", mode.c_str(),
+                hotkeyManager->GetHotkeyLabel(Hotkey_NextHandleMode).c_str(),
+                hotkeyManager->GetHotkeyLabel(Hotkey_PreviousHandleMode).c_str());
+        }
+    }
+    ui::EndDisabled();
 }
 
 void CsgEditorAddon::RenderMaterialRows(Component* brush)
