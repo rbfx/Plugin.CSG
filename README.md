@@ -159,12 +159,15 @@ Then `P_ACCEPTED` is false and the parameters stay. A non-finite delta, an unkno
 An accepted move marks the brush dirty once. In C++ the same API is `CsgProceduralBrush::GetHandles` and `MoveHandles`.
 A repeated id counts once. The handles apply in the given order.
 
-The ids are a file contract.
+The ids are a file contract. New ids do not change the protocol version: it stays 2.
+
+A corner moves once by the delta, also if a corner handle and an edge handle name it, or two edge handles name it. A face handle adds its move along the axis on top.
 
 | Shape | Id | Handle |
 | --- | --- | --- |
 | Box | 0 to 7 | Corners (points). Bit 0 is +X, bit 1 is +Y, bit 2 is +Z. |
 | Box | 20 to 25 | Faces (axes) in the order -X, +X, -Y, +Y, -Z, +Z. The face moves its 4 corners along the axis. |
+| Box | 30 to 41 | Edges (points) at the midpoint of the 2 corners. Ids 30 to 33 are parallel to X, 34 to 37 to Y, 38 to 41 to Z. In a group the order is ascending by the bits of the other two axes (the lower axis is bit 0, 0 is the minus side). The names are "Edge X -Y -Z", "Edge X +Y -Z", "Edge X -Y +Z", "Edge X +Y +Z", then "Edge -X Y -Z" and so on. An edge moves its 2 corners by the delta. |
 | Sphere | 0 to 5 | Radius at +X, -X, +Y, -Y, +Z, -Z. The + and - handles of one axis edit one component. |
 | Cylinder | 0, 1 | Bottom center and top center (points). |
 | Cylinder | 2 to 5 | Bottom radius at +X, -X, +Z, -Z. Not offered if the bottom is an apex. |
@@ -475,7 +478,7 @@ The handles of each shape:
 
 | Shape | Handles |
 | --- | --- |
-| Box | 8 corners (points) and 6 faces (axes). A face moves its 4 corners. |
+| Box | 8 corners (points), 6 faces (axes) and 12 edges (points): 26 handles. A face moves its 4 corners. An edge moves its 2 corners. |
 | Sphere | 6 radii (axes) at +X, -X, +Y, -Y, +Z and -Z. |
 | Cylinder | The bottom and top centers (points), 4 bottom and 4 top radii (axes) and the bulge (axis). A radius at an apex and a bulge on a thin body are not offered. |
 | Ring | The major radius, the radial and the axial tube radius, and the arc end (axes). |
@@ -597,6 +600,8 @@ The editor has no test harness for addons. Do these checks by hand:
 88. Set the base model of a root to a model with an open face. Add a subtract brush. The overlay shows a red "Invalid:" line with the reason, also when the "CSG stats" header is closed.
 89. Add a box. The "Shape" section shows "Size 1.000 x 1.000 x 1.000". Scale the node to 1, 2, 3. The size shows 1.000 x 2.000 x 3.000.
 90. Drag a face handle. While the mouse is down, the section shows "Delta: x y z". After the release, the line is gone.
+91. Add a box. The box shows 26 handles: 8 corners, 6 faces and 12 edges. The edge handles are squares at the midpoints of the edges.
+92. Drag an edge handle with the gizmo. The 2 corners of the edge move together and the other 6 corners stay. Select an edge and one of its corners with Shift+click. The shared corner moves once.
 
 ## How to try the sample scene
 
