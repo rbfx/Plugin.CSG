@@ -288,7 +288,8 @@ TEST_CASE("CsgInternal::ToNodeSpace applies the inverse scale", "[root]")
     const ModelVertex& result = model->geometries_[0].vertices_[0];
     CHECK(result.GetPosition().Equals(Vector3(2.0f, 2.0f, 6.0f), 1e-5f));
     CHECK(result.GetNormal().Length() == Catch::Approx(1.0f).margin(1e-5f));
-    CHECK(result.GetNormal().x_ > result.GetNormal().y_);
+    // The shader multiplies the stored normal by the node scale. That must give the input normal.
+    CHECK((result.GetNormal() * Vector3(2.0f, 1.0f, 1.0f)).Normalized().Equals(Vector3(1.0f, 1.0f, 0.0f).Normalized(), 1e-5f));
     CHECK(result.tangent_.w_ == -1.0f);
     CHECK(result.GetTangent().Length() == Catch::Approx(1.0f).margin(1e-5f));
     CHECK(model->boundingBox_.min_.Equals(Vector3(-2.0f, -2.0f, -6.0f), 1e-5f));

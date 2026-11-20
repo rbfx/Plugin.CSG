@@ -1111,9 +1111,10 @@ void ToNodeSpace(CsgTriangulatedModel& model, const Vector3& scale)
         for (ModelVertex& vertex : geometry.vertices_)
         {
             vertex.SetPosition(vertex.GetPosition() * inverse);
-            // Normals use the inverse transpose of the position transform. Surface directions use it directly.
+            // The engine shader transforms normals with mat3(model), not the inverse transpose.
+            // The stored normal is n / scale, so the shader gets back the true normal.
             if (vertex.HasNormal())
-                vertex.SetNormal((vertex.GetNormal() * scale).NormalizedOrDefault(vertex.GetNormal()));
+                vertex.SetNormal((vertex.GetNormal() * inverse).NormalizedOrDefault(vertex.GetNormal()));
             if (vertex.HasTangent())
             {
                 const Vector3 tangent = (vertex.GetTangent() * inverse).NormalizedOrDefault(vertex.GetTangent());
