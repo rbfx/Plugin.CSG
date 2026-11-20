@@ -34,6 +34,8 @@ void CsgProceduralBrush::RegisterObject(Context* context)
     URHO3D_ACCESSOR_ATTRIBUTE("Is Enabled", IsEnabled, SetEnabled, bool, true, AM_DEFAULT);
     URHO3D_ENUM_ACCESSOR_ATTRIBUTE(
         "Operation", GetOperation, SetOperation, CsgOperation, CsgOperationNames, CsgOperation::Union, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("Shape Material", GetShapeMaterialAttr, SetShapeMaterialAttr, ResourceRef,
+        ResourceRef(Material::GetTypeStatic()), AM_DEFAULT);
     URHO3D_ACCESSOR_ATTRIBUTE("Materials", GetMaterialsAttr, SetMaterials, ResourceRefList,
         ResourceRefList(Material::GetTypeStatic()), AM_DEFAULT);
     URHO3D_ENUM_ACCESSOR_ATTRIBUTE(
@@ -202,6 +204,12 @@ void CsgProceduralBrush::OnNodeSet(Node* previousNode, Node* currentNode)
     BaseClassName::OnNodeSet(previousNode, currentNode);
 }
 
+void CsgProceduralBrush::SetShapeMaterialAttr(const ResourceRef& value)
+{
+    shapeMaterial_ = ResourceRef(Material::GetTypeStatic(), value.name_);
+    MarkDirty();
+}
+
 void CsgProceduralBrush::SetMaterials(const ResourceRefList& value)
 {
     // SetModel is not used here: it resizes the materials from the "Model" attribute.
@@ -216,6 +224,15 @@ void CsgProceduralBrush::UpdateMaterialSlots()
     const ResourceRefList& materials = GetMaterialsAttr();
     if (materials.names_.size() != GetNumMaterialSlots() || materials.type_ != Material::GetTypeStatic())
         SetMaterials(materials);
+}
+
+ea::string ResolveSlotMaterial(const ea::string& shape, const ResourceRefList& faces, unsigned slot)
+{
+    if (slot < faces.names_.size() && !faces.names_[slot].empty())
+        return faces.names_[slot];
+    if (!shape.empty())
+        return shape;
+    return faces.names_.empty() ? ea::string() : faces.names_[0];
 }
 
 } // namespace Urho3D

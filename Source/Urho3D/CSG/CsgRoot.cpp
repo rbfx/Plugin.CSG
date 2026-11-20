@@ -6,6 +6,7 @@
 #include "Urho3D/CSG/Csg.h"
 #include "Urho3D/CSG/CsgBrush.h"
 #include "Urho3D/CSG/CsgCorefine.h"
+#include "Urho3D/CSG/CsgProceduralBrush.h"
 #include "Urho3D/CSG/CsgRootInternal.h"
 #include "Urho3D/CSG/CsgRootProtocol.h"
 #include "Urho3D/CSG/CsgSolid.h"
@@ -1769,21 +1770,22 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
         staticModel->SetModel(generatedModel);
         // A generated model has no name, so it has no material list file. Empty materials clear the old ones.
         const ResourceRefList& materialsAttr = brush->GetMaterialsAttr();
-        if (materialsAttr.names_.empty())
+        const auto* procedural = brush->Cast<CsgProceduralBrush>();
+        const ea::string shapeMaterial = procedural ? procedural->GetShapeMaterial() : ea::string();
+        if (materialsAttr.names_.empty() && shapeMaterial.empty())
         {
             staticModel->SetMaterial(nullptr);
             return true;
         }
 
-        // An empty or missing slot uses the material of slot 0. This is done before the material names
-        // are compared for the output geometries, so equal faces merge into one output geometry.
+        // The face override wins, then the shape material, then the material of slot 0. This is done before
+        // the material names are compared for the output geometries, so equal faces merge into one output geometry.
         ResourceRefList resolved(materialsAttr.type_);
         const unsigned numGeometries = generatedModel->GetNumGeometries();
         resolved.names_.resize(numGeometries);
         for (unsigned i = 0; i < numGeometries; ++i)
         {
-            const bool hasName = i < materialsAttr.names_.size() && !materialsAttr.names_[i].empty();
-            resolved.names_[i] = hasName ? materialsAttr.names_[i] : materialsAttr.names_[0];
+            resolved.names_[i] = ResolveSlotMaterial(shapeMaterial, materialsAttr, i);
         }
         staticModel->SetMaterialsAttr(resolved);
         return true;

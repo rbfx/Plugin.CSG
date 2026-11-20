@@ -23,7 +23,10 @@ struct CsgShapeMesh;
 ///   The brush logs again only after the parameters were valid in between.
 /// - Each face group of the mesh is one geometry of the model and one material slot.
 ///   The "Materials" attribute always has one entry for each slot. See `GetNumMaterialSlots`.
-///   An empty slot uses the material of slot 0. Equal materials merge into one output geometry.
+///   Equal materials merge into one output geometry.
+/// - The attribute "Shape Material" is the material of the whole shape. The attribute "Materials" holds
+///   the face overrides. A slot uses its own material, else the shape material, else the material of slot 0.
+///   The last step keeps old scenes the same. See `ResolveSlotMaterial`.
 ///
 /// To add a shape: add a generator function in CsgShapes.h and a subclass that calls it.
 class PLUGIN_RBFXCSG_API CsgProceduralBrush : public CsgBrush
@@ -34,7 +37,7 @@ public:
     explicit CsgProceduralBrush(Context* context);
     ~CsgProceduralBrush() override;
 
-    /// Register the common attributes: "Is Enabled", "Operation", "Materials", "UV Mode", "UV Scale" and "UV Offset".
+    /// Register the common attributes: "Is Enabled", "Operation", "Shape Material", "Materials", "UV Mode", "UV Scale" and "UV Offset".
     /// There is no "Model". The default "UV Mode" is Root.
     /// @nobind
     static void RegisterObject(Context* context);
@@ -46,6 +49,13 @@ public:
 
     /// @nobind
     bool GetGeneratedModel(SharedPtr<Model>& model) const override;
+
+    /// Get the material of the whole shape. An empty name means no shape material.
+    const ea::string& GetShapeMaterial() const { return shapeMaterial_.name_; }
+    /// Get the shape material as an attribute value.
+    const ResourceRef& GetShapeMaterialAttr() const { return shapeMaterial_; }
+    /// Set the shape material and mark the brush dirty.
+    void SetShapeMaterialAttr(const ResourceRef& value);
 
     /// Set the materials. The list is resized to the number of material slots. The extra names go.
     void SetMaterials(const ResourceRefList& value) override;
@@ -110,6 +120,8 @@ private:
     /// Resize the "Materials" attribute to the number of material slots. The existing names stay.
     void UpdateMaterialSlots();
 
+    /// The material of the whole shape.
+    ResourceRef shapeMaterial_{Material::GetTypeStatic()};
     /// The generated model. Null if the parameters are not valid.
     mutable SharedPtr<Model> model_;
     /// True if the model must be generated again before the next read.
@@ -117,5 +129,10 @@ private:
     /// True if the last generated shape was valid. The warning shows only when the shape becomes not valid.
     mutable bool lastValid_{true};
 };
+
+/// Return the material name of a slot. Pure function.
+/// The result is the face override, else the shape material, else the face override of slot 0 (legacy scenes).
+/// A slot out of range has no override. It uses the shape material, else slot 0.
+PLUGIN_RBFXCSG_API ea::string ResolveSlotMaterial(const ea::string& shape, const ResourceRefList& faces, unsigned slot);
 
 } // namespace Urho3D

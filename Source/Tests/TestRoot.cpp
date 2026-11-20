@@ -3235,6 +3235,183 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
     CHECK(errors.GetCount() == 0);
 }
 
+TEST_CASE("ResolveSlotMaterial uses override, shape material, then slot 0", "[shapes][materials]")
+{
+    const ResourceRefList faces(Material::GetTypeStatic(), {"A", "", "C", ""});
+    const ResourceRefList noneSet(Material::GetTypeStatic(), {"", "", "", ""});
+    const ResourceRefList empty(Material::GetTypeStatic());
+
+    // An override wins over the shape material.
+    CHECK(ResolveSlotMaterial("S", faces, 0) == "A");
+    CHECK(ResolveSlotMaterial("S", faces, 2) == "C");
+    // An empty slot inherits the shape material.
+    CHECK(ResolveSlotMaterial("S", faces, 1) == "S");
+    CHECK(ResolveSlotMaterial("S", faces, 3) == "S");
+    // Without a shape material an empty slot uses slot 0 (old scenes).
+    CHECK(ResolveSlotMaterial("", faces, 1) == "A");
+    CHECK(ResolveSlotMaterial("", faces, 2) == "C");
+    // All empty.
+    CHECK(ResolveSlotMaterial("", noneSet, 2).empty());
+    CHECK(ResolveSlotMaterial("S", noneSet, 2) == "S");
+    CHECK(ResolveSlotMaterial("", empty, 0).empty());
+    CHECK(ResolveSlotMaterial("S", empty, 0) == "S");
+    // A slot out of range has no override.
+    CHECK(ResolveSlotMaterial("S", faces, 9) == "S");
+    CHECK(ResolveSlotMaterial("", faces, 9) == "A");
+}
+
+TEST_CASE("The shape material of a box brush has a default, saves and loads", "[shapes][materials]")
+{
+    auto context = MakeCsgTestContext();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml", "Materials/Shape.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+    Component* component = box;
+
+    SECTION("The default is an empty material")
+    {
+        CHECK(box->GetShapeMaterial().empty());
+        const Variant value = component->GetAttribute("Shape Material");
+        REQUIRE(value.GetType() == VAR_RESOURCEREF);
+        CHECK(value.GetResourceRef().name_.empty());
+        CHECK(value.GetResourceRef().type_ == Material::GetTypeStatic());
+        // The attribute comes before "Materials".
+        int shapeIndex = -1;
+        int materialsIndex = -1;
+        int index = 0;
+        for (const AttributeInfo& info : *component->GetAttributes())
+        {
+            if (info.name_ == "Shape Material")
+                shapeIndex = index;
+            if (info.name_ == "Materials")
+                materialsIndex = index;
+            ++index;
+        }
+        CHECK(shapeIndex >= 0);
+        CHECK(shapeIndex < materialsIndex);
+    }
+
+    SECTION("A setter marks the brush dirty")
+    {
+        box->ClearDirty();
+        box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
+        CHECK(box->IsDirty());
+        CHECK(box->GetShapeMaterial() == "Materials/Shape.xml");
+    }
+
+    SECTION("A save and a load keep the shape material and the overrides")
+    {
+        box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
+        box->SetMaterials(ResourceRefList(
+            Material::GetTypeStatic(), {"", "", "", "Materials/Top.xml", "", ""}));
+        VectorBuffer buffer;
+        REQUIRE(scene->Save(buffer));
+        auto loaded = MakeShared<Scene>(context);
+        buffer.Seek(0);
+        REQUIRE(loaded->Load(buffer));
+        auto* loadedBox = loaded->GetChild("Root")->GetChild("Box")->GetComponent<CsgBoxBrush>();
+        REQUIRE(loadedBox);
+        CHECK(loadedBox->GetShapeMaterial() == "Materials/Shape.xml");
+        CHECK(loadedBox->GetMaterialsAttr().names_ == box->GetMaterialsAttr().names_);
+    }
+
+    SECTION("An old XML brush without the attribute resolves as before")
+    {
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml"}));
+        VectorBuffer buffer;
+        REQUIRE(scene->SaveXML(buffer));
+        buffer.Seek(0);
+        const ea::string text = buffer.ReadString();
+        ea::string old;
+        for (const ea::string& line : text.split('\n', true))
+        {
+            if (!line.contains("Shape Material"))
+                old += line + "\n";
+        }
+        CHECK_FALSE(old.contains("Shape Material"));
+        VectorBuffer oldBuffer;
+        oldBuffer.Write(old.c_str(), old.length());
+        oldBuffer.Seek(0);
+        auto loaded = MakeShared<Scene>(context);
+        REQUIRE(loaded->LoadXML(oldBuffer));
+        auto* loadedBox = loaded->GetChild("Root")->GetChild("Box")->GetComponent<CsgBoxBrush>();
+        REQUIRE(loadedBox);
+        CHECK(loadedBox->GetShapeMaterial().empty());
+        const ResourceRefList& faces = loadedBox->GetMaterialsAttr();
+        REQUIRE(faces.names_.size() == 6);
+        // Slot 0 fills the empty slots, as before.
+        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 1) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 3) == "Materials/Top.xml");
+        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 5) == "Materials/Box.xml");
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("The root applies the shape material to the faces of a box", "[root][materials]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    context->RegisterSubsystem<VirtualFileSystem>();
+    for (const char* name : {"Materials/Shape.xml", "Materials/Top.xml"})
+    {
+        auto material = MakeShared<Material>(context);
+        material->SetName(name);
+        context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    }
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
+    CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
+    box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
+
+    SECTION("The shape material alone gives one geometry")
+    {
+        BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
+        CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Shape.xml"});
+    }
+
+    SECTION("An override reaches only its group")
+    {
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"", "", "", "Materials/Top.xml", "", ""}));
+        BuildFully(root, workQueue);
+        const Model* output = GetOutput(root)->GetModel();
+        REQUIRE(output->GetNumGeometries() == 2);
+        const ea::vector<ea::string>& names = GetOutput(root)->GetMaterialsAttr().names_;
+        REQUIRE(names.size() == 2);
+        const unsigned topGeometry = names[0] == "Materials/Top.xml" ? 0 : 1;
+        CHECK(names[1 - topGeometry] == "Materials/Shape.xml");
+        for (const CsgPolygon& polygon : CsgBuildPolygonsFromModel(output, Matrix3x4::IDENTITY))
+        {
+            bool onTop = true;
+            for (const ModelVertex& vertex : polygon.vertices_)
+                onTop = onTop && Abs(vertex.GetPosition().y_ - 0.5f) < 1e-4f;
+            CHECK(onTop == ((polygon.shared_ & 0xFFFFu) == topGeometry));
+        }
+    }
+
+    SECTION("A shape material without any slot list still applies")
+    {
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"", "", "", "", "", ""}));
+        BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Shape.xml"});
+    }
+
+    CHECK(errors.GetCount() == 0);
+}
+
 namespace
 {
 
