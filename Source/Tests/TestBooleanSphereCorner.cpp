@@ -105,6 +105,18 @@ bool IsValid(const BoolResult& r)
         && r.check_.volume_ > 0.0;
 }
 
+/// An empty result: no face, or no positive volume. A sweep case must not give it.
+bool IsEmpty(const BoolResult& r)
+{
+    return r.solid_->FaceCount() == 0 || r.check_.volume_ <= 0.0;
+}
+
+/// A sweep case passes when the result is valid and not empty.
+bool IsSweepOk(const BoolResult& r)
+{
+    return IsValid(r) && !IsEmpty(r);
+}
+
 /// A point in units of 1/1024 (the grid of the float mode). The position is exact in both modes.
 struct GridInts
 {
@@ -171,16 +183,20 @@ ea::vector<CsgPolygon> GridTetrahedron(const GridInts (&p)[4], bool reverseOrder
 struct SweepCounts
 {
     unsigned failed_{};
+    unsigned empty_{};
     int fold_{};
     int foldInside_{};
+    int foldOnEdge_{};
     int unconstrainable_{};
     int checked_{};
 
     void Add(const BoolResult& r)
     {
-        failed_ += IsValid(r) ? 0 : 1;
+        failed_ += IsSweepOk(r) ? 0 : 1;
+        empty_ += IsEmpty(r) ? 1 : 0;
         fold_ += r.fold_;
         foldInside_ += r.foldInside_;
+        foldOnEdge_ += r.foldOnEdge_;
         unconstrainable_ += r.unconstrainable_;
         checked_ += r.checked_;
     }
@@ -251,7 +267,7 @@ SweepCounts SweepCorner(Context* context, unsigned seed, unsigned count)
         {
             const BoolResult result = MakeBoxMinusSphere(context, radius, center, smooth);
             counts.Add(result);
-            if (!IsValid(result))
+            if (!IsSweepOk(result))
                 UNSCOPED_INFO("radius " << radius << " center (" << center.x_ << ", " << center.y_ << ", "
                                         << center.z_ << ") smooth " << smooth);
         });
@@ -285,6 +301,10 @@ struct RecutCounts
     unsigned failed_{};
     unsigned duplicates_{};
     unsigned open_{};
+    unsigned empty_{};
+    /// Second cuts with a volume difference above 1e-3 and above 0.1.
+    unsigned volumeAbove1em3_{};
+    unsigned volumeAbove0p1_{};
     long long addedFaces_{};
     double maxVolumeDifference_{};
 
@@ -293,8 +313,9 @@ struct RecutCounts
         const BoolResult& first = recut.first_;
         const BoolResult& second = recut.second_;
         ++cases_;
-        firstFailed_ += IsValid(first) ? 0 : 1;
-        if (!IsValid(second))
+        firstFailed_ += IsSweepOk(first) ? 0 : 1;
+        empty_ += (IsEmpty(first) ? 1 : 0) + (IsEmpty(second) ? 1 : 0);
+        if (!IsSweepOk(second))
         {
             ++failed_;
             duplicates_ += second.check_.duplicates_ != 0 ? 1 : 0;
@@ -305,7 +326,10 @@ struct RecutCounts
                 second.check_.openEdges_, first.check_.volume_, second.check_.volume_);
         }
         addedFaces_ += static_cast<long long>(second.solid_->FaceCount()) - first.solid_->FaceCount();
-        maxVolumeDifference_ = ea::max(maxVolumeDifference_, std::abs(second.check_.volume_ - first.check_.volume_));
+        const double volumeDifference = std::abs(second.check_.volume_ - first.check_.volume_);
+        volumeAbove1em3_ += volumeDifference > 1e-3 ? 1 : 0;
+        volumeAbove0p1_ += volumeDifference > 0.1 ? 1 : 0;
+        maxVolumeDifference_ = ea::max(maxVolumeDifference_, volumeDifference);
     }
 };
 
@@ -329,6 +353,7 @@ TEST_CASE("Box minus a sphere: a crossing on the twin of a coplanar edge keeps t
         CHECK(result.check_.degenerates_ == 0);
         CHECK(result.solid_->FaceCount() > 0);
         CHECK(IsValid(result));
+        CHECK(result.foldOnEdge_ == 0);
     }
 }
 
@@ -348,24 +373,28 @@ TEST_CASE("Box minus a sphere: a crossing inside its triangle does not round ont
         CHECK(result.check_.degenerates_ == 0);
         CHECK(result.solid_->FaceCount() > 0);
         CHECK(IsValid(result));
+        CHECK(result.foldOnEdge_ == 0);
     }
 }
 
 TEST_CASE("Box minus a sphere near a corner gives a valid result over a random sweep", "[boolean][regression]")
 {
     auto context = MakeShared<Context>();
+    // The case count is small on purpose. It keeps the total test time below one second in Debug.
     const SweepCounts counts = SweepCorner(context, 20261119u, 60);
     CHECK(counts.failed_ == 0);
+    CHECK(counts.empty_ == 0);
     // No crossing folds by the rule "inside" after ConstrainCrossings. A twin that moves later would show here.
     CHECK(counts.foldInside_ == 0);
+    CHECK(counts.foldOnEdge_ == 0);
 }
 
 TEST_CASE("Box minus a sphere near a corner over a long random sweep", "[.][boolean][sweep]")
 {
     auto context = MakeShared<Context>();
     const SweepCounts counts = SweepCorner(context, 1u, 5000);
-    printf("random sweep: failed %u, checked %d, fold %d, fold inside %d, unconstrainable %d\n", counts.failed_,
-        counts.checked_, counts.fold_, counts.foldInside_, counts.unconstrainable_);
+    printf("random sweep: failed %u, empty %u, checked %d, fold %d, fold inside %d, unconstrainable %d\n", counts.failed_,
+        counts.empty_, counts.checked_, counts.fold_, counts.foldInside_, counts.unconstrainable_);
     CHECK(counts.failed_ == 0);
 }
 
@@ -378,12 +407,12 @@ TEST_CASE("Box minus a sphere near a corner over a grid of centers", "[.][boolea
         {
             const BoolResult result = MakeBoxMinusSphere(context, radius, center, smooth);
             counts.Add(result);
-            if (!IsValid(result))
+            if (!IsSweepOk(result))
                 UNSCOPED_INFO("radius " << radius << " center (" << center.x_ << ", " << center.y_ << ", "
                                         << center.z_ << ")");
         });
-    printf("grid sweep: failed %u, checked %d, fold %d, fold inside %d, unconstrainable %d\n", counts.failed_,
-        counts.checked_, counts.fold_, counts.foldInside_, counts.unconstrainable_);
+    printf("grid sweep: failed %u, empty %u, checked %d, fold %d, fold inside %d, unconstrainable %d\n", counts.failed_,
+        counts.empty_, counts.checked_, counts.fold_, counts.foldInside_, counts.unconstrainable_);
     CHECK(counts.failed_ == 0);
 }
 
@@ -398,9 +427,10 @@ TEST_CASE("Box minus a sphere near a corner and a second cut with the same spher
     ForEachGridCase(recut);
     ForEachRandomCase(20261119u, 80, recut);
     printf("re-cut sweep: cases %u, first cut not valid %u, second cut not valid %u (duplicates %u, open %u), "
+           "empty results %u, volume difference above 1e-3 %u, above 0.1 %u, "
            "added faces %lld, max volume difference %.9g\n",
-        counts.cases_, counts.firstFailed_, counts.failed_, counts.duplicates_, counts.open_, counts.addedFaces_,
-        counts.maxVolumeDifference_);
+        counts.cases_, counts.firstFailed_, counts.failed_, counts.duplicates_, counts.open_, counts.empty_,
+        counts.volumeAbove1em3_, counts.volumeAbove0p1_, counts.addedFaces_, counts.maxVolumeDifference_);
     CHECK(counts.firstFailed_ == 0);
 }
 
@@ -450,6 +480,7 @@ void CheckFixture(const BoolResult& result, const char* name)
               << result.unconstrainable_);
     CHECK(IsValid(result));
     CHECK(result.foldInside_ == 0);
+    CHECK(result.foldOnEdge_ == 0);
 }
 
 } // namespace
@@ -522,8 +553,8 @@ TEST_CASE("Boolean: a tilted box top near the box top, and a cylinder near the b
         for (const CsgOperation operation : {CsgOperation::DifferenceAB, CsgOperation::Union})
         {
             const BoolResult result = RunBoolean(*unit, *b, operation);
-            printf("tilted box op %d: fold %d, fold inside %d, unconstrainable %d\n", static_cast<int>(operation),
-                result.fold_, result.foldInside_, result.unconstrainable_);
+            INFO("tilted box op " << static_cast<int>(operation) << ": fold " << result.fold_ << ", fold inside "
+                                  << result.foldInside_ << ", unconstrainable " << result.unconstrainable_);
             CheckFixture(result, "tilted box");
         }
     }
@@ -543,8 +574,8 @@ TEST_CASE("Boolean: a tilted box top near the box top, and a cylinder near the b
         for (const CsgOperation operation : {CsgOperation::DifferenceAB, CsgOperation::Union})
         {
             const BoolResult result = RunBoolean(*unit, *b, operation);
-            printf("cylinder op %d: fold %d, fold inside %d, unconstrainable %d\n", static_cast<int>(operation),
-                result.fold_, result.foldInside_, result.unconstrainable_);
+            INFO("cylinder op " << static_cast<int>(operation) << ": fold " << result.fold_ << ", fold inside "
+                                << result.foldInside_ << ", unconstrainable " << result.unconstrainable_);
             CheckFixture(result, "cylinder");
         }
     }
