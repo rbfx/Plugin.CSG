@@ -1484,4 +1484,112 @@ bool CsgGenerateArch(const CsgArchParams& params, CsgShapeMesh& mesh)
     return writer.Finish();
 }
 
+namespace
+{
+/// Return the point of the triangle that is nearest to the point.
+Vector3 ClosestPointOnTriangle(const Vector3& p, const Vector3& a, const Vector3& b, const Vector3& c)
+{
+    const Vector3 ab = b - a;
+    const Vector3 ac = c - a;
+    const Vector3 ap = p - a;
+    const float d1 = ab.DotProduct(ap);
+    const float d2 = ac.DotProduct(ap);
+    if (d1 <= 0.0f && d2 <= 0.0f)
+        return a;
+    const Vector3 bp = p - b;
+    const float d3 = ab.DotProduct(bp);
+    const float d4 = ac.DotProduct(bp);
+    if (d3 >= 0.0f && d4 <= d3)
+        return b;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+        return a + ab * (d1 / (d1 - d3));
+    const Vector3 cp = p - c;
+    const float d5 = ab.DotProduct(cp);
+    const float d6 = ac.DotProduct(cp);
+    if (d6 >= 0.0f && d5 <= d6)
+        return c;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+        return a + ac * (d2 / (d2 - d6));
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    const float denom = 1.0f / (va + vb + vc);
+    return a + ab * (vb * denom) + ac * (vc * denom);
+}
+} // namespace
+
+ea::optional<unsigned> CsgFindSlotAtPoint(const CsgShapeMesh& mesh, const Vector3& point, const Vector3& normal)
+{
+    if (mesh.vertices_.empty() || mesh.indices_.size() < 3)
+        return ea::nullopt;
+
+    BoundingBox box;
+    for (const ModelVertex& vertex : mesh.vertices_)
+        box.Merge(vertex.GetPosition());
+    const float tolerance = 0.001f * box.Size().Length();
+
+    const unsigned groupCount = mesh.groups_.empty() ? 1 : mesh.groups_.size();
+    const bool useNormal = normal.LengthSquared() > 0.0f;
+    const Vector3 unitNormal = useNormal ? normal.Normalized() : Vector3::ZERO;
+    ea::optional<unsigned> bestSlot;
+    float bestDistance = M_INFINITY;
+    for (unsigned groupIndex = 0; groupIndex < groupCount; ++groupIndex)
+    {
+        unsigned start = 0;
+        unsigned count = mesh.indices_.size();
+        unsigned slot = 0;
+        if (!mesh.groups_.empty())
+        {
+            const CsgShapeGroup& group = mesh.groups_[groupIndex];
+            start = group.indexStart_;
+            count = group.indexCount_;
+            slot = group.slot_ == CsgShapeGroup::SlotFromIndex ? groupIndex : group.slot_;
+        }
+        for (unsigned i = start; i + 2 < start + count && i + 2 < mesh.indices_.size(); i += 3)
+        {
+            const Vector3 a = mesh.vertices_[mesh.indices_[i]].GetPosition();
+            const Vector3 b = mesh.vertices_[mesh.indices_[i + 1]].GetPosition();
+            const Vector3 c = mesh.vertices_[mesh.indices_[i + 2]].GetPosition();
+            Vector3 faceNormal = (b - a).CrossProduct(c - a);
+            if (faceNormal.LengthSquared() <= 0.0f)
+                continue;
+            faceNormal.Normalize();
+            if (useNormal && Abs(faceNormal.DotProduct(unitNormal)) <= 0.9f)
+                continue;
+            const float distance = (ClosestPointOnTriangle(point, a, b, c) - point).Length();
+            const bool better = distance < bestDistance - 1e-6f
+                || (distance <= bestDistance + 1e-6f && bestSlot && slot < *bestSlot);
+            if (better)
+            {
+                bestDistance = ea::min(distance, bestDistance);
+                bestSlot = slot;
+            }
+        }
+    }
+    if (!bestSlot || bestDistance > tolerance)
+        return ea::nullopt;
+    return bestSlot;
+}
+
+ea::string CsgGetSlotName(const ea::string& shapeTypeName, unsigned slot)
+{
+    static const ea::pair<const char*, ea::vector<const char*>> tables[] = {
+        {"CsgBoxBrush", {"Left", "Right", "Bottom", "Top", "Back", "Front"}},
+        {"CsgCylinderBrush", {"Side", "Top", "Bottom"}},
+        {"CsgRingBrush", {"Outer", "Inner", "Top", "Bottom", "Start cap", "End cap"}},
+        {"CsgWedgeBrush", {"Bottom", "Back", "Slope", "Left", "Right"}},
+        {"CsgStairsBrush", {"Treads", "Risers", "Sides", "Bottom", "Back"}},
+        {"CsgArchBrush", {"Outer", "Inner", "Front", "Back", "Ends"}},
+        {"CsgSphereBrush", {"Surface"}},
+    };
+    for (const auto& table : tables)
+    {
+        if (shapeTypeName == table.first && slot < table.second.size())
+            return table.second[slot];
+    }
+    return Format("Face {}", slot);
+}
+
 } // namespace Urho3D

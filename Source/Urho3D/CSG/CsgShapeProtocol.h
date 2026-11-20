@@ -122,4 +122,20 @@ URHO3D_EVENT(E_CSGSHAPEQUERYBOUNDS, CsgShapeQueryBounds)
     URHO3D_PARAM(P_MAX, Max); // Vector3
 }
 
+/// Query the material slot of the face at a point of a shape. The event does not change the protocol version.
+/// In: P_POSITION (Vector3) and P_NORMAL (Vector3) in the local space of the brush, before the node scale.
+/// The normal is the unit normal of the hit face. A zero normal accepts all faces.
+/// Out: P_VALID (bool), P_SLOT (unsigned) and P_SLOTNAME (string).
+/// P_VALID is false if the shape is not valid or no face is at the point. Then P_SLOT is 0 and P_SLOTNAME is empty.
+/// Only a face with |dot(face normal, P_NORMAL)| > 0.9 counts. The nearest face wins. A tie goes to the lower slot.
+/// P_SLOTNAME is the name of the face, for example "Top".
+URHO3D_EVENT(E_CSGSHAPEQUERYSLOT, CsgShapeQuerySlot)
+{
+    URHO3D_PARAM(P_POSITION, Position); // Vector3
+    URHO3D_PARAM(P_NORMAL, Normal); // Vector3
+    URHO3D_PARAM(P_VALID, Valid); // bool
+    URHO3D_PARAM(P_SLOT, Slot); // unsigned
+    URHO3D_PARAM(P_SLOTNAME, SlotName); // string
+}
+
 } // namespace Urho3D

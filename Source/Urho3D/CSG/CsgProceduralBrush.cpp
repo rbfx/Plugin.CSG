@@ -23,6 +23,7 @@ CsgProceduralBrush::CsgProceduralBrush(Context* context)
     SubscribeToEvent(this, E_CSGSHAPEMOVEHANDLES, URHO3D_HANDLER(CsgProceduralBrush, HandleMoveHandles));
     SubscribeToEvent(this, E_CSGSHAPERECENTER, URHO3D_HANDLER(CsgProceduralBrush, HandleRecenter));
     SubscribeToEvent(this, E_CSGSHAPEQUERYBOUNDS, URHO3D_HANDLER(CsgProceduralBrush, HandleQueryBounds));
+    SubscribeToEvent(this, E_CSGSHAPEQUERYSLOT, URHO3D_HANDLER(CsgProceduralBrush, HandleQuerySlot));
 }
 
 CsgProceduralBrush::~CsgProceduralBrush() = default;
@@ -79,6 +80,18 @@ void CsgProceduralBrush::HandleQueryBounds(StringHash /*eventType*/, VariantMap&
     eventData[P_VALID] = model != nullptr;
     eventData[P_MIN] = model ? box.min_ : Vector3::ZERO;
     eventData[P_MAX] = model ? box.max_ : Vector3::ZERO;
+}
+
+void CsgProceduralBrush::HandleQuerySlot(StringHash /*eventType*/, VariantMap& eventData)
+{
+    using namespace CsgShapeQuerySlot;
+    ea::optional<unsigned> slot;
+    CsgShapeMesh mesh;
+    if (IsShapeValid() && GenerateMesh(mesh))
+        slot = CsgFindSlotAtPoint(mesh, eventData[P_POSITION].GetVector3(), eventData[P_NORMAL].GetVector3());
+    eventData[P_VALID] = slot.has_value();
+    eventData[P_SLOT] = slot.value_or(0u);
+    eventData[P_SLOTNAME] = slot ? CsgGetSlotName(GetTypeName(), *slot) : EMPTY_STRING;
 }
 
 void CsgProceduralBrush::DrawDebugGeometry(DebugRenderer* debug, bool depthTest)

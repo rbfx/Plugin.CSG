@@ -11,6 +11,7 @@
 #include <Urho3D/RenderAPI/RenderAPIDefs.h>
 
 #include <EASTL/array.h>
+#include <EASTL/optional.h>
 #include <EASTL/vector.h>
 
 namespace Urho3D
@@ -54,6 +55,18 @@ struct CsgShapeMesh
     ea::vector<unsigned> indices_;
     ea::vector<CsgShapeGroup> groups_;
 };
+
+/// Find the material slot of the face of a mesh at a point. Pure function.
+/// The point and the normal are in the space of the mesh. The normal is the normal of the hit face.
+/// Only a triangle with |dot(triangle normal, normal)| > 0.9 counts. A zero normal accepts all triangles.
+/// The nearest such triangle wins. A tie goes to the lower slot.
+/// Return nothing if the nearest triangle is farther than 0.001 of the mesh diagonal from the point.
+PLUGIN_RBFXCSG_API ea::optional<unsigned> CsgFindSlotAtPoint(
+    const CsgShapeMesh& mesh, const Vector3& point, const Vector3& normal);
+
+/// Return the name of a material slot of a shape type, for example "Top". The type name is the one of
+/// `Object::GetTypeName`. An unknown type or slot gives "Face <slot>".
+PLUGIN_RBFXCSG_API ea::string CsgGetSlotName(const ea::string& shapeTypeName, unsigned slot);
 
 /// Return the vertex layout of the generated shapes.
 /// It is the layout of CoreData/Models/Box.mdl: position, normal, tangent, two UV sets and a color.

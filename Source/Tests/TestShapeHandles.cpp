@@ -21,7 +21,10 @@
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Timer.h>
 #include <Urho3D/Core/WorkQueue.h>
+#include <Urho3D/Graphics/Geometry.h>
 #include <Urho3D/Graphics/Graphics.h>
+#include <Urho3D/Graphics/IndexBuffer.h>
+#include <Urho3D/Graphics/VertexBuffer.h>
 #include <Urho3D/Graphics/Model.h>
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
@@ -2191,4 +2194,86 @@ TEST_CASE("The face pick keeps the face handle in the full set and finds the siz
         REQUIRE(ChooseFaceHandle(sizeOnly, point, normals[face]));
         CHECK(*ChooseFaceHandle(sizeOnly, point, normals[face]) == 50 + face / 2);
     }
+}
+
+namespace
+{
+
+/// Check that the slot query finds each non empty face of the shape from the centroid of its first triangle.
+template <class T> void CheckSlotQueryOfShape(const char* typeName, unsigned expectedSlots)
+{
+    HandleFixture<T> f;
+    Model* model = f.brush->GetShapeModel();
+    REQUIRE(model);
+    unsigned found = 0;
+    for (unsigned slot = 0; slot < model->GetNumGeometries(); ++slot)
+    {
+        Geometry* geometry = model->GetGeometry(slot, 0);
+        if (!geometry || geometry->GetIndexCount() < 3)
+            continue;
+        INFO(typeName << " slot " << slot);
+        const IndexBuffer* indexBuffer = geometry->GetIndexBuffer();
+        const VertexBuffer* vertexBuffer = geometry->GetVertexBuffer(0);
+        REQUIRE(indexBuffer->GetShadowData());
+        REQUIRE(vertexBuffer->GetShadowData());
+        Vector3 corner[3];
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            const unsigned at = geometry->GetIndexStart() + i;
+            const unsigned index = indexBuffer->GetIndexSize() == 2
+                ? reinterpret_cast<const unsigned short*>(indexBuffer->GetShadowData())[at]
+                : reinterpret_cast<const unsigned*>(indexBuffer->GetShadowData())[at];
+            corner[i] = *reinterpret_cast<const Vector3*>(
+                vertexBuffer->GetShadowData() + index * vertexBuffer->GetVertexSize());
+        }
+        const Vector3 center = (corner[0] + corner[1] + corner[2]) / 3.0f;
+        const Vector3 normal = (corner[1] - corner[0]).CrossProduct(corner[2] - corner[0]).Normalized();
+
+        using namespace CsgShapeQuerySlot;
+        VariantMap data;
+        data[P_POSITION] = center;
+        data[P_NORMAL] = normal;
+        f.brush->SendEvent(E_CSGSHAPEQUERYSLOT, data);
+        REQUIRE(data[P_VALID].GetBool());
+        CHECK(data[P_SLOT].GetUInt() == slot);
+        CHECK(data[P_SLOTNAME].GetString() == CsgGetSlotName(typeName, slot));
+        CHECK(!data[P_SLOTNAME].GetString().starts_with("Face "));
+        ++found;
+    }
+    CHECK(found == expectedSlots);
+}
+
+} // namespace
+
+TEST_CASE("The slot query finds each face of every shape", "[shapes][slot][alt]")
+{
+    CheckSlotQueryOfShape<CsgBoxBrush>("CsgBoxBrush", 6);
+    CheckSlotQueryOfShape<CsgCylinderBrush>("CsgCylinderBrush", 3);
+    CheckSlotQueryOfShape<CsgRingBrush>("CsgRingBrush", 4);
+    CheckSlotQueryOfShape<CsgWedgeBrush>("CsgWedgeBrush", 5);
+    CheckSlotQueryOfShape<CsgStairsBrush>("CsgStairsBrush", 5);
+    CheckSlotQueryOfShape<CsgArchBrush>("CsgArchBrush", 5);
+    CheckSlotQueryOfShape<CsgSphereBrush>("CsgSphereBrush", 1);
+}
+
+TEST_CASE("The slot query gives nothing far from the faces or without a matching normal", "[shapes][slot][alt]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    using namespace CsgShapeQuerySlot;
+    VariantMap far;
+    far[P_POSITION] = Vector3(5.0f, 0.0f, 0.0f);
+    far[P_NORMAL] = Vector3(1.0f, 0.0f, 0.0f);
+    f.brush->SendEvent(E_CSGSHAPEQUERYSLOT, far);
+    CHECK(!far[P_VALID].GetBool());
+    CHECK(far[P_SLOTNAME].GetString().empty());
+
+    // A box edge: the normal picks the face. A zero normal gives the lower slot.
+    VariantMap edge;
+    edge[P_POSITION] = Vector3(0.5f, 0.5f, 0.0f);
+    edge[P_NORMAL] = Vector3(0.0f, 1.0f, 0.0f);
+    f.brush->SendEvent(E_CSGSHAPEQUERYSLOT, edge);
+    CHECK(edge[P_SLOT].GetUInt() == 3);
+    edge[P_NORMAL] = Vector3::ZERO;
+    f.brush->SendEvent(E_CSGSHAPEQUERYSLOT, edge);
+    CHECK(edge[P_SLOT].GetUInt() == 1);
 }

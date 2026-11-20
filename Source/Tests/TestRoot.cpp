@@ -7293,3 +7293,43 @@ TEST_CASE("A pyramid on a box merges with the face and a pyramid cut from a box 
     }
     CHECK(errors.GetCount() == 0);
 }
+
+TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root][pick][alt]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The box is far from the base model, so each ray hits the box.
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    Node* boxNode = root->GetNode()->CreateChild("Box");
+    boxNode->SetPosition(Vector3(10.0f, 0.0f, 0.0f));
+    boxNode->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    boxNode->CreateComponent<CsgBoxBrush>();
+    BuildFully(root, workQueue);
+
+    // The slot order is -X, +X, -Y, +Y, -Z, +Z.
+    const Vector3 normals[6] = {Vector3(-1, 0, 0), Vector3(1, 0, 0), Vector3(0, -1, 0), Vector3(0, 1, 0),
+        Vector3(0, 0, -1), Vector3(0, 0, 1)};
+    const char* names[6] = {"Left", "Right", "Bottom", "Top", "Back", "Front"};
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        INFO("Face " << face);
+        const Vector3 origin = boxNode->GetWorldPosition() + normals[face] * 8.0f;
+        const CsgPickHit hit = root->Pick(origin, -normals[face]);
+        REQUIRE(hit.hit_);
+        REQUIRE(hit.source_ == IdOf(boxNode->GetComponent<CsgBoxBrush>()));
+
+        // The editor converts the world hit to the local space of the brush.
+        using namespace CsgShapeQuerySlot;
+        VariantMap data;
+        data[P_POSITION] = boxNode->WorldToLocal(hit.position_);
+        data[P_NORMAL] = (boxNode->GetWorldRotation().Inverse() * hit.normal_).Normalized();
+        boxNode->GetComponent<CsgBoxBrush>()->SendEvent(E_CSGSHAPEQUERYSLOT, data);
+        REQUIRE(data[P_VALID].GetBool());
+        CHECK(data[P_SLOT].GetUInt() == face);
+        CHECK(data[P_SLOTNAME].GetString() == names[face]);
+    }
+}
