@@ -532,6 +532,99 @@ TEST_CASE("A handle move with a bad delta or a bad id returns false without an e
     CHECK(f.errors.GetCount() == 0);
 }
 
+namespace
+{
+
+/// Check the ids of a cage: all exist, no line joins a handle to itself, no duplicate pair.
+template <class T> void CheckCage(HandleFixture<T>& f, unsigned expectedCount)
+{
+    const auto handles = f.Handles();
+    ea::vector<ea::pair<unsigned, unsigned>> lines;
+    f.brush->GetCageLines(lines);
+    if (expectedCount != ~0u)
+        CHECK(lines.size() == expectedCount);
+    const auto exists = [&](unsigned id)
+    { return ea::any_of(handles.begin(), handles.end(), [&](const CsgShapeHandle& h) { return h.id_ == id; }); };
+    for (unsigned i = 0; i < lines.size(); ++i)
+    {
+        CHECK(exists(lines[i].first));
+        CHECK(exists(lines[i].second));
+        CHECK(lines[i].first != lines[i].second);
+        for (unsigned j = i + 1; j < lines.size(); ++j)
+        {
+            const bool same = lines[i] == lines[j]
+                || (lines[i].first == lines[j].second && lines[i].second == lines[j].first);
+            CHECK(!same);
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("The cage lines of the shapes", "[shapes][handles][cage]")
+{
+    SECTION("The box has 48 lines on the box")
+    {
+        HandleFixture<CsgBoxBrush> f;
+        CheckCage(f, 12 * 2 + 6 * 4);
+        const auto handles = f.Handles();
+        const auto find = [&](unsigned id) -> const CsgShapeHandle&
+        {
+            for (const CsgShapeHandle& h : handles)
+                if (h.id_ == id)
+                    return h;
+            FAIL("missing handle");
+            return handles[0];
+        };
+        ea::vector<ea::pair<unsigned, unsigned>> lines;
+        f.brush->GetCageLines(lines);
+        // The default box has the size 1: all points are on the cube of half size 0.5.
+        for (const auto& line : lines)
+        {
+            for (const unsigned id : {line.first, line.second})
+            {
+                const Vector3 p = find(id).position_;
+                CHECK(std::max({std::abs(p.x_), std::abs(p.y_), std::abs(p.z_)}) == Catch::Approx(0.5f).margin(Eps));
+            }
+        }
+        // Each edge midpoint is the center of the corner-to-corner span of its two lines.
+        for (unsigned edge = 0; edge < 12; ++edge)
+        {
+            const unsigned mid = CsgBoxBrush::FirstEdgeHandle + edge;
+            unsigned count = 0;
+            for (const auto& line : lines)
+                count += (line.first == mid || line.second == mid) ? 1 : 0;
+            CHECK(count == 4); // 2 half lines and 2 face lines
+        }
+    }
+
+    SECTION("The other shapes have valid ids")
+    {
+        { HandleFixture<CsgCylinderBrush> f; CheckCage(f, 1); }
+        { HandleFixture<CsgSphereBrush> f; CheckCage(f, ~0u); }
+        { HandleFixture<CsgRingBrush> f; CheckCage(f, ~0u); }
+        { HandleFixture<CsgArchBrush> f; CheckCage(f, ~0u); }
+        { HandleFixture<CsgStairsBrush> f; CheckCage(f, ~0u); }
+        { HandleFixture<CsgWedgeBrush> f; CheckCage(f, ~0u); }
+    }
+
+    SECTION("The event gives P_CAGE")
+    {
+        HandleFixture<CsgBoxBrush> f;
+        const VariantMap data = Query(f.brush);
+        REQUIRE(data.contains(CsgShapeQueryHandles::P_CAGE));
+        const VariantVector& cage = data.at(CsgShapeQueryHandles::P_CAGE).GetVariantVector();
+        ea::vector<ea::pair<unsigned, unsigned>> lines;
+        f.brush->GetCageLines(lines);
+        REQUIRE(cage.size() == lines.size());
+        for (unsigned i = 0; i < lines.size(); ++i)
+        {
+            CHECK(cage[i].GetIntVector2().x_ == static_cast<int>(lines[i].first));
+            CHECK(cage[i].GetIntVector2().y_ == static_cast<int>(lines[i].second));
+        }
+    }
+}
+
 TEST_CASE("The handle events round trip through a brush component in a scene", "[shapes][handles]")
 {
     HandleFixture<CsgBoxBrush> f;

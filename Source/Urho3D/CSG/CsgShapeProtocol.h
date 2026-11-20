@@ -51,7 +51,7 @@ namespace CsgShapeProtocol
 
 /// The version of the protocol.
 /// Version 2 adds `E_CSGSHAPERECENTER`. The handle ids do not change.
-/// The handle key `HandleGroupKey` and the reply parameter `P_GROUPS` are optional additions.
+/// The handle key `HandleGroupKey` and the reply parameters `P_GROUPS` and `P_CAGE` are optional additions.
 /// They do not change the version. A reader ignores a key that it does not know.
 inline constexpr int Version = 2;
 
@@ -75,12 +75,16 @@ inline const StringHash HandleGroupKey{"Group"};
 /// Optional out: P_GROUPS (StringVector). The groups in the order of the mode bar.
 /// The first entry is the default mode. The list is fixed for a shape type, also if a handle is not present.
 /// An old runtime does not write P_GROUPS and the Group keys. Then the editor shows all handles.
+/// Optional out: P_CAGE (VariantVector of IntVector2). Each entry is a pair of handle ids.
+/// The editor draws a faint dashed line between the two handles. An id can name a handle that the mode hides.
+/// An old runtime does not write P_CAGE. Then the editor draws no cage.
 URHO3D_EVENT(E_CSGSHAPEQUERYHANDLES, CsgShapeQueryHandles)
 {
     URHO3D_PARAM(P_VERSION, Version); // int
     URHO3D_PARAM(P_VALID, Valid); // bool
     URHO3D_PARAM(P_HANDLES, Handles); // VariantVector
     URHO3D_PARAM(P_GROUPS, Groups); // StringVector
+    URHO3D_PARAM(P_CAGE, Cage); // VariantVector of IntVector2
 }
 
 /// Move handles of a shape.

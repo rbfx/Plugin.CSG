@@ -91,6 +91,8 @@ public:
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
     /// Groups: Ends, Radius. The first one is the default.
     void GetHandleGroups(ea::vector<ea::string>& groups) const override;
+    /// One line: the axis from the bottom center (id 0) to the top center (id 1).
+    void GetCageLines(ea::vector<ea::pair<unsigned, unsigned>>& lines) const override;
     /// A center moves by the full delta. A radius component grows by dot(delta, axis) / k.
     /// A scale handle multiplies both radius components by the same factor, so the handle follows the delta.
     /// If both components fall below 0.001 the end becomes an apex. A drag of an apex handle sets the radius pair

@@ -70,6 +70,9 @@ public:
     /// The first entry is the default mode. The list is fixed for a shape type: a handle can go away
     /// (for example at an apex) but the groups do not. The name 'All' is reserved. The default is empty.
     virtual void GetHandleGroups(ea::vector<ea::string>& groups) const { groups.clear(); }
+    /// Fill the list with pairs of handle ids. The editor draws a faint dashed line for each pair.
+    /// The ids are from `GetHandles`. The default gives no line.
+    virtual void GetCageLines(ea::vector<ea::pair<unsigned, unsigned>>& lines) const { lines.clear(); }
     /// Move handles by the TOTAL local delta from the drag start. The call is stateless.
     /// It applies the delta to the current parameters, so the caller restores the parameters before each call.
     /// A handle id that is repeated counts once. The handles apply in the given order.

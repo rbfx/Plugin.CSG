@@ -182,6 +182,12 @@ float GetMeanRadiusX(const CsgCylinderParams& params)
 
 } // namespace
 
+void CsgCylinderBrush::GetCageLines(ea::vector<ea::pair<unsigned, unsigned>>& lines) const
+{
+    lines.clear();
+    lines.emplace_back(0u, 1u);
+}
+
 void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
 {
     handles.clear();

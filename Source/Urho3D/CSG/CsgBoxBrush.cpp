@@ -192,6 +192,28 @@ void CsgBoxBrush::GetHandleGroups(ea::vector<ea::string>& groups) const
     groups = {"Face", "Size", "Edge", "Corner"};
 }
 
+void CsgBoxBrush::GetCageLines(ea::vector<ea::pair<unsigned, unsigned>>& lines) const
+{
+    lines.clear();
+    for (unsigned edge = 0; edge < 12; ++edge)
+    {
+        unsigned low, high;
+        GetEdgeCorners(edge, low, high);
+        lines.emplace_back(low, FirstEdgeHandle + edge);
+        lines.emplace_back(FirstEdgeHandle + edge, high);
+    }
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        for (unsigned edge = 0; edge < 12; ++edge)
+        {
+            unsigned low, high;
+            GetEdgeCorners(edge, low, high);
+            if (IsCornerOnFace(low, face) && IsCornerOnFace(high, face))
+                lines.emplace_back(FirstEdgeHandle + edge, FirstFaceHandle + face);
+        }
+    }
+}
+
 bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
 {
     ea::vector<unsigned> unique;

@@ -56,6 +56,9 @@ public:
     /// Groups: Face (20 to 25, default), Size (50 to 52), Edge (30 to 41), Corner (0 to 7).
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
     void GetHandleGroups(ea::vector<ea::string>& groups) const override;
+    /// 48 lines. Each edge gives 2 lines: corner to edge midpoint and edge midpoint to corner.
+    /// Each face gives 4 lines: the midpoints of its 4 edges to the face center.
+    void GetCageLines(ea::vector<ea::pair<unsigned, unsigned>>& lines) const override;
     /// A size handle with d = dot(delta, e_A) moves the 4 corners of the + face by +d / size and the 4 corners
     /// of the - face by -d / size on the axis A. The box grows by 2 d and the centroid stays.
     /// A corner handle adds delta / size to the corner. A face handle moves its 4 corners along the axis by

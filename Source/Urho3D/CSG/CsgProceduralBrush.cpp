@@ -150,6 +150,15 @@ void CsgProceduralBrush::HandleQueryHandles(StringHash eventType, VariantMap& ev
     for (const ea::string& group : groups)
         groupList.push_back(group);
     eventData[P_GROUPS] = groupList;
+    VariantVector cage;
+    if (valid)
+    {
+        ea::vector<ea::pair<unsigned, unsigned>> lines;
+        GetCageLines(lines);
+        for (const auto& line : lines)
+            cage.push_back(Variant(IntVector2(static_cast<int>(line.first), static_cast<int>(line.second))));
+    }
+    eventData[P_CAGE] = cage;
 }
 
 void CsgProceduralBrush::HandleMoveHandles(StringHash eventType, VariantMap& eventData)
