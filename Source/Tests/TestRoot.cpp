@@ -7271,7 +7271,7 @@ TEST_CASE("A pyramid on a box merges with the face and a pyramid cut from a box 
     CHECK(errors.GetCount() == 0);
 }
 
-TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root][pick][alt]")
+TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root][pick][ctrl]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
@@ -7311,7 +7311,7 @@ TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root
     }
 }
 
-TEST_CASE("A subtract procedural brush owns the carved wall and its material shows there", "[root][pick][alt]")
+TEST_CASE("A subtract procedural brush owns the carved wall and its material shows there", "[root][pick][ctrl]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();

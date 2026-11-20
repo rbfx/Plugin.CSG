@@ -464,12 +464,11 @@ Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.d
 | Modifier | Scope |
 | --- | --- |
 | none | Set all slots of the brush. The new material replaces the existing ones. |
-| Alt | Set only the face under the cursor. Alt wins over Ctrl. |
-| Ctrl | Set only the face of the selected face handle. |
+| Ctrl | Set only the face under the cursor. |
 
-The hint line of the drag shows the mode: "Drop: all faces", "Alt: only face <name>", "Ctrl: only the selected face". With Alt and no face under the cursor, the hint is "No face under the cursor" and nothing changes. The face names: box Left, Right, Bottom, Top, Back, Front (slots 0 to 5); cylinder Side, Top, Bottom; ring Outer, Inner, Top, Bottom, Start cap, End cap; wedge Bottom, Back, Slope, Left, Right; stairs Treads, Risers, Sides, Bottom, Back; arch Outer, Inner, Front, Back, Ends; sphere Surface.
+The hint line of the drag shows the mode: "Drop: all faces", "Ctrl: only face <name>". With Ctrl and no face under the cursor, the hint is "No face under the cursor" and nothing changes. The face names: box Left, Right, Bottom, Top, Back, Front (slots 0 to 5); cylinder Side, Top, Bottom; ring Outer, Inner, Top, Bottom, Start cap, End cap; wedge Bottom, Back, Slope, Left, Right; stairs Treads, Risers, Sides, Bottom, Back; arch Outer, Inner, Front, Back, Ends; sphere Surface.
 
-The face under the cursor comes from the event `E_CSGSHAPEQUERYSLOT` (see CsgShapeProtocol.h). The editor picks the brush with `E_CSGROOTPICK`, converts the hit to the local space of the brush and sends the query. The brush finds the nearest triangle whose normal fits (|dot| > 0.9). The preview shows the new material on the target face at once. There is no outline of the face yet. Alt can also toggle the menu bar navigation of ImGui in some builds. A drag has no click, so this does not change the drop.
+The face under the cursor comes from the event `E_CSGSHAPEQUERYSLOT` (see CsgShapeProtocol.h). The editor picks the brush with `E_CSGROOTPICK`, converts the hit to the local space of the brush and sends the query. The brush finds the nearest triangle whose normal fits (|dot| > 0.9). The preview shows the new material on the target face at once. There is no outline of the face yet.
 
 Drag ownership: the scene view gives a whole drag to ONE addon, chosen on the first frame. The stock material handler takes any material drag. So the CSG addon takes a material drag at once if the scene has a CSG root. It decides the target again in each frame and at the drop. A material over a geometry that is not a CSG result is set on that geometry, as the stock handler does. Brush nodes do not hide the result under the cursor.
 
@@ -480,8 +479,6 @@ Targets:
 - The cursor is over a result but no brush made the face (the base model, or a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
 - The cursor is not over a result: a texture goes to the selected brushes. A material is set on the geometry under the cursor, as the stock editor handler does. Only a CSG root is selected, with no brush: a texture drop shows "Select a brush to assign a material" and does nothing.
 - The target is found each frame. If the cursor goes off a result during a drag, the preview goes and the release changes nothing.
-
-Ctrl (face) in phase 1: the addon cannot find the face under the cursor yet. It uses the face handle that the last click selected on the brush. The face handle gives the slot through the face-group order. The box maps its face handles 20 to 25 to the slots 0 to 5. The other shapes have no mapping yet. With no mapping or no selected face handle, Ctrl changes nothing. The tooltip shows "Select a face handle first" and the log has the same hint once for each drag. A Ctrl drop edits only the brush with the selected face handle.
 
 A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
 
@@ -555,7 +552,7 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 - The draw, the pick, the hover and the click on a face use only the handles of the active mode. A click on a face in the mode Size selects the Size handle of the axis. The modes Corner and Edge have no axis handle: the click selects the brush and no handle. The editor does not change the mode by itself.
 - The selection is parked for each mode. A mode switch keeps the selected handles of the old mode and loads those of the new mode. A new active brush clears all of them. Escape clears only the list of the active mode.
 - The mode "All" shows the face handle and the size handle at the same point. A click on a face picks the face handle (the lower id). In the mode "All" a Size handle lies exactly under its Face handle and the Face handle wins the click, so the Size handles work only in the Size mode.
-- `GetFaceSlotOfHandle` maps only the box ids 20 to 25. The Ctrl material drop on a face needs the Face (or All) mode for the face handle to be selected.
+- `GetFaceSlotOfHandle` maps only the box ids 20 to 25. The material row shows face names only for the box.
 - All handles draw as round dots. A dot is light gray, brighter if hovered. A selected dot is white and larger.
   An axis handle also has a short axis line.
 - The cage is a faint dashed wire between the dots. It uses all handles of the shape, also the ones that the mode hides.
@@ -636,7 +633,7 @@ The editor has no test harness for addons. Do these checks by hand:
 46. Move the first box along X. The texture stays in place in the world. Set "UV Scale" to 2. The texture is half the size. Change "UV Offset". The texture slides.
 47. Add a `CsgBrush` with a model. Its "UV Mode" is `Local` and the texture looks as before. Set `Root`. The texture changes to the world projection.
 48. Select a brush. Drag a `.material` from the resource browser to the view. The tooltip shows "Material: <name>" and the brush shows the material. Release. Undo restores the old material. Redo sets it again.
-49. Drag a material onto a procedural box. All six slots get the material. Hold Alt: only the face under the cursor gets it.
+49. Drag a material onto a procedural box. All six slots get the material. Hold Ctrl: only the face under the cursor gets it.
 50. Select two brushes. Drop a material. Both get it. One undo step restores both.
 51. Drag a `.png` that has no `<name>.png.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.png.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
 52. Select only a CSG root. Drag a material over the result of the root. The tooltip shows "Select a brush to assign a material". Release. Nothing changes.
@@ -682,12 +679,12 @@ The editor has no test harness for addons. Do these checks by hand:
 92. Drag an edge handle with the gizmo. The 2 corners of the edge move together and the other 6 corners stay. Select an edge and one of its corners with Shift+click. The shared corner moves once.
 93. Add a box. The "Shape" section shows one row "Materials: Left: none, Right: none, ..." with six faces.
 94. Drop a material on the box in the view. The whole box shows the material. The row shows its name on each face. Drop a second material. The whole box changes again.
-95. Click the +Y face of the box to select its face handle. Hold Ctrl and drop a third material on the box. Only the top face changes. The row shows the third material for "Top". Drop a plain material again. All faces, also the top, get it.
-96. Hold Alt and drop a material on one face. Only that face changes. Ctrl+Z restores the old materials in one step.
+95. Hold Ctrl over the +Y face of the box and drop a third material on it. Only the top face changes. The row shows the third material for "Top". Drop a plain material again. All faces, also the top, get it.
+96. Hold Ctrl and drop a material on one face. Only that face changes. Ctrl+Z restores the old materials in one step.
 97. Hold Shift and drop a material. The result is the same as a plain drop: all faces change.
 98. Select box A. Drop a material on box B (not selected). Only B changes and the selection stays on A. Select A and B, then drop on A. Both change.
 99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
-100. Hold Ctrl and drop on a sphere with no selected face handle. Nothing changes and the tooltip shows "Select a face handle first".
+100. Hold Ctrl and aim at the empty space beside a sphere face. Drop. Nothing changes and the tooltip shows "No face under the cursor".
 101. Open a scene whose box has only slot 0 set. Only the -X face shows the material. Drop a plain material. The box shows the new material on all faces.
 102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The overlay line shows "CsgCylinderBrush".
 103. Select the pyramid. Select "Cone" and push B. A cone with a smooth side appears. Select "Hex Prism" and push B. A prism with 6 flat sides appears.
@@ -695,14 +692,14 @@ The editor has no test harness for addons. Do these checks by hand:
 105. Select the pyramid. Drag the handle "Bottom Radius +X". It stays on the face of the base. Drag "Bottom Scale". Both radii change with one ratio and the handle follows the cursor.
 106. Drag "Top Scale" of a cylinder toward its center. The top becomes an apex and the cylinder becomes a cone. Drag the handle at the apex outward. The top grows back and the handle stays under the cursor.
 107. Add a box and a pyramid on its top face (the base of the pyramid has the size of the face). The result has no gap and no open edge.
-108. Drag a material over a box and hold Alt over one face, then release Alt while the mouse stays down. The preview goes from "only that face" back to "all faces". Push Escape. The box has its original materials, also a box with only slot 0 set.
-109. Select a box and click its +Y face handle. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
+108. Drag a material over a box and hold Ctrl over one face, then release Ctrl while the mouse stays down. The preview goes from "only that face" back to "all faces". Push Escape. The box has its original materials, also a box with only slot 0 set.
+109. Select a box. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
 110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials.
 111. Add a box with B. The view shows 6 face handles. The overlay "Shape" section shows "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29".
 112. Push M three times. The view shows the size handles, then the edges, then the corners. Push M two times more. All handles show, then the Face mode comes back.
 113. Push Shift+M. The mode "All" shows. Click a button of the mode bar. The mode changes. Drag a handle, push M during the drag. The mode does not change.
 114. In the Size mode, drag "Size X" by 0.5. The box grows by 1 on X and the center stays. Ctrl+Z reverts it.
-115. In the Face mode, click the +Y face handle. Push M until Corner shows, then until Face shows. The +Y handle is still selected. Drag a material over the box with Ctrl: only the +Y face changes.
+115. In the Face mode, click the +Y face handle. Push M until Corner shows, then until Face shows. The +Y handle is still selected. Drag a material over the +Y face with Ctrl: only the +Y face changes.
 116. Select a sphere. The overlay has no mode bar. M does nothing. Select a box again. The mode of the box is the same as before.
 117. Close the editor and open it again. The mode of the box and of the cylinder are the same as before.
 118. Add a box with B. The view shows 6 round gray face dots and a faint dashed cage with a cross on each face. Push M until "All" shows. Corner, edge and face dots are round and the dashed lines pass through the edge dots.
@@ -732,8 +729,8 @@ popd
 ```
 
 122. Drag a material from the resource browser into the view. Start over empty space, then move over a procedural box (also a subtract box, with another node selected). The box shows the material at once on all faces. Drop. The material stays. Push Ctrl+Z. The old state comes back.
-123. Repeat check 122 and hold Alt over the top face. Only the top face shows the material and the hint shows "Alt: only face Top". Move to the front face. The top face goes back and the front face changes. Release Alt. The whole box shows the material again. Push Escape. The box has its original materials.
-124. Hold Alt and drop on a face. Push Ctrl+Z. Only that face goes back. Hold Alt and aim at the empty space beside a result face: the hint shows "No face under the cursor" and the drop changes nothing.
+123. Repeat check 122 and hold Ctrl over the top face. Only the top face shows the material and the hint shows "Ctrl: only face Top". Move to the front face. The top face goes back and the front face changes. Release Ctrl. The whole box shows the material again. Push Escape. The box has its original materials.
+124. Hold Ctrl and drop on a face. Push Ctrl+Z. Only that face goes back. Hold Ctrl and aim at the empty space beside a result face: the hint shows "No face under the cursor" and the drop changes nothing.
 125. Drag a material over a normal model (not CSG) in a scene that has a CSG root. The model shows the material. Drop. Push Ctrl+Z. The old material comes back.
 
 ## Screenshots

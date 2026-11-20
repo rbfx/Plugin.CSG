@@ -2245,7 +2245,7 @@ template <class T> void CheckSlotQueryOfShape(const char* typeName, unsigned exp
 
 } // namespace
 
-TEST_CASE("The slot query finds each face of every shape", "[shapes][slot][alt]")
+TEST_CASE("The slot query finds each face of every shape", "[shapes][slot][ctrl]")
 {
     CheckSlotQueryOfShape<CsgBoxBrush>("CsgBoxBrush", 6);
     CheckSlotQueryOfShape<CsgCylinderBrush>("CsgCylinderBrush", 3);
@@ -2256,7 +2256,7 @@ TEST_CASE("The slot query finds each face of every shape", "[shapes][slot][alt]"
     CheckSlotQueryOfShape<CsgSphereBrush>("CsgSphereBrush", 1);
 }
 
-TEST_CASE("The slot query gives nothing far from the faces or without a matching normal", "[shapes][slot][alt]")
+TEST_CASE("The slot query gives nothing far from the faces or without a matching normal", "[shapes][slot][ctrl]")
 {
     HandleFixture<CsgBoxBrush> f;
     using namespace CsgShapeQuerySlot;

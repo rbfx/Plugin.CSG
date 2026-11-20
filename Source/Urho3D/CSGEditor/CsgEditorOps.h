@@ -134,7 +134,7 @@ struct DropSelection
     bool hoverBrush_{};
     /// The brush under the cursor is selected.
     bool hoverBrushSelected_{};
-    /// The material slot of the face under the cursor, from the slot query. Only needed with Alt.
+    /// The material slot of the face under the cursor, from the slot query. Only needed with Ctrl.
     ea::optional<unsigned> hoverSlot_;
 };
 
@@ -179,7 +179,7 @@ struct DropDecision
     DropAction action_{DropAction::None};
     DropTarget target_{DropTarget::Selected};
     MaterialScope scope_{MaterialScope::All};
-    /// True if the face is the face under the cursor (Alt). Then only the hovered brush gets the edit.
+    /// True if the face is the face under the cursor (Ctrl). Then only the hovered brush gets the edit.
     bool faceFromHit_{};
     /// The slot of the face under the cursor. Set only with `faceFromHit_`. Empty means no face: no change.
     ea::optional<unsigned> slot_;
@@ -211,18 +211,18 @@ bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction acti
 bool IsResultNodeOfRoot(Node* node, Node* rootNode);
 
 /// Decide what to do with a drop. The function is pure.
-/// Material and texture: the default scope is all slots of the shape. Ctrl sets the face of the selected handle.
-/// Alt sets only the face under the cursor: the scope is Slot, `faceFromHit_` is set and the slot is `hoverSlot_`.
-/// Alt wins over Ctrl. With Alt, the target is only the brush under the cursor.
+/// Material and texture: the default scope is all slots of the shape.
+/// Ctrl sets only the face under the cursor: the scope is Slot, `faceFromHit_` is set and the slot is `hoverSlot_`.
+/// With Ctrl, the target is only the brush under the cursor.
 /// - The cursor is over the result of any root and no brush made the face: hint, no change.
 /// - The brush under the cursor is selected: all selected brushes get the edit.
 /// - The brush under the cursor is not selected: only that brush gets the edit.
 /// - No result under the cursor: a texture goes to the selected brushes. A material goes to the stock handler.
 DropDecision DecideDrop(
-    DropPayloadKind kind, const DropSelection& selection, bool ctrl, bool alt = false);
+    DropPayloadKind kind, const DropSelection& selection, bool ctrl = false);
 
 /// Return the text of the drag hint for the scope of a material drop. The function is pure.
-/// `faceName` is the name of the face under the cursor, or empty. `hasFace` is true if an Alt or Ctrl drop has a face.
+/// `faceName` is the name of the face under the cursor, or empty. `hasFace` is true if a Ctrl drop has a face.
 ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, const ea::string& faceName);
 
 /// The material slots of a brush as the editor sees them.

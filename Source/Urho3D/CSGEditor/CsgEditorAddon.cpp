@@ -326,7 +326,6 @@ const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
     return GetPayloadKind(desc) == DropPayloadKind::Model ? desc : nullptr;
 }
 
-bool IsAltDown() { return ui::IsKeyDown(KEY_LALT) || ui::IsKeyDown(KEY_RALT); }
 bool IsCtrlDown() { return ui::IsKeyDown(KEY_LCTRL) || ui::IsKeyDown(KEY_RCTRL); }
 
 } // namespace
@@ -819,8 +818,8 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
                     selection.hoverBrush_ = true;
                     selection.hoverBrushSelected_ = page.selection_.IsSelected(brushNode);
                     evaluation.hoverBrushNode_ = brushNode;
-                    // Alt targets the face under the cursor. Only then the slot query runs.
-                    if (IsAltDown())
+                    // Ctrl targets the face under the cursor. Only then the slot query runs.
+                    if (IsCtrlDown())
                     {
                         const auto face = FindMaterialSlotForHit(
                             FindShapeBrush(brushNode), pick.position_, pick.normal_);
@@ -834,16 +833,8 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
             }
         }
     }
-    evaluation.decision_ = DecideDrop(kind, selection, IsCtrlDown(), IsAltDown());
+    evaluation.decision_ = DecideDrop(kind, selection, IsCtrlDown());
     return evaluation;
-}
-
-ea::optional<unsigned> CsgEditorAddon::GetCtrlFaceSlot(Component* brush) const
-{
-    // Phase 1: the face under the cursor is not known. The face handle of the last click gives the slot.
-    if (!brush || handleBrush_ != brush || selectedHandles_.empty())
-        return ea::nullopt;
-    return GetFaceSlotOfHandle(brush->GetTypeName(), selectedHandles_[0]);
 }
 
 void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
@@ -867,7 +858,7 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     bool noFace = false;
     if (decision.faceFromHit_)
     {
-        // Alt edits one face of the brush under the cursor. Other brushes stay.
+        // Ctrl edits one face of the brush under the cursor. Other brushes stay.
         nodes.clear();
         if (decision.slot_ && evaluation.hoverBrushNode_)
         {
@@ -876,24 +867,8 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
         }
         noFace = nodes.empty();
     }
-    else if (decision.scope_ == MaterialScope::Slot && !nodes.empty())
-    {
-        // Ctrl edits one face of the brush with the selected face handle. Other brushes stay.
-        ea::vector<Node*> single;
-        for (Node* node : nodes)
-        {
-            Component* shape = FindShapeBrush(node);
-            if (const auto faceSlot = GetCtrlFaceSlot(shape))
-            {
-                slot = *faceSlot;
-                single.push_back(node);
-            }
-        }
-        nodes = single;
-        noFace = nodes.empty();
-    }
 
-    // The hint follows the cursor, Alt and Ctrl.
+    // The hint follows the cursor and Ctrl.
     dropHint_ = DescribeMaterialDrop(decision, !noFace, evaluation.hoverFaceName_);
     if (decision.action_ == DropAction::HintNoBrush)
         dropHint_ = "No brush under the cursor";
@@ -903,14 +878,11 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     UpdateStockPreview(page, decision.action_ == DropAction::None && dropMode_ == DropMode::AssignMaterial);
 
     // Keep the preview if nothing changed.
-    if (materialPreview_.Matches(nodes, decision.scope_, slot) && noFace == dropNoFace_)
+    if (materialPreview_.Matches(nodes, decision.scope_, slot))
         return;
 
     // SetTargets restores the old preview first. The baseline is then the original state.
     materialPreview_.SetTargets(nodes, decision.scope_, slot);
-    if (noFace && !dropNoFace_ && !decision.faceFromHit_)
-        URHO3D_LOGINFO("Select a face handle first");
-    dropNoFace_ = noFace;
 
     // A texture has a preview only if its material file exists.
     // The drop never makes a file before the user releases the button.
@@ -1061,13 +1033,13 @@ void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
         UpdateDropBrushPosition();
     else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
     {
-        // The cursor, Alt and Ctrl change the targets. The preview follows them.
+        // The cursor and Ctrl change the targets. The preview follows them.
         if (dropPage_)
             RefreshDropTargets(*dropPage_);
         if (stockPreview_.drawable_)
             ui::SetTooltip("Drop: set the material of the geometry");
         else
-            ui::SetTooltip("%s\nAlt: only the face under the cursor. Ctrl: only the selected face.",
+            ui::SetTooltip("%s\nCtrl: only the face under the cursor.",
                 dropHint_.c_str());
     }
 }
@@ -1218,7 +1190,6 @@ void CsgEditorAddon::ResetDrop()
     // A commit keeps the scene. Cancel restores before this call.
     materialPreview_.Forget();
     dropResourceName_.clear();
-    dropNoFace_ = false;
     dropHint_.clear();
     dropHasTargets_ = false;
     stockPreview_ = {};

@@ -417,7 +417,7 @@ bool IsResultNodeOfRoot(Node* node, Node* rootNode)
     return node && rootNode && node->IsTemporary() && node->GetParent() == rootNode && node->GetName() == "CsgResult";
 }
 
-DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool ctrl, bool alt)
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool ctrl)
 {
     DropDecision result;
     switch (kind)
@@ -433,7 +433,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
     {
         const DropAction assign =
             kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-        result.scope_ = alt || ctrl ? MaterialScope::Slot : MaterialScope::All;
+        result.scope_ = ctrl ? MaterialScope::Slot : MaterialScope::All;
         if (selection.hoveringResult_)
         {
             if (!selection.hoverBrush_)
@@ -443,7 +443,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
             }
             result.action_ = assign;
             result.target_ = selection.hoverBrushSelected_ ? DropTarget::Selected : DropTarget::Hovered;
-            if (alt)
+            if (ctrl)
             {
                 // The slot of a face has a meaning only for the brush that has the face.
                 result.target_ = DropTarget::Hovered;
@@ -459,7 +459,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
         {
             result.action_ = assign;
             // No face is under the cursor.
-            result.faceFromHit_ = alt;
+            result.faceFromHit_ = ctrl;
         }
         else if (selection.activeIsRoot_)
             result.action_ = DropAction::HintSelectBrush;
@@ -494,12 +494,7 @@ bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction acti
 ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, const ea::string& faceName)
 {
     if (decision.faceFromHit_)
-        return hasFace ? Format("Alt: only face {}", faceName) : ea::string("No face under the cursor");
-    switch (decision.scope_)
-    {
-    case MaterialScope::Slot: return hasFace ? ea::string("Ctrl: only the selected face") : ea::string("Select a face handle first");
-    case MaterialScope::All: break;
-    }
+        return hasFace ? Format("Ctrl: only face {}", faceName) : ea::string("No face under the cursor");
     return "Drop: all faces";
 }
 

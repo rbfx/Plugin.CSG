@@ -113,7 +113,7 @@ private:
         DropDecision decision_;
         /// The brush node that made the face under the cursor, or null.
         Node* hoverBrushNode_{};
-        /// The name of the face under the cursor with Alt, or empty.
+        /// The name of the face under the cursor with Ctrl, or empty.
         ea::string hoverFaceName_;
     };
 
@@ -130,8 +130,6 @@ private:
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
     /// Read the selection and the cursor and call DecideDrop. The pick uses the result of ANY root.
     DropEvaluation EvaluateDrop(SceneViewPage& page, DropPayloadKind kind) const;
-    /// Return the face slot for a Ctrl drop on the brush: the slot of the selected face handle. Else nothing.
-    ea::optional<unsigned> GetCtrlFaceSlot(Component* brush) const;
     /// Find the target brush components for the cursor. Restore the old preview and set the new one.
     void RefreshDropTargets(SceneViewPage& page);
     /// Preview the material on the geometry under the cursor if `active`, else restore. Used with no result under the cursor.
@@ -207,8 +205,6 @@ private:
     MaterialDropPreview materialPreview_;
     /// The material case: the material resource name, or the texture resource name.
     ea::string dropResourceName_;
-    /// The material case: a Ctrl drop had no face handle. The hint shows.
-    bool dropNoFace_{};
     /// The material drop has a target brush in the last frame.
     bool dropHasTargets_{};
     /// The preview of the material on a geometry that is not a CSG result.
