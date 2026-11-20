@@ -11,10 +11,10 @@
 namespace Urho3D
 {
 
-/// A procedural cylinder, cone or frustum brush. See `CsgGenerateCylinder`.
+/// A procedural cylinder, cone, frustum, prism or pyramid brush. See `CsgGenerateCylinder`.
 ///
 /// Attributes: "Bottom Center", "Top Center", "Bottom Radius", "Top Radius", "Segments", "Height Segments",
-/// "Bulge" and "Smooth Normals". The values are always clamped. See `CsgSanitizeCylinderParams`.
+/// "Bulge", "Smooth Normals", "Start Angle" and "Face Radius". The values are always clamped. See `CsgSanitizeCylinderParams`.
 /// A radius pair (0, 0) makes an apex. The shape is not valid if the centers are too close or both ends are apexes.
 /// Then the brush gives no operand.
 ///
@@ -63,6 +63,14 @@ public:
     /// Set smooth or flat normals. The root rebuilds.
     void SetSmoothNormals(bool smooth);
     bool GetSmoothNormals() const { return params_.smoothNormals_; }
+
+    /// Set the angle of the first vertex in degrees. It wraps into [0, 360). The root rebuilds.
+    void SetStartAngle(float degrees);
+    float GetStartAngle() const { return params_.startAngle_; }
+
+    /// Set face radius. True: the radii reach the middle of each side face of the polygon. The root rebuilds.
+    void SetFaceRadius(bool faceRadius);
+    bool GetFaceRadius() const { return params_.faceRadius_; }
 
     /// Set all parameters. The values are clamped. The root rebuilds.
     void SetParams(const CsgCylinderParams& params);

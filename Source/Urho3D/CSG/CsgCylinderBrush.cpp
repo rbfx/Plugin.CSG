@@ -35,6 +35,8 @@ void CsgCylinderBrush::RegisterObject(Context* context)
     URHO3D_ACCESSOR_ATTRIBUTE("Bulge", GetBulge, SetBulge, float, defaults.bulge_, AM_DEFAULT);
     URHO3D_ACCESSOR_ATTRIBUTE(
         "Smooth Normals", GetSmoothNormals, SetSmoothNormals, bool, defaults.smoothNormals_, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("Start Angle", GetStartAngle, SetStartAngle, float, defaults.startAngle_, AM_DEFAULT);
+    URHO3D_ACCESSOR_ATTRIBUTE("Face Radius", GetFaceRadius, SetFaceRadius, bool, defaults.faceRadius_, AM_DEFAULT);
 }
 
 void CsgCylinderBrush::SetBottomCenter(const Vector3& center)
@@ -93,14 +95,25 @@ void CsgCylinderBrush::SetSmoothNormals(bool smooth)
     SetParams(params);
 }
 
+void CsgCylinderBrush::SetStartAngle(float degrees)
+{
+    CsgCylinderParams params = params_;
+    params.startAngle_ = degrees;
+    SetParams(params);
+}
+
+void CsgCylinderBrush::SetFaceRadius(bool faceRadius)
+{
+    CsgCylinderParams params = params_;
+    params.faceRadius_ = faceRadius;
+    SetParams(params);
+}
+
 void CsgCylinderBrush::SetParams(const CsgCylinderParams& params)
 {
     CsgCylinderParams sanitized = params;
     CsgSanitizeCylinderParams(sanitized);
-    if (sanitized.bottomCenter_ == params_.bottomCenter_ && sanitized.topCenter_ == params_.topCenter_
-        && sanitized.bottomRadius_ == params_.bottomRadius_ && sanitized.topRadius_ == params_.topRadius_
-        && sanitized.segments_ == params_.segments_ && sanitized.heightSegments_ == params_.heightSegments_
-        && sanitized.bulge_ == params_.bulge_ && sanitized.smoothNormals_ == params_.smoothNormals_)
+    if (sanitized == params_)
         return;
 
     params_ = sanitized;
@@ -220,9 +233,7 @@ bool CsgCylinderBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector
         || !std::isfinite(params.topRadius_.y_) || !std::isfinite(params.bulge_))
         return false;
     CsgSanitizeCylinderParams(params);
-    if (params.bottomCenter_ == params_.bottomCenter_ && params.topCenter_ == params_.topCenter_
-        && params.bottomRadius_ == params_.bottomRadius_ && params.topRadius_ == params_.topRadius_
-        && params.bulge_ == params_.bulge_)
+    if (params == params_)
         return false;
     CsgShapeMesh mesh;
     if (!CsgGenerateCylinder(params, mesh))

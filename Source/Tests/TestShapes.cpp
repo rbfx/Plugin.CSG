@@ -726,12 +726,15 @@ double ExpectedCylinderVolume(const CsgCylinderParams& p)
 {
     const double pi = 3.14159265358979323846;
     const double n = p.segments_;
+    // Face Radius scales the corner distance by 1 / cos(pi / n), so the area by its square.
+    const double faceScale = p.faceRadius_ ? 1.0 / std::cos(pi / n) : 1.0;
+    const double faceArea = faceScale * faceScale;
     const auto area = [&](double t)
     {
         const double k = (1.0 + p.bulge_ * 4.0 * t * (1.0 - t));
         const double rx = (p.bottomRadius_.x_ + (p.topRadius_.x_ - p.bottomRadius_.x_) * t) * k;
         const double rz = (p.bottomRadius_.y_ + (p.topRadius_.y_ - p.bottomRadius_.y_) * t) * k;
-        return 0.5 * n * rx * rz * std::sin(2.0 * pi / n);
+        return 0.5 * n * rx * rz * std::sin(2.0 * pi / n) * faceArea;
     };
     const double height = std::fabs(static_cast<double>(p.topCenter_.y_) - p.bottomCenter_.y_) / p.heightSegments_;
     double volume = 0.0;
@@ -2619,4 +2622,177 @@ TEST_CASE("CsgSanitizeArchParams clamps the range and CsgGenerateArch refuses me
     CHECK(mesh.vertices_.empty());
     CHECK(mesh.indices_.empty());
     CHECK(mesh.groups_.empty());
+}
+
+TEST_CASE("CsgGenerateCylinder with the default start angle keeps the old positions bit-identical", "[shapes][procedural]")
+{
+    const double twoPi = 2.0 * M_PI;
+    for (const unsigned segments : {3u, 7u, 24u, 128u})
+    {
+        for (const CsgCylinderParams& params : MakeCylinderVariants(segments, 3))
+        {
+            CHECK(params.startAngle_ == 0.0f);
+            CHECK_FALSE(params.faceRadius_);
+            CsgShapeMesh mesh;
+            REQUIRE(CsgGenerateCylinder(params, mesh));
+            const unsigned heightSegments = params.heightSegments_;
+            const Vector3 bottom = params.bottomCenter_;
+            const Vector3 top = params.topCenter_;
+            for (unsigned i = 0; i < mesh.groups_[0].indexCount_; ++i)
+            {
+                const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+                const unsigned lon = static_cast<unsigned>(std::lround(vertex.uv_[0].x_ * segments)) % segments;
+                const unsigned row = static_cast<unsigned>(std::lround(vertex.uv_[0].y_ * heightSegments));
+                const double t = static_cast<double>(row) / heightSegments;
+                const bool apexRow = (row == 0 && params.bottomRadius_ == Vector2::ZERO)
+                    || (row == heightSegments && params.topRadius_ == Vector2::ZERO);
+                Vector3 expected;
+                if (apexRow)
+                    expected = row == 0 ? bottom : top;
+                else
+                {
+                    // A local copy of the old formula.
+                    const double k = 1.0 + params.bulge_ * 4.0 * t * (1.0 - t);
+                    const double rx = (params.bottomRadius_.x_ + (static_cast<double>(params.topRadius_.x_) - params.bottomRadius_.x_) * t) * k;
+                    const double rz = (params.bottomRadius_.y_ + (static_cast<double>(params.topRadius_.y_) - params.bottomRadius_.y_) * t) * k;
+                    const double phi = twoPi * lon / segments;
+                    expected = Vector3(static_cast<float>(bottom.x_ * (1.0 - t) + top.x_ * t + rx * std::cos(phi)),
+                        static_cast<float>(bottom.y_ * (1.0 - t) + top.y_ * t),
+                        static_cast<float>(bottom.z_ * (1.0 - t) + top.z_ * t + rz * std::sin(phi)));
+                }
+                const Vector3 actual = vertex.GetPosition();
+                CHECK(std::memcmp(&actual, &expected, sizeof(Vector3)) == 0);
+            }
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateCylinder start angle and face radius give closed prisms with the polygon volume", "[shapes][procedural]")
+{
+    for (const float start : {0.0f, 45.0f, 17.0f})
+    {
+        for (const bool face : {false, true})
+        {
+            for (const unsigned segments : {3u, 4u, 7u, 24u})
+            {
+                for (const CsgCylinderParams& base : MakeCylinderVariants(segments, 2))
+                {
+                    CsgCylinderParams params = base;
+                    params.startAngle_ = start;
+                    params.faceRadius_ = face;
+                    INFO("Start " << start << " face " << face << " segments " << segments << " bulge " << params.bulge_
+                                       << " top " << params.topRadius_.x_ << " bottom " << params.bottomRadius_.x_);
+                    CsgShapeMesh mesh;
+                    REQUIRE(CsgGenerateCylinder(params, mesh));
+                    CHECK(HasNoDegenerateTriangle(mesh));
+                    const ea::vector<CsgPolygon> polygons = MeshToPolygons(mesh);
+                    CHECK(IsEdgeClosed(polygons, 1e-6f));
+                    // Positive signed volume means the winding is outward.
+                    CHECK(SignedVolume(polygons) > 0.0);
+                    CHECK(SignedVolume(polygons) == Catch::Approx(ExpectedCylinderVolume(params)).epsilon(2e-5));
+                    // The smooth tangent frame of a triangle prism is too far from the chords. The old code has this too.
+                    if (segments >= 4)
+                    {
+                        unsigned wrongTangent = 0;
+                        unsigned wrongBitangent = 0;
+                        CHECK(CountWrongTangentFrames(mesh, wrongTangent, wrongBitangent) > 0);
+                        CHECK(wrongTangent == 0);
+                        CHECK(wrongBitangent == 0);
+                    }
+                    const bool bottomApex = params.bottomRadius_ == Vector2::ZERO;
+                    const bool topApex = params.topRadius_ == Vector2::ZERO;
+                    CHECK(mesh.groups_.size() == 1 + (topApex ? 0 : 1) + (bottomApex ? 0 : 1));
+                    CHECK(mesh.groups_[0].slot_ == 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("CsgGenerateCylinder makes a pyramid that is flush with a box", "[shapes][procedural]")
+{
+    // n = 4, start 45, Face Radius: the corners are at (+-rx, +-rz) in float.
+    // The double error is about 2e-16 relative, so each float corner is exact (checked with ==).
+    CsgCylinderParams pyramid;
+    pyramid.segments_ = 4;
+    pyramid.startAngle_ = 45.0f;
+    pyramid.faceRadius_ = true;
+    pyramid.smoothNormals_ = false;
+    pyramid.bottomCenter_ = Vector3(0.0f, -1.0f, 0.0f);
+    pyramid.topCenter_ = Vector3(0.0f, 1.0f, 0.0f);
+    pyramid.bottomRadius_ = Vector2(0.5f, 0.5f);
+    pyramid.topRadius_ = Vector2::ZERO;
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(pyramid, mesh));
+
+    unsigned corners = 0;
+    for (const ModelVertex& vertex : mesh.vertices_)
+    {
+        const Vector3 p = vertex.GetPosition();
+        if (p.y_ != -1.0f || (p.x_ == 0.0f && p.z_ == 0.0f))
+            continue;
+        ++corners;
+        CHECK(std::fabs(p.x_) == 0.5f);
+        CHECK(std::fabs(p.z_) == 0.5f);
+    }
+    // The bottom cap has 4 triangles with 2 rim corners each and the side has 4 triangles with 2 each.
+    CHECK(corners == 16);
+
+    // Volume: the base area with apothem 1 and n = 4 is 4 * rx * rz. The volume is 4 * rx * rz * h / 3.
+    const double expected = 4.0 * 0.5 * 0.5 * 2.0 / 3.0;
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(expected).epsilon(1e-6));
+    CHECK(ExpectedCylinderVolume(pyramid) == Catch::Approx(expected).epsilon(1e-9));
+
+    // A rectangular base: the volume is 4 * rx * rz * h / 3.
+    pyramid.bottomRadius_ = Vector2(1.5f, 0.25f);
+    REQUIRE(CsgGenerateCylinder(pyramid, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(4.0 * 1.5 * 0.25 * 2.0 / 3.0).epsilon(1e-6));
+}
+
+TEST_CASE("CsgGenerateCylinder gives the hexagonal prism volume", "[shapes][procedural]")
+{
+    CsgCylinderParams hex;
+    hex.segments_ = 6;
+    hex.smoothNormals_ = false;
+    hex.bottomRadius_ = Vector2(0.75f, 0.75f);
+    hex.topRadius_ = Vector2(0.75f, 0.75f);
+    hex.topCenter_ = Vector3(0.0f, 1.5f, 0.0f);
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(hex, mesh));
+    // The area of a hexagon with circumradius r is 3 * sqrt(3) / 2 * r^2.
+    const double r = 0.75;
+    const double h = 2.0;
+    const double expected = 3.0 * std::sqrt(3.0) / 2.0 * r * r * h;
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(expected).epsilon(1e-6));
+
+    // Face Radius: the apothem is r, so the area is 2 * sqrt(3) * r^2.
+    hex.faceRadius_ = true;
+    REQUIRE(CsgGenerateCylinder(hex, mesh));
+    CHECK(SignedVolume(MeshToPolygons(mesh)) == Catch::Approx(2.0 * std::sqrt(3.0) * r * r * h).epsilon(1e-6));
+}
+
+TEST_CASE("CsgSanitizeCylinderParams wraps the start angle", "[shapes][procedural]")
+{
+    const auto sanitize = [](float angle)
+    {
+        CsgCylinderParams params;
+        params.startAngle_ = angle;
+        CsgSanitizeCylinderParams(params);
+        return params.startAngle_;
+    };
+    CHECK(sanitize(0.0f) == 0.0f);
+    CHECK(sanitize(45.0f) == 45.0f);
+    CHECK(sanitize(360.0f) == 0.0f);
+    CHECK(sanitize(-90.0f) == 270.0f);
+    CHECK(sanitize(725.0f) == 5.0f);
+    CHECK(sanitize(-1e-10f) == 0.0f);
+    CHECK(sanitize(std::numeric_limits<float>::quiet_NaN()) == 0.0f);
+    CHECK(sanitize(std::numeric_limits<float>::infinity()) == 0.0f);
+    CHECK(sanitize(-std::numeric_limits<float>::infinity()) == 0.0f);
+    for (const float angle : {1e9f, -1e9f, 359.99997f})
+    {
+        const float wrapped = sanitize(angle);
+        CHECK(wrapped >= 0.0f);
+        CHECK(wrapped < 360.0f);
+    }
 }

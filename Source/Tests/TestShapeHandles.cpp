@@ -26,6 +26,7 @@
 #include <Urho3D/Graphics/Octree.h>
 #include <Urho3D/Graphics/StaticModel.h>
 #include <Urho3D/IO/IOEvents.h>
+#include <Urho3D/IO/VectorBuffer.h>
 #include <Urho3D/IO/Log.h>
 #include <Urho3D/Resource/ResourceCache.h>
 #include <Urho3D/Scene/Node.h>
@@ -1508,5 +1509,58 @@ TEST_CASE("Arch recenter keeps the world positions", "[shapes][handles][recenter
     SendRecenter(f.brush, accepted);
     CHECK_FALSE(accepted);
     CHECK_FALSE(RecenterShapePivot(f.brush));
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("The cylinder brush saves and loads Start Angle and Face Radius, an old scene gets the defaults",
+    "[shapes][procedural]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    f.brush->SetStartAngle(-30.0f);
+    f.brush->SetFaceRadius(true);
+    CHECK(f.brush->GetStartAngle() == 330.0f);
+    CHECK(f.brush->GetFaceRadius());
+    f.brush->SetStartAngle(std::numeric_limits<float>::quiet_NaN());
+    CHECK(f.brush->GetStartAngle() == 0.0f);
+    f.brush->SetStartAngle(30.0f);
+
+    VectorBuffer buffer;
+    REQUIRE(f.scene->SaveXML(buffer));
+    buffer.Seek(0);
+    const ea::string text = buffer.ReadString();
+    CHECK(text.contains("Start Angle"));
+    CHECK(text.contains("Face Radius"));
+
+    SECTION("A round trip keeps the values")
+    {
+        buffer.Seek(0);
+        auto loaded = MakeShared<Scene>(f.context);
+        REQUIRE(loaded->LoadXML(buffer));
+        auto* brush = loaded->GetChild("Brush")->GetComponent<CsgCylinderBrush>();
+        REQUIRE(brush);
+        CHECK(brush->GetStartAngle() == 30.0f);
+        CHECK(brush->GetFaceRadius());
+    }
+
+    SECTION("An old scene without the attributes gets start 0 and no face radius")
+    {
+        ea::string old;
+        for (const ea::string& line : text.split('\n', true))
+        {
+            if (!line.contains("Start Angle") && !line.contains("Face Radius"))
+                old += line + "\n";
+        }
+        CHECK_FALSE(old.contains("Start Angle"));
+        CHECK_FALSE(old.contains("Face Radius"));
+        VectorBuffer oldBuffer;
+        oldBuffer.Write(old.c_str(), old.length());
+        oldBuffer.Seek(0);
+        auto loaded = MakeShared<Scene>(f.context);
+        REQUIRE(loaded->LoadXML(oldBuffer));
+        auto* brush = loaded->GetChild("Brush")->GetComponent<CsgCylinderBrush>();
+        REQUIRE(brush);
+        CHECK(brush->GetStartAngle() == 0.0f);
+        CHECK_FALSE(brush->GetFaceRadius());
+    }
     CHECK(f.errors.GetCount() == 0);
 }

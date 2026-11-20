@@ -183,10 +183,26 @@ struct CsgCylinderParams
     float bulge_{0.0f};
     /// True: normals follow the body. False: each triangle has a flat normal.
     bool smoothNormals_{true};
+    /// The angle of the first vertex in degrees, around the Y axis. Vertex k is at 2pi*k/n + startAngle_.
+    /// The sanitizer wraps it into [0, 360).
+    float startAngle_{0.0f};
+    /// False: the radii reach the corners of the polygon. True: the radii reach the middle of each side face.
+    /// The polygon is then scaled by 1 / cos(pi / segments), so its apothem is the radius.
+    bool faceRadius_{false};
+
+    bool operator==(const CsgCylinderParams& rhs) const
+    {
+        return bottomCenter_ == rhs.bottomCenter_ && topCenter_ == rhs.topCenter_
+            && bottomRadius_ == rhs.bottomRadius_ && topRadius_ == rhs.topRadius_ && segments_ == rhs.segments_
+            && heightSegments_ == rhs.heightSegments_ && bulge_ == rhs.bulge_ && smoothNormals_ == rhs.smoothNormals_
+            && startAngle_ == rhs.startAngle_ && faceRadius_ == rhs.faceRadius_;
+    }
+    bool operator!=(const CsgCylinderParams& rhs) const { return !(*this == rhs); }
 };
 
 /// Clamp the centers to [-16384, 16384], the segments to [3, 128], the height segments to [1, 64]
 /// and the bulge to [-0.95, 4]. A value that is not finite gets its default value.
+/// Wrap the start angle into [0, 360). A start angle that is not finite becomes 0.
 /// Clamp each radius to [0, 16384]. A pair with both components below 0.001 becomes (0, 0): an apex.
 /// In any other pair each component is at least 0.001.
 PLUGIN_RBFXCSG_API void CsgSanitizeCylinderParams(CsgCylinderParams& params);

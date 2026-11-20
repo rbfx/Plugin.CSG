@@ -430,6 +430,16 @@ void CsgSanitizeCylinderParams(CsgCylinderParams& params)
     params.heightSegments_ =
         Clamp(params.heightSegments_, CsgCylinderParams::MinHeightSegments, CsgCylinderParams::MaxHeightSegments);
     params.bulge_ = SanitizeValue(params.bulge_, CsgCylinderParams::MinBulge, CsgCylinderParams::MaxBulge, 0.0f);
+    if (!std::isfinite(params.startAngle_))
+        params.startAngle_ = 0.0f;
+    else
+    {
+        float angle = std::fmod(params.startAngle_, 360.0f);
+        if (angle < 0.0f)
+            angle += 360.0f;
+        // A tiny negative angle can round to 360.
+        params.startAngle_ = angle >= 360.0f ? 0.0f : angle;
+    }
 }
 
 namespace
@@ -493,12 +503,22 @@ bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
     const Vector3d axis(static_cast<double>(top.x_) - bottom.x_, static_cast<double>(top.y_) - bottom.y_,
         static_cast<double>(top.z_) - bottom.z_);
 
+    // Vertex k is at phi = 2pi*k/n + start. M_PI is a float constant in the engine, so its error is about 1e-7.
+    // The default shape (start 0, no face radius) keeps this angle, so the old positions stay bit-identical.
+    // Any other shape uses the exact value of pi. Then a pyramid base lands exactly on the box corners.
+    constexpr double exactPi = 3.14159265358979323846;
+    const bool legacyAngles = sanitized.startAngle_ == 0.0f && !sanitized.faceRadius_;
+    const double turn = legacyAngles ? twoPi : 2.0 * exactPi;
+    const double startRad = static_cast<double>(sanitized.startAngle_) * exactPi / 180.0;
+    // Face radius: the polygon has apothem 1, so the corner distance is 1 / cos(pi / n). Off: 1.
+    const double polygonScale = sanitized.faceRadius_ ? 1.0 / std::cos(exactPi / segments) : 1.0;
     ea::vector<double> lonCos(segments + 1);
     ea::vector<double> lonSin(segments + 1);
     for (unsigned lon = 0; lon <= segments; ++lon)
     {
-        lonCos[lon] = std::cos(twoPi * lon / segments);
-        lonSin[lon] = std::sin(twoPi * lon / segments);
+        const double phi = turn * lon / segments + startRad;
+        lonCos[lon] = std::cos(phi) * polygonScale;
+        lonSin[lon] = std::sin(phi) * polygonScale;
     }
 
     // Each vertex copies its position from this table, so the shared positions are bit-identical.
@@ -545,9 +565,9 @@ bool CsgGenerateCylinder(const CsgCylinderParams& params, CsgShapeMesh& mesh)
     };
     const auto bodyFrame = [&](double t, double lon) -> BodyFrame
     {
-        const double phi = twoPi * lon / segments;
-        const double c = std::cos(phi);
-        const double s = std::sin(phi);
+        const double phi = turn * lon / segments + startRad;
+        const double c = std::cos(phi) * polygonScale;
+        const double s = std::sin(phi) * polygonScale;
         const Vector2d radius = radiusAt(t);
         const Vector2d slope = radiusSlopeAt(t);
         const Vector3d dPdt(axis.x_ + slope.x_ * c, axis.y_, axis.z_ + slope.y_ * s);
