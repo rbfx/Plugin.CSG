@@ -70,12 +70,6 @@ const auto Hotkey_PreviousHandleMode = EditorHotkey{"Csg.PreviousHandleMode"}.Sh
 const StringHash RootType("CsgRoot");
 const StringHash BrushType("CsgBrush");
 const StringHash RebuildEvent("CsgRequestRebuild");
-
-/// The width of the operand overlay in pixels and its distance from the view corner.
-const float OverlayWidth = 260.0f;
-const float OverlayMargin = 8.0f;
-/// The maximum height of the operand overlay as a fraction of the view height. A longer list scrolls.
-const float OverlayMaxHeightFraction = 0.4f;
 /// The maximum number of debug shapes that the addon draws in one frame. The other operands are skipped.
 const unsigned MaxDebugShapesPerFrame = 64;
 /// The editor settings key of the "Draw Debug Geometry" option of the selection renderer.
@@ -628,6 +622,14 @@ bool CsgEditorAddon::RenderToolbar()
     auto hotkeyManager = owner_->GetHotkeyManager();
     SceneViewPage* page = owner_->GetActivePage();
     Node* activeNode = page ? page->selection_.GetActiveNode() : nullptr;
+
+    // The toolbar shows only if a root, a brush or the result of a root is active.
+    const bool shapeIsActive = handleBrush_ && handleBrush_->GetNode() == activeNode;
+    const ToolbarContext context = GetToolbarContext(
+        activeNode, shapeIsActive ? static_cast<unsigned>(handleModeList_.size()) : 0u);
+    if (!context.root_ && !context.brush_)
+        return false;
+
     // The tooltips show the build status of the active root.
     const ea::string buildStatus = GetBuildStatus(FindActiveRoot(activeNode));
 
@@ -638,31 +640,143 @@ bool CsgEditorAddon::RenderToolbar()
         return buildStatus.empty() ? text : Format("{}\nCSG Build Status: {}", text, buildStatus);
     };
 
-    RenderPresetCombo();
-
-    if (Widgets::ToolbarButton(ICON_FA_SQUARE_PLUS, makeTooltip("Add CSG Union Brush", &Hotkey_AddUnion).c_str()))
-        AddBrush(FindOperation(UnionName), false);
-    if (Widgets::ToolbarButton(
-            ICON_FA_SQUARE_MINUS, makeTooltip("Add CSG Subtract Brush", &Hotkey_AddSubtract).c_str()))
-        AddBrush(FindOperation(DifferenceName), false);
-
-    // The operation buttons show the operation of the active brush. They change all selected brushes.
-    const bool hasBrushes = page && !GetSelectedBrushes(*page).empty();
-    const int activeOperation = activeNode ? GetOperation(activeNode) : -1;
-
-    ui::BeginDisabled(!hasBrushes);
-    const int count = OperationCount(context_);
-    for (int index = 0; index < count; ++index)
+    // The root controls: add, bake and info. A brush of a root keeps them.
+    if (context.root_)
     {
-        const ea::string name = OperationName(context_, index);
-        const ea::string tooltip = makeTooltip(Format("CSG Operation: {}", name), GetOperationHotkey(name));
-        if (Widgets::ToolbarButton(GetOperationIcon(name), tooltip.c_str(), index == activeOperation))
-            SetSelectedOperation(index);
+        RenderPresetCombo();
+
+        if (Widgets::ToolbarButton(ICON_FA_SQUARE_PLUS, makeTooltip("Add CSG Union Brush", &Hotkey_AddUnion).c_str()))
+            AddBrush(FindOperation(UnionName), false);
+        if (Widgets::ToolbarButton(
+                ICON_FA_SQUARE_MINUS, makeTooltip("Add CSG Subtract Brush", &Hotkey_AddSubtract).c_str()))
+            AddBrush(FindOperation(DifferenceName), false);
+        Widgets::ToolbarSeparator();
     }
-    ui::EndDisabled();
+
+    // The brush controls change all selected brushes. The operation buttons show the operation of the active brush.
+    if (context.brush_)
+    {
+        const int activeOperation = GetOperation(activeNode);
+        const int count = OperationCount(context_);
+        for (int index = 0; index < count; ++index)
+        {
+            const ea::string name = OperationName(context_, index);
+            const ea::string tooltip = makeTooltip(Format("CSG Operation: {}", name), GetOperationHotkey(name));
+            if (Widgets::ToolbarButton(GetOperationIcon(name), tooltip.c_str(), index == activeOperation))
+                SetSelectedOperation(index);
+        }
+        Widgets::ToolbarSeparator();
+
+        const Component* activeBrush = FindBrushComponent(activeNode);
+        const bool brushEnabled = activeBrush && activeBrush->IsEnabled();
+        if (Widgets::ToolbarButton(ICON_FA_POWER_OFF,
+                makeTooltip(brushEnabled ? "Disable CSG Brush" : "Enable CSG Brush", &Hotkey_ToggleBrush).c_str(),
+                !brushEnabled))
+            ToggleSelectedBrushes();
+        if (Widgets::ToolbarButton(ICON_FA_ARROW_UP, makeTooltip("Move CSG Brush Earlier", &Hotkey_MoveEarlier).c_str()))
+            MoveActiveBrush(-1);
+        if (Widgets::ToolbarButton(ICON_FA_ARROW_DOWN, makeTooltip("Move CSG Brush Later", &Hotkey_MoveLater).c_str()))
+            MoveActiveBrush(1);
+        Widgets::ToolbarSeparator();
+    }
+
+    if (context.shape_)
+    {
+        if (context.modeCount_ > 0)
+        {
+            RenderHandleModeBar(handleBrush_);
+            Widgets::ToolbarSeparator();
+        }
+
+        if (Widgets::ToolbarButton(ICON_FA_EYE, "Show handles", showHandles_))
+            showHandles_ = !showHandles_;
+        if (Widgets::ToolbarButton(
+                ICON_FA_VECTOR_SQUARE, "Show cage: draw faint dashed lines between the handles of the shape", showCage_))
+            showCage_ = !showCage_;
+        if (Widgets::ToolbarButton(ICON_FA_BULLSEYE,
+                "Recenter pivot after drag: move the node origin to the center of the shape at the end of a handle drag",
+                autoRecenter_))
+            autoRecenter_ = !autoRecenter_;
+
+        const bool canRecenter = shapeIsActive && dragState_ == HandleDragState::None;
+        ui::BeginDisabled(!canRecenter);
+        if (Widgets::ToolbarButton(ICON_FA_CROSSHAIRS, nullptr))
+            RecenterActiveShape();
+        ui::EndDisabled();
+        if (ui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ui::SetTooltip("Recenter pivot");
+
+        if (Widgets::ToolbarButton(ICON_FA_GEAR, "Shape settings"))
+            ui::OpenPopup("##CsgShapeSettings");
+        if (ui::BeginPopup("##CsgShapeSettings"))
+        {
+            ui::SetNextItemWidth(ui::CalcTextSize("0.0000").x + ui::GetStyle().FramePadding.x * 2.0f + 20.0f);
+            if (ui::DragFloat("Snap step", &handleGridStep_, 0.005f, 0.0f, 100.0f, "%.3f"))
+                handleGridStep_ = ea::max(0.0f, handleGridStep_);
+            if (ui::IsItemHovered())
+                ui::SetTooltip("The grid step of the Ctrl snap of a handle drag. 0 turns off the snap.");
+            ui::EndPopup();
+        }
+        Widgets::ToolbarSeparator();
+    }
+
+    if (context.root_)
+    {
+        // The bake needs a result that is final.
+        RootStats stats;
+        Node* rootNode = FindActiveRoot(activeNode);
+        const bool hasStats = QueryRootStats(rootNode->GetComponent(RootType), stats);
+        const bool canBake = hasStats && CanBakeNow(stats);
+        ui::BeginDisabled(!canBake);
+        if (Widgets::ToolbarButton(ICON_FA_BOX_ARCHIVE, nullptr))
+            BakeToAsset();
+        ui::EndDisabled();
+        if (ui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ui::SetTooltip("%s", canBake ? "Bake to Asset: save the result as Models/<root name>_Baked.mdl and "
+                                           "replace the root by a static model."
+                                         : "Bake to Asset: not available while the result is building or dirty.");
+        }
+    }
+
+    // The info button shows the stats of the root and the lines of the shape in a tooltip.
+    Widgets::ToolbarButton(ICON_FA_CIRCLE_INFO, nullptr);
+    if (ui::IsItemHovered())
+        ui::SetTooltip("%s", BuildInfoText(activeNode).c_str());
 
     Widgets::ToolbarSeparator();
     return true;
+}
+
+ea::string CsgEditorAddon::BuildInfoText(Node* activeNode) const
+{
+    InfoTooltipData data;
+    if (Node* rootNode = FindActiveRoot(activeNode))
+    {
+        data.hasRoot_ = true;
+        data.rootName_ = rootNode->GetName();
+        data.buildStatus_ = GetBuildStatus(rootNode);
+        data.hasStats_ = QueryRootStats(rootNode->GetComponent(RootType), data.stats_);
+    }
+    if (handleBrush_ && handleBrush_->GetNode() == activeNode && IsBrushNode(activeNode))
+    {
+        Component* brush = handleBrush_;
+        data.hasShape_ = true;
+        data.shapeType_ = brush->GetTypeName();
+        data.shapeValid_ = handleSet_.valid_;
+        data.hasSize_ = ComputeShapeWorldSize(brush, data.size_);
+        data.selectedHandles_ = static_cast<unsigned>(selectedHandles_.size());
+        if (!selectedHandles_.empty())
+        {
+            for (const ShapeHandle& handle : handleSet_.handles_)
+            {
+                if (handle.id_ == selectedHandles_.front())
+                    data.selectedHandleName_ = handle.name_;
+            }
+        }
+        data.materials_ = BuildMaterialsText(brush);
+    }
+    return BuildInfoTooltip(data);
 }
 
 const CsgBrushPreset& CsgEditorAddon::GetActivePreset() const
@@ -1233,8 +1347,6 @@ void CsgEditorAddon::Render(SceneViewPage& page)
             brush->DrawDebugGeometry(debug, true);
         }
     }
-
-    RenderOperandOverlay(page, rootNode);
 }
 
 bool CsgEditorAddon::IsSelectionDebugGeometryEnabled() const
@@ -1253,11 +1365,6 @@ bool CsgEditorAddon::IsTransformGizmoLocal() const
 
 void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
 {
-    // The overlay rectangle is from the last frame. A click on the overlay must not select in the scene.
-    if (overlayVisible_ && ui::IsMouseHoveringRect(ToImGui(overlayRect_.min_), ToImGui(overlayRect_.max_)))
-        mouseConsumed = true;
-    overlayVisible_ = false;
-
     // The content area is the last item. The scene selector uses the same check.
     const bool viewHovered = ui::IsItemHovered();
     gizmoHot_ = false;
@@ -1267,7 +1374,7 @@ void CsgEditorAddon::ProcessInput(SceneViewPage& page, bool& mouseConsumed)
 
 void CsgEditorAddon::ProcessResultPick(SceneViewPage& page, bool& mouseConsumed, bool viewHovered)
 {
-    // A press that the handles, the overlay or the camera own does not start a pick.
+    // A press that the handles or the camera own does not start a pick.
     if (ui::IsMouseClicked(MOUSEB_LEFT))
         resultPickArmed_ = viewHovered && !mouseConsumed && !gizmoHot_ && !ui::IsMouseDown(MOUSEB_RIGHT);
 
@@ -1321,69 +1428,6 @@ void CsgEditorAddon::ProcessResultPick(SceneViewPage& page, bool& mouseConsumed,
         if (Component* shapeBrush = FindShapeBrush(brushNode))
             pendingFace_ = PendingFace{WeakPtr<Component>(shapeBrush), pick.position_, pick.normal_};
     }
-}
-
-void CsgEditorAddon::RenderOperandOverlay(SceneViewPage& page, Node* rootNode)
-{
-    const Rect& area = page.contentArea_;
-    if (area.Size().x_ < OverlayWidth + 2.0f * OverlayMargin)
-        return;
-
-    // The overlay is in the top right corner. The debug HUD uses the top left corner.
-    ui::SetCursorScreenPos(ImVec2{area.max_.x_ - OverlayWidth - OverlayMargin, area.min_.y_ + OverlayMargin});
-    ui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.0f, 0.0f, 0.0f, 0.6f});
-    // The height follows the list up to the maximum. A longer list scrolls.
-    const float maxHeight = ea::max(ui::GetFrameHeight() * 3.0f, area.Size().y_ * OverlayMaxHeightFraction);
-    ui::SetNextWindowSizeConstraints(ImVec2{OverlayWidth, 0.0f}, ImVec2{OverlayWidth, maxHeight});
-    const ImGuiChildFlags childFlags = ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY;
-    if (ui::BeginChild("##CsgOperands", ImVec2{OverlayWidth, 0.0f}, childFlags))
-    {
-        ui::TextUnformatted(Format("{} {}", ICON_FA_CUBES, rootNode->GetName()).c_str());
-        ui::TextWrapped("%s", GetBuildStatus(rootNode).c_str());
-        RenderStatsSection(rootNode);
-        if (ui::SmallButton("Bake to Asset"))
-            BakeToAsset();
-        if (ui::IsItemHovered())
-            ui::SetTooltip("Save the result as Models/<root name>_Baked.mdl and replace the root by a static model.");
-        ui::Separator();
-
-        Node* activeNode = page.selection_.GetActiveNode();
-        unsigned index = 0;
-        for (Node* brushNode : GetAllBrushChildren(rootNode))
-        {
-            Component* brush = FindBrushComponent(brushNode);
-            const bool enabled = brush && brush->IsEnabled();
-            const ea::string& name = brushNode->GetName();
-
-            ui::TextColored(ToImGui(GetOperationColor(GetOperation(brushNode))), "%s", ICON_FA_SQUARE);
-            ui::SameLine();
-            // The ID suffix keeps the label unique for nodes with the same name.
-            const ea::string label = Format("{}. {}{}##{}", index, name.empty() ? "(no name)" : name.c_str(),
-                enabled ? "" : " (off)", brushNode->GetID());
-            // A disabled brush has dim text. It stays selectable, so H can enable it again.
-            if (!enabled)
-                ui::PushStyleColor(ImGuiCol_Text, ui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-            const bool clicked = ui::Selectable(label.c_str(), brushNode == activeNode);
-            if (!enabled)
-                ui::PopStyleColor();
-            if (clicked)
-            {
-                page.selection_.Clear();
-                page.selection_.SetSelected(brushNode, true);
-            }
-            ++index;
-        }
-        if (index == 0)
-            ui::TextDisabled("No brushes");
-
-        if (handleBrush_)
-            RenderShapeSection();
-    }
-    ui::EndChild();
-    ui::PopStyleColor();
-
-    overlayRect_ = Rect{ToVector2(ui::GetItemRectMin()), ToVector2(ui::GetItemRectMax())};
-    overlayVisible_ = true;
 }
 
 bool CsgEditorAddon::RenderTabContextMenu()
@@ -1569,7 +1613,7 @@ void CsgEditorAddon::EndHandleDrag(bool commit)
 
 void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsumed)
 {
-    // On entry the camera, the overlay or a drop can own the mouse. Then the handles only draw.
+    // On entry the camera or a drop can own the mouse. Then the handles only draw.
     const bool consumedOnEntry = mouseConsumed;
     const auto dropPendingFace = [this](Component* activeBrush)
     {
@@ -1822,7 +1866,16 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     }
     drawList->PopClipRect();
 
-    if (hoveredHandle_ && !gizmoActive)
+    // The drag readout is a small tooltip near the cursor. The delta is in the local space of the brush.
+    if (dragState_ == HandleDragState::Active && dragTriedDelta_)
+    {
+        Vector3 size;
+        ea::string readout = Format("Delta: {:.3f} {:.3f} {:.3f}", dragTriedDelta_->x_, dragTriedDelta_->y_, dragTriedDelta_->z_);
+        if (ComputeShapeWorldSize(brush, size))
+            readout += Format("\nSize {:.3f} x {:.3f} x {:.3f}", size.x_, size.y_, size.z_);
+        ui::SetTooltip("%s", readout.c_str());
+    }
+    else if (hoveredHandle_ && !gizmoActive)
     {
         if (const ShapeHandle* handle = findHandle(*hoveredHandle_))
             ui::SetTooltip("%s", handle->name_.c_str());
@@ -1834,71 +1887,12 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     finish();
 }
 
-void CsgEditorAddon::RenderStatsSection(Node* rootNode)
-{
-    RootStats stats;
-    if (!QueryRootStats(rootNode->GetComponent(RootType), stats))
-        return;
-
-    if (ui::CollapsingHeader("CSG stats", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        ui::TextWrapped("%s", FormatRootStatsLine(stats).c_str());
-        ui::Text("Vertices %u%s", stats.vertices_, stats.building_ ? ", building..." : "");
-    }
-    // The reason shows also when the header is closed. The root does not know the brush that caused it.
-    if (!stats.valid_ && !stats.error_.empty())
-        ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: %s", stats.error_.c_str());
-}
-
-void CsgEditorAddon::RenderShapeSection()
-{
-    Component* brush = handleBrush_;
-    if (!brush)
-        return;
-
-    ui::Separator();
-    ui::TextUnformatted(Format("{} Shape: {}", ICON_FA_SHAPES, brush->GetTypeName()).c_str());
-    if (handleSet_.valid_)
-        ui::TextUnformatted("Valid");
-    else
-        ui::TextColored(ImVec4{1.0f, 0.35f, 0.35f, 1.0f}, "Invalid: parameters are not valid");
-    RenderHandleModeBar(brush);
-
-    Vector3 size;
-    if (ComputeShapeWorldSize(brush, size))
-    {
-        ui::Text("Size %.3f x %.3f x %.3f", size.x_, size.y_, size.z_);
-        ui::SameLine();
-        ui::TextDisabled("(?)");
-        if (ui::IsItemHovered())
-            ui::SetTooltip("Local size (scaled): the local bounds of the generated mesh times the node world scale.");
-    }
-    // The drag keeps the total delta in the local space of the brush.
-    if (dragState_ == HandleDragState::Active && dragTriedDelta_)
-        ui::Text("Delta: %.3f %.3f %.3f", dragTriedDelta_->x_, dragTriedDelta_->y_, dragTriedDelta_->z_);
-
-    ui::Text("Selected handles: %u", static_cast<unsigned>(selectedHandles_.size()));
-    if (!selectedHandles_.empty())
-    {
-        for (const ShapeHandle& handle : handleSet_.handles_)
-        {
-            if (handle.id_ != selectedHandles_.front())
-                continue;
-            if (selectedHandles_.size() == 1)
-                ui::TextWrapped("%s", handle.name_.c_str());
-            else
-                ui::TextWrapped("%s (+%u)", handle.name_.c_str(), static_cast<unsigned>(selectedHandles_.size() - 1));
-        }
-    }
-    RenderMaterialRows(brush);
-    RenderShapeSettings();
-}
-
 void CsgEditorAddon::RenderHandleModeBar(Component* brush)
 {
     if (handleModeList_.empty())
         return;
 
+    // The buttons are in a group. The label is the first letter of the mode. The tooltip has the full name.
     const bool enabled = showHandles_ && dragState_ == HandleDragState::None;
     auto hotkeyManager = owner_->GetHotkeyManager();
     ui::BeginDisabled(!enabled);
@@ -1906,30 +1900,12 @@ void CsgEditorAddon::RenderHandleModeBar(Component* brush)
     {
         const ea::string& mode = handleModeList_[index];
         const unsigned count = FilterHandlesByMode(handleSet_.handles_, mode).size();
-        const ea::string label = Format("{} {}##HandleMode{}", mode, count, index);
-        if (index > 0)
-        {
-            // Wrap to the next line if the button does not fit.
-            const ImGuiStyle& style = ui::GetStyle();
-            const float buttonWidth = ui::CalcTextSize(Format("{} {}", mode, count).c_str()).x + style.FramePadding.x * 2.0f;
-            const float separatorWidth = ui::CalcTextSize("|").x + style.ItemSpacing.x * 2.0f;
-            if (ui::GetContentRegionAvail().x >= separatorWidth + buttonWidth)
-            {
-                ui::SameLine();
-                ui::TextDisabled("|");
-                ui::SameLine();
-            }
-        }
-        const bool active = mode == activeMode_;
-        if (active)
-            ui::PushStyleColor(ImGuiCol_Button, ui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-        if (ui::SmallButton(label.c_str()))
+        const ea::string label = Format("{}##HandleMode{}", mode.substr(0, 1), index);
+        if (Widgets::ToolbarButton(label.c_str(), nullptr, mode == activeMode_))
             handleModes_[brush->GetTypeName()] = mode;
-        if (active)
-            ui::PopStyleColor();
         if (ui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         {
-            ui::SetTooltip("Handle mode %s. Next mode: %s. Previous mode: %s.", mode.c_str(),
+            ui::SetTooltip("Handle mode %s (%u handles). Next mode: %s. Previous mode: %s.", mode.c_str(), count,
                 hotkeyManager->GetHotkeyLabel(Hotkey_NextHandleMode).c_str(),
                 hotkeyManager->GetHotkeyLabel(Hotkey_PreviousHandleMode).c_str());
         }
@@ -1937,11 +1913,11 @@ void CsgEditorAddon::RenderHandleModeBar(Component* brush)
     ui::EndDisabled();
 }
 
-void CsgEditorAddon::RenderMaterialRows(Component* brush)
+ea::string CsgEditorAddon::BuildMaterialsText(Component* brush) const
 {
     BrushMaterials materials;
     if (!brush->GetNode() || !FindShapeBrush(brush->GetNode()) || !ReadBrushMaterials(brush->GetNode(), materials))
-        return;
+        return EMPTY_STRING;
 
     ea::string text;
     for (unsigned slot = 0; slot < materials.slots_.size(); ++slot)
@@ -1958,7 +1934,7 @@ void CsgEditorAddon::RenderMaterialRows(Component* brush)
         }
         text += Format("{}: {}", name, materials.slots_[slot].empty() ? ea::string("none") : materials.slots_[slot]);
     }
-    ui::TextWrapped("Materials: %s", text.c_str());
+    return text;
 }
 
 void CsgEditorAddon::RenderShapeSettings()

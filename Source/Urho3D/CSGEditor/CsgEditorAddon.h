@@ -38,8 +38,9 @@ void RbfxCsg_EditorAddon(Context* context, SceneViewTab* sceneViewTab);
 /// If a root or a brush is active, the addon draws the debug shapes of all operands of the root.
 /// Each shape has the color of its operation. The selection renderer of the editor draws the selected brushes.
 /// The addon draws the other operands, at most 64 in a frame.
-/// An overlay in the view corner lists the brushes of the root and the build status.
-/// A click on a list item selects the brush. The hotkeys `[` and `]` move the active brush in the list.
+/// The toolbar has controls only if a root, a brush or the result of a root is active.
+/// An info button shows the stats and the shape lines in a tooltip.
+/// The hotkeys `[` and `]` move the active brush in the operand list.
 /// The hotkey `H` toggles the selected brushes. A disabled brush is not an operand.
 ///
 /// Shape handles: if exactly one node is selected and it has a procedural brush, the addon draws its handles.
@@ -86,7 +87,7 @@ public:
     void NextHandleMode();
     void PreviousHandleMode();
     void CycleActiveHandleMode(int step);
-    /// Draw the line of the mode buttons in the overlay. It draws nothing if the shape has fewer than 2 modes.
+    /// Draw the toolbar buttons of the handle modes. They are disabled during a drag.
     void RenderHandleModeBar(Component* brush);
     /// Save the result of the active root as a model file, add a sibling node with the model and disable the root.
     /// One undo step removes the node and enables the root again. The file stays.
@@ -126,8 +127,6 @@ private:
     void RenderPresetCombo();
     /// Return the chosen preset. A hidden preset gives the first preset that the editor can use.
     const CsgBrushPreset& GetActivePreset() const;
-    /// Render the operand list of the root in the corner of the view.
-    void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
     /// Read the selection and the cursor and call DecideDrop. The pick uses the result of ANY root.
@@ -176,11 +175,10 @@ private:
     void EndHandleDrag(bool commit);
     /// Select the brush that made the clicked face of the result. Run on a left release without a drag.
     void ProcessResultPick(SceneViewPage& page, bool& mouseConsumed, bool viewHovered);
-    /// Render the "Shape" section of the operand overlay.
-    void RenderStatsSection(Node* rootNode);
-    void RenderShapeSection();
-    /// Render the row of the material slots of a shape brush.
-    void RenderMaterialRows(Component* brush);
+    /// Return the text of the info tooltip for the active node: the stats of the root and the lines of the shape.
+    ea::string BuildInfoText(Node* activeNode) const;
+    /// Return the row of the material slots of a shape brush, or an empty string.
+    ea::string BuildMaterialsText(Component* brush) const;
     /// Render the settings of the shape handles.
     void RenderShapeSettings();
     /// Return true if the gizmo of the transform manipulator is in local space.
@@ -189,9 +187,6 @@ private:
 
     /// The index of the preset model for new brushes. The editor settings keep the preset name.
     unsigned presetIndex_{};
-    /// The screen rectangle of the operand overlay in the last frame.
-    Rect overlayRect_;
-    bool overlayVisible_{};
 
     DropMode dropMode_{DropMode::None};
     WeakPtr<SceneViewPage> dropPage_;
