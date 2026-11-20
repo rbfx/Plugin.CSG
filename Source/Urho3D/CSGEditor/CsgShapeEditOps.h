@@ -39,6 +39,8 @@ struct ShapeHandleSet
     /// The groups in the order of the mode bar. The first one is the default.
     /// Empty if the runtime does not send groups (an old runtime).
     ea::vector<ea::string> groups_;
+    /// The pairs of handle ids that the cage joins. Empty if the runtime sends no cage.
+    ea::vector<ea::pair<unsigned, unsigned>> cage_;
 };
 
 /// The serializable attributes of a component in registration order.
@@ -104,6 +106,13 @@ private:
 
 /// Query the handles of the brush with the event E_CSGSHAPEQUERYHANDLES.
 ShapeHandleSet QueryShapeHandles(Component* brush);
+/// Return the cage lines as pairs of positions. The positions come from all handles of the set.
+/// A pair with an unknown id is skipped. The order stays.
+ea::vector<ea::pair<Vector3, Vector3>> ResolveCageSegments(const ShapeHandleSet& set);
+/// Cut the line from `a` to `b` into dashes. Each dash is `on` long, then a gap of `off` follows.
+/// The last dash ends at `b` and can be shorter. A line of zero length or a value of `on` that is not
+/// positive gives no dash. A value of `off` below zero counts as zero.
+ea::vector<ea::pair<Vector2, Vector2>> DashSegments(const Vector2& a, const Vector2& b, float on, float off);
 /// Move the handles with the event E_CSGSHAPEMOVEHANDLES. The delta is in the local space of the brush.
 /// Return the P_ACCEPTED answer. A component that does not answer gives false.
 bool MoveShapeHandles(Component* brush, const ea::vector<unsigned>& ids, const Vector3& localDelta);

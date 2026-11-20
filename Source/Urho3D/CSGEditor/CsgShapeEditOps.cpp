@@ -69,6 +69,7 @@ ShapeHandleSet QueryShapeHandles(Component* brush)
     eventData[P_VALID] = false;
     eventData[P_HANDLES] = VariantVector{};
     eventData[P_GROUPS] = StringVector{};
+    eventData[P_CAGE] = VariantVector{};
     brush->SendEvent(E_CSGSHAPEQUERYHANDLES, eventData);
 
     // A brush that does not answer keeps version 0.
@@ -97,7 +98,56 @@ ShapeHandleSet QueryShapeHandles(Component* brush)
         result.handles_.push_back(handle);
     }
     result.groups_ = ParseHandleGroups(eventData[P_GROUPS]);
+    for (const Variant& item : eventData[P_CAGE].GetVariantVector())
+    {
+        if (item.GetType() != VAR_INTVECTOR2)
+            continue;
+        const IntVector2 pair = item.GetIntVector2();
+        if (pair.x_ >= 0 && pair.y_ >= 0)
+            result.cage_.emplace_back(static_cast<unsigned>(pair.x_), static_cast<unsigned>(pair.y_));
+    }
     return result;
+}
+
+ea::vector<ea::pair<Vector3, Vector3>> ResolveCageSegments(const ShapeHandleSet& set)
+{
+    ea::vector<ea::pair<Vector3, Vector3>> segments;
+    const auto find = [&](unsigned id) -> const ShapeHandle*
+    {
+        for (const ShapeHandle& handle : set.handles_)
+        {
+            if (handle.id_ == id)
+                return &handle;
+        }
+        return nullptr;
+    };
+    for (const auto& line : set.cage_)
+    {
+        const ShapeHandle* first = find(line.first);
+        const ShapeHandle* second = find(line.second);
+        if (first && second)
+            segments.emplace_back(first->position_, second->position_);
+    }
+    return segments;
+}
+
+ea::vector<ea::pair<Vector2, Vector2>> DashSegments(const Vector2& a, const Vector2& b, float on, float off)
+{
+    ea::vector<ea::pair<Vector2, Vector2>> dashes;
+    const float length = (b - a).Length();
+    if (!(length > 0.0f) || !(on > 0.0f) || !std::isfinite(length))
+        return dashes;
+    if (!(off > 0.0f))
+        off = 0.0f;
+    const Vector2 direction = (b - a) / length;
+    for (float start = 0.0f; start < length; start += on + off)
+    {
+        const float end = ea::min(start + on, length);
+        dashes.emplace_back(a + direction * start, end >= length ? b : a + direction * end);
+        if (on + off <= 0.0f)
+            break;
+    }
+    return dashes;
 }
 
 ea::vector<ea::string> GetHandleModes(const ShapeHandleSet& set)

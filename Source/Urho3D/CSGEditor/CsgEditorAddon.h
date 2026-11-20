@@ -208,6 +208,8 @@ private:
 
     /// The settings of the shape handles. A grid step of 0 turns off the Ctrl snap.
     bool showHandles_{true};
+    /// Draw the dashed cage lines of the active shape. Only used if the handles show.
+    bool showCage_{true};
     /// Recenter the pivot of the shape at the commit of a handle drag.
     bool autoRecenter_{true};
     float handleGridStep_{0.125f};

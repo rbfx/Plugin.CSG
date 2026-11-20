@@ -83,6 +83,7 @@ const char* const DrawDebugGeometryIniKey = "SceneSelectionRenderer.DrawDebugGeo
 
 /// The editor settings keys of the shape handles.
 const char* const ShowHandlesIniKey = "CsgEditor.ShowHandles";
+const char* const ShowCageIniKey = "CsgEditor.ShowCage";
 const char* const AutoRecenterIniKey = "CsgEditor.AutoRecenter";
 const char* const HandleGridStepIniKey = "CsgEditor.HandleGridStep";
 const char* const HandleModesIniKey = "CsgEditor.HandleModes";
@@ -94,11 +95,18 @@ const float HandlePickRadius = 10.0f;
 const float HandleAxisLineLength = 18.0f;
 /// The half length of the long axis line of a selected axis handle in pixels. The draw list clips it.
 const float HandleAxisGuideLength = 4000.0f;
-const ImU32 HandlePointColor = IM_COL32(255, 255, 255, 255);
-const ImU32 HandleAxisColor = IM_COL32(255, 150, 30, 255);
-const ImU32 HandleHoveredColor = IM_COL32(255, 230, 0, 255);
-const ImU32 HandleSelectedColor = IM_COL32(0, 230, 255, 255);
+/// All handles are round dots: light gray, brighter if hovered, white and larger if selected.
+const ImU32 HandlePointColor = IM_COL32(175, 175, 175, 255);
+const ImU32 HandleAxisColor = IM_COL32(175, 175, 175, 255);
+const ImU32 HandleHoveredColor = IM_COL32(225, 225, 225, 255);
+const ImU32 HandleSelectedColor = IM_COL32(255, 255, 255, 255);
 const ImU32 HandleOutlineColor = IM_COL32(0, 0, 0, 200);
+const float HandleSelectedExtraRadius = 1.5f;
+/// The cage is a faint dashed line. The lengths of a dash and of a gap are in pixels.
+const ImU32 CageColor = IM_COL32(255, 255, 255, 90);
+const float CageDashOn = 6.0f;
+const float CageDashOff = 4.0f;
+const unsigned MaxCageLines = 100;
 
 /// Return true if the selection renderer draws the debug shape of the brush.
 /// It draws a selected component, and all components of a selected node and of its children.
@@ -710,6 +718,7 @@ void CsgEditorAddon::WriteIniSettings(ImGuiTextBuffer& output)
 {
     WriteStringToIni(output, PresetIniKey, GetBrushPresets()[presetIndex_].name_);
     WriteIntToIni(output, ShowHandlesIniKey, showHandles_);
+    WriteIntToIni(output, ShowCageIniKey, showCage_);
     WriteIntToIni(output, AutoRecenterIniKey, autoRecenter_);
     WriteStringToIni(output, HandleGridStepIniKey, Format("{}", handleGridStep_));
     WriteStringToIni(output, HandleModesIniKey, FormatHandleModesIni(handleModes_));
@@ -729,6 +738,8 @@ void CsgEditorAddon::ReadIniSettings(const char* line)
     }
     if (const auto value = ReadIntFromIni(line, ShowHandlesIniKey))
         showHandles_ = *value != 0;
+    if (const auto value = ReadIntFromIni(line, ShowCageIniKey))
+        showCage_ = *value != 0;
     if (const auto value = ReadIntFromIni(line, AutoRecenterIniKey))
         autoRecenter_ = *value != 0;
     if (const auto value = ReadStringFromIni(line, HandleGridStepIniKey))
@@ -1692,6 +1703,23 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
     ImDrawList* drawList = ui::GetWindowDrawList();
     drawList->PushClipRect(ToImGui(area.min_), ToImGui(area.max_), true);
     const float half = HandleSize * 0.5f;
+
+    // The cage uses all handles of the shape, also the ones that the mode hides.
+    if (showCage_)
+    {
+        const auto segments = ResolveCageSegments(handleSet_);
+        const unsigned count = ea::min<unsigned>(segments.size(), MaxCageLines);
+        for (unsigned index = 0; index < count; ++index)
+        {
+            const auto first = ProjectToView(camera, area, worldTransform * segments[index].first);
+            const auto second = ProjectToView(camera, area, worldTransform * segments[index].second);
+            if (!first || !second)
+                continue;
+            for (const auto& dash : DashSegments(*first, *second, CageDashOn, CageDashOff))
+                drawList->AddLine(ToImGui(dash.first), ToImGui(dash.second), CageColor, 1.0f);
+        }
+    }
+
     for (unsigned index = 0; index < visibleHandles_.size(); ++index)
     {
         const ShapeHandle& handle = visibleHandles_[index];
@@ -1706,6 +1734,7 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
             : isAxis                ? HandleAxisColor
                                     : HandlePointColor;
         const ImVec2 center = ToImGui(points[index].position_);
+        const float radius = selected ? half + HandleSelectedExtraRadius : half;
 
         if (isAxis)
         {
@@ -1722,15 +1751,9 @@ void CsgEditorAddon::ProcessShapeHandles(SceneViewPage& page, bool& mouseConsume
                 drawList->AddLine(center, ToImGui(points[index].position_ + *direction * HandleAxisLineLength),
                     color, 2.0f);
             }
-            drawList->AddCircleFilled(center, half + 1.0f, HandleOutlineColor);
-            drawList->AddCircleFilled(center, half, color);
         }
-        else
-        {
-            drawList->AddRectFilled(ImVec2{center.x - half - 1.0f, center.y - half - 1.0f},
-                ImVec2{center.x + half + 1.0f, center.y + half + 1.0f}, HandleOutlineColor);
-            drawList->AddRectFilled(ImVec2{center.x - half, center.y - half}, ImVec2{center.x + half, center.y + half}, color);
-        }
+        drawList->AddCircleFilled(center, radius + 1.0f, HandleOutlineColor);
+        drawList->AddCircleFilled(center, radius, color);
     }
     drawList->PopClipRect();
 
@@ -1898,6 +1921,9 @@ void CsgEditorAddon::RenderMaterialRows(Component* brush)
 void CsgEditorAddon::RenderShapeSettings()
 {
     ui::Checkbox("Show handles", &showHandles_);
+    ui::Checkbox("Show cage", &showCage_);
+    if (ui::IsItemHovered())
+        ui::SetTooltip("Draw faint dashed lines between the handles of the shape.");
     ui::Checkbox("Recenter pivot after drag", &autoRecenter_);
     if (ui::IsItemHovered())
         ui::SetTooltip("Move the node origin to the center of the shape at the end of a handle drag.");

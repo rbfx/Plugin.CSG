@@ -2307,3 +2307,88 @@ TEST_CASE("The handle selection is parked for each mode", "[editorops][modes]")
     CHECK(parking.GetCount() == 0);
     CHECK(parking.Find("Edge") == nullptr);
 }
+
+TEST_CASE("ResolveCageSegments maps the cage ids to positions", "[editorops][cage]")
+{
+    ShapeHandleSet set;
+    set.valid_ = true;
+    for (unsigned id = 0; id < 3; ++id)
+    {
+        ShapeHandle handle;
+        handle.id_ = id * 10;
+        handle.position_ = Vector3(static_cast<float>(id), 1.0f, 2.0f);
+        set.handles_.push_back(handle);
+    }
+    set.cage_ = {{0, 10}, {10, 99}, {99, 0}, {20, 0}};
+
+    const auto segments = ResolveCageSegments(set);
+    REQUIRE(segments.size() == 2);
+    CHECK(segments[0].first == Vector3(0.0f, 1.0f, 2.0f));
+    CHECK(segments[0].second == Vector3(1.0f, 1.0f, 2.0f));
+    CHECK(segments[1].first == Vector3(2.0f, 1.0f, 2.0f));
+    CHECK(segments[1].second == Vector3(0.0f, 1.0f, 2.0f));
+
+    CHECK(ResolveCageSegments(ShapeHandleSet{}).empty());
+}
+
+TEST_CASE("DashSegments cuts a line into dashes", "[editorops][cage]")
+{
+    SECTION("The dashes have the exact length and gaps")
+    {
+        // The length is 24: dashes at 0, 10 and 20. The last one is 4 long and ends at b.
+        const auto dashes = DashSegments(Vector2(0.0f, 0.0f), Vector2(24.0f, 0.0f), 6.0f, 4.0f);
+        REQUIRE(dashes.size() == 3);
+        CHECK(dashes[0].first == Vector2(0.0f, 0.0f));
+        CHECK(dashes[0].second.x_ == Catch::Approx(6.0f));
+        CHECK(dashes[1].first.x_ == Catch::Approx(10.0f));
+        CHECK(dashes[1].second.x_ == Catch::Approx(16.0f));
+        CHECK(dashes[2].first.x_ == Catch::Approx(20.0f));
+        CHECK(dashes[2].second == Vector2(24.0f, 0.0f));
+    }
+
+    SECTION("A gap at the end gives no dash")
+    {
+        const auto dashes = DashSegments(Vector2(0.0f, 0.0f), Vector2(0.0f, 10.0f), 6.0f, 4.0f);
+        REQUIRE(dashes.size() == 1);
+        CHECK(dashes[0].second.y_ == Catch::Approx(6.0f));
+    }
+
+    SECTION("A short line is one dash that ends at b")
+    {
+        const auto dashes = DashSegments(Vector2(1.0f, 1.0f), Vector2(1.0f, 3.0f), 6.0f, 4.0f);
+        REQUIRE(dashes.size() == 1);
+        CHECK(dashes[0].first == Vector2(1.0f, 1.0f));
+        CHECK(dashes[0].second == Vector2(1.0f, 3.0f));
+    }
+
+    SECTION("The sum of the dashes follows the on and off values")
+    {
+        const Vector2 a(3.0f, 4.0f);
+        const Vector2 b(33.0f, 44.0f); // length 50
+        const auto dashes = DashSegments(a, b, 6.0f, 4.0f);
+        REQUIRE(dashes.size() == 5);
+        float sum = 0.0f;
+        for (unsigned i = 0; i < dashes.size(); ++i)
+        {
+            sum += (dashes[i].second - dashes[i].first).Length();
+            if (i + 1 < dashes.size())
+                CHECK((dashes[i + 1].first - dashes[i].second).Length() == Catch::Approx(4.0f).margin(1e-3f));
+        }
+        CHECK(sum == Catch::Approx(30.0f).margin(1e-3f));
+        CHECK((dashes.back().second - a).Length() == Catch::Approx(46.0f).margin(1e-3f));
+    }
+
+    SECTION("A zero line or a bad on value gives no dash")
+    {
+        CHECK(DashSegments(Vector2(1.0f, 1.0f), Vector2(1.0f, 1.0f), 6.0f, 4.0f).empty());
+        CHECK(DashSegments(Vector2::ZERO, Vector2(10.0f, 0.0f), 0.0f, 4.0f).empty());
+        CHECK(DashSegments(Vector2::ZERO, Vector2(10.0f, 0.0f), -1.0f, 4.0f).empty());
+    }
+
+    SECTION("A negative off value counts as zero")
+    {
+        const auto dashes = DashSegments(Vector2::ZERO, Vector2(12.0f, 0.0f), 6.0f, -2.0f);
+        REQUIRE(dashes.size() == 2);
+        CHECK(dashes[1].first.x_ == Catch::Approx(6.0f));
+    }
+}
