@@ -984,7 +984,7 @@ TEST_CASE("QueryShapeHandles and MoveShapeHandles work on a box in a scene", "[e
 
     const ShapeHandleSet set = QueryShapeHandles(box);
     CHECK(set.valid_);
-    CHECK(set.handles_.size() == 14);
+    CHECK(set.handles_.size() == 26);
     REQUIRE(FindShapeHandle(set, 7));
     CHECK(FindShapeHandle(set, 7)->kind_ == CsgShapeHandleKind::Point);
     CHECK(FindShapeHandle(set, 7)->position_.Equals(Vector3(0.5f, 0.5f, 0.5f)));
@@ -1258,7 +1258,7 @@ TEST_CASE("ChooseFaceHandle picks the box face of the normal", "[editorops][pick
 {
     Fixture f;
     const ea::vector<ShapeHandle> handles = HandlesOf<CsgBoxBrush>(f);
-    REQUIRE(handles.size() == 14);
+    REQUIRE(handles.size() == 26);
 
     // The face ids are 20 to 25: -X, +X, -Y, +Y, -Z, +Z.
     const Vector3 normals[6] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
@@ -1282,6 +1282,14 @@ TEST_CASE("ChooseFaceHandle picks the box face of the normal", "[editorops][pick
 
     // A 45 degree normal and a zero normal match nothing. No handles give none.
     CHECK_FALSE(ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3(1, 1, 0).Normalized()));
+    // Edge handles (ids 30 to 41, points) are never chosen, also near an edge.
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        const unsigned id = *ChooseFaceHandle(handles, Vector3(0.5f, 0.5f, 0.0f), normals[face]);
+        CHECK(id >= 20u);
+        CHECK(id < 26u);
+    }
+    CHECK(*ChooseFaceHandle(handles, Vector3(0.5f, 0.5f, 0.0f), Vector3(1, 0, 0)) == 21);
     CHECK_FALSE(ChooseFaceHandle(handles, Vector3(0.5f, 0, 0), Vector3::ZERO));
     CHECK_FALSE(ChooseFaceHandle({}, Vector3::ZERO, Vector3(1, 0, 0)));
 }

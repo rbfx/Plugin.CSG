@@ -37,6 +37,37 @@ ea::string GetCornerName(unsigned corner)
     return name;
 }
 
+/// Return the two corners of an edge. The edge is parallel to axis (id - FirstEdgeHandle) / 4.
+/// The low corner has a zero bit on the axis. The other two bits come from the index in the group.
+void GetEdgeCorners(unsigned edge, unsigned& low, unsigned& high)
+{
+    const unsigned axis = edge / 4;
+    const unsigned b = axis == 0 ? 1 : 0; // first other axis
+    const unsigned c = axis == 2 ? 1 : 2; // second other axis
+    low = (((edge >> 0) & 1u) << b) | (((edge >> 1) & 1u) << c);
+    high = low | (1u << axis);
+}
+
+ea::string GetEdgeName(unsigned edge)
+{
+    unsigned low, high;
+    GetEdgeCorners(edge, low, high);
+    const char letters[3] = {'X', 'Y', 'Z'};
+    ea::string name = "Edge";
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        name += ' ';
+        if (axis == edge / 4)
+            name += letters[axis];
+        else
+        {
+            name += (low >> axis) & 1u ? '+' : '-';
+            name += letters[axis];
+        }
+    }
+    return name;
+}
+
 const char* const FaceNames[6] = {"Face -X", "Face +X", "Face -Y", "Face +Y", "Face -Z", "Face +Z"};
 
 } // namespace
@@ -119,6 +150,17 @@ void CsgBoxBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.axis_ = GetFaceAxis(face);
         handles.push_back(handle);
     }
+    for (unsigned edge = 0; edge < 12; ++edge)
+    {
+        unsigned low, high;
+        GetEdgeCorners(edge, low, high);
+        CsgShapeHandle handle;
+        handle.id_ = FirstEdgeHandle + edge;
+        handle.name_ = GetEdgeName(edge);
+        handle.kind_ = CsgShapeHandleKind::Point;
+        handle.position_ = params_.size_ * (params_.corners_[low] + params_.corners_[high]) * 0.5f;
+        handles.push_back(handle);
+    }
 }
 
 bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta)
@@ -129,11 +171,20 @@ bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& lo
 
     const Vector3 size = VectorMax(params_.size_, Vector3::ONE * CsgBoxParams::MinSize);
     CsgBoxParams params = params_;
+    // A corner or edge handle moves its corners by the delta. A corner moves once, also if two
+    // handles name it. A face handle adds its axis move on top.
+    unsigned pointMask = 0;
     for (const unsigned id : unique)
     {
         if (id < 8)
         {
-            params.corners_[id] += localDelta / size;
+            pointMask |= 1u << id;
+        }
+        else if (id >= FirstEdgeHandle && id < FirstEdgeHandle + 12)
+        {
+            unsigned low, high;
+            GetEdgeCorners(id - FirstEdgeHandle, low, high);
+            pointMask |= (1u << low) | (1u << high);
         }
         else if (id >= FirstFaceHandle && id < FirstFaceHandle + 6)
         {
@@ -148,6 +199,11 @@ bool CsgBoxBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector3& lo
         }
         else
             return false;
+    }
+    for (unsigned corner = 0; corner < 8; ++corner)
+    {
+        if (pointMask & (1u << corner))
+            params.corners_[corner] += localDelta / size;
     }
 
     // A value that is not finite (an overflow) is not accepted. The sanitizer would replace it.

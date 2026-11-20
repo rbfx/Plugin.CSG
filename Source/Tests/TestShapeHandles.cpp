@@ -170,12 +170,14 @@ TEST_CASE("The box brush has 8 corner handles and 6 face handles with stable ids
 {
     HandleFixture<CsgBoxBrush> f;
     const auto handles = f.Handles();
-    REQUIRE(handles.size() == 14);
+    REQUIRE(handles.size() == 26);
 
     ea::vector<unsigned> expected;
     for (unsigned i = 0; i < 8; ++i)
         expected.push_back(i);
     for (unsigned i = 20; i < 26; ++i)
+        expected.push_back(i);
+    for (unsigned i = 30; i < 42; ++i)
         expected.push_back(i);
     CHECK(GetIds(handles) == expected);
 
@@ -198,6 +200,165 @@ TEST_CASE("The box brush has 8 corner handles and 6 face handles with stable ids
     CHECK(FindHandle(handles, 23)->axis_ == Vector3(0, 1, 0));
     CHECK(FindHandle(handles, 24)->axis_ == Vector3(0, 0, -1));
     CHECK(FindHandle(handles, 25)->axis_ == Vector3(0, 0, 1));
+}
+
+namespace
+{
+
+/// Return the world positions of the generated vertices as a flat list.
+bool MeshHasVertexNearAny(const CsgShapeMesh& mesh, const Vector3& p) { return MeshHasVertexNear(mesh, p, 1e-5f); }
+
+void CheckEdgeHandles(const HandleFixture<CsgBoxBrush>& f)
+{
+    const auto handles = f.Handles();
+    REQUIRE(handles.size() == 26);
+    for (unsigned edge = 0; edge < 12; ++edge)
+    {
+        const CsgShapeHandle* h = FindHandle(handles, 30 + edge);
+        REQUIRE(h);
+        CHECK(h->kind_ == CsgShapeHandleKind::Point);
+        CHECK(h->axis_ == Vector3::ZERO);
+        const unsigned axis = edge / 4;
+        const unsigned b = axis == 0 ? 1 : 0;
+        const unsigned c = axis == 2 ? 1 : 2;
+        const unsigned low = ((edge & 1u) << b) | (((edge >> 1) & 1u) << c);
+        const unsigned high = low | (1u << axis);
+        const Vector3 mean = (handles[low].position_ + handles[high].position_) * 0.5f;
+        CHECK(IsNear(h->position_, mean, 1e-5f));
+    }
+}
+
+} // namespace
+
+TEST_CASE("Box edge handles have ids 30 to 41, names and midpoint positions", "[shapes][handles][box][edges]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    const auto handles = f.Handles();
+    REQUIRE(handles.size() == 26);
+    const char* names[12] = {"Edge X -Y -Z", "Edge X +Y -Z", "Edge X -Y +Z", "Edge X +Y +Z", "Edge -X Y -Z",
+        "Edge +X Y -Z", "Edge -X Y +Z", "Edge +X Y +Z", "Edge -X -Y Z", "Edge +X -Y Z", "Edge -X +Y Z",
+        "Edge +X +Y Z"};
+    for (unsigned i = 0; i < 12; ++i)
+        CHECK(FindHandle(handles, 30 + i)->name_ == names[i]);
+    CHECK(FindHandle(handles, 30)->position_ == Vector3(0.0f, -0.5f, -0.5f));
+    CHECK(FindHandle(handles, 37)->position_ == Vector3(0.5f, 0.0f, 0.5f));
+    CHECK(FindHandle(handles, 41)->position_ == Vector3(0.5f, 0.5f, 0.0f));
+    CheckEdgeHandles(f);
+
+    // Moved corners and a size.
+    CsgBoxParams params;
+    params.size_ = Vector3(2.0f, 3.0f, 4.0f);
+    params.corners_[5] += Vector3(0.1f, -0.05f, 0.2f);
+    params.corners_[2] += Vector3(-0.1f, 0.05f, 0.0f);
+    f.brush->SetParams(params);
+    CheckEdgeHandles(f);
+
+    // A rotated and scaled node does not change the local handles.
+    f.brush->GetNode()->SetRotation(Quaternion(30.0f, Vector3(1, 2, 3)));
+    f.brush->GetNode()->SetScale(Vector3(2.0f, 1.0f, 0.5f));
+    CheckEdgeHandles(f);
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("A box edge handle move changes exactly its two corners", "[shapes][handles][box][edges]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    f.brush->SetSize(Vector3(2.0f, 4.0f, 8.0f));
+    const CsgBoxParams before = f.brush->GetParams();
+    const Vector3 delta(0.1f, 0.2f, 0.4f);
+
+    for (unsigned edge = 0; edge < 12; ++edge)
+    {
+        f.brush->SetParams(before);
+        REQUIRE(f.brush->MoveHandles({30 + edge}, delta));
+        const CsgBoxParams after = f.brush->GetParams();
+        CHECK(CountChangedCorners(before, after) == 2);
+        for (unsigned i = 0; i < 8; ++i)
+        {
+            if (after.corners_[i] != before.corners_[i])
+                CHECK(IsNear(after.corners_[i], before.corners_[i] + delta / before.size_));
+        }
+        // Edge 0 is X -Y -Z: the corners 0 and 1.
+        CsgShapeMesh mesh;
+        REQUIRE(CsgGenerateBox(after, mesh));
+        for (unsigned i = 0; i < 8; ++i)
+            CHECK(MeshHasVertexNearAny(mesh, after.size_ * after.corners_[i]));
+    }
+
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({30}, delta));
+    CHECK(f.brush->GetCorner(0) != before.corners_[0]);
+    CHECK(f.brush->GetCorner(1) != before.corners_[1]);
+    CHECK(CountChangedCorners(before, f.brush->GetParams()) == 2);
+
+    // Edge 4 is Y -X -Z: the corners 0 and 2. Edge 8 is Z -X -Y: the corners 0 and 4. Edge 11 is +X +Y: 3 and 7.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({34}, delta));
+    CHECK(f.brush->GetCorner(0) != before.corners_[0]);
+    CHECK(f.brush->GetCorner(2) != before.corners_[2]);
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({41}, delta));
+    CHECK(f.brush->GetCorner(3) != before.corners_[3]);
+    CHECK(f.brush->GetCorner(7) != before.corners_[7]);
+    CHECK(CountChangedCorners(before, f.brush->GetParams()) == 2);
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("A box edge handle move rejects zero and invalid moves and is stateless",
+    "[shapes][handles][box][edges]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    f.brush->ClearDirty();
+    const CsgBoxParams snapshot = f.brush->GetParams();
+
+    CHECK_FALSE(f.brush->MoveHandles({33}, Vector3::ZERO));
+    CHECK_FALSE(f.brush->IsDirty());
+    // The edge of the -Y -Z side goes through the opposite side: zero volume.
+    CHECK_FALSE(f.brush->MoveHandles({30}, Vector3(0.0f, 1.0f, 0.0f)));
+    CHECK_FALSE(f.brush->MoveHandles({30}, Vector3(0.0f, 3.0f, 3.0f)));
+    // A move over the clamp limit.
+    CHECK_FALSE(f.brush->MoveHandles({30}, Vector3(1e30f, 0.0f, 0.0f)));
+    CHECK(f.brush->GetParams().corners_ == snapshot.corners_);
+    CHECK_FALSE(f.brush->IsDirty());
+
+    const Vector3 d1(0.3f, 0.2f, -0.1f);
+    const Vector3 d2(-0.2f, 0.5f, 0.25f);
+    REQUIRE(f.brush->MoveHandles({35}, d2));
+    const CsgBoxParams expected = f.brush->GetParams();
+    f.brush->SetParams(snapshot);
+    REQUIRE(f.brush->MoveHandles({35}, d1));
+    f.brush->SetParams(snapshot);
+    REQUIRE(f.brush->MoveHandles({35}, d2));
+    CHECK(f.brush->GetParams().corners_ == expected.corners_);
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("A shared corner moves once for an edge with a corner or another edge", "[shapes][handles][box][edges]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    const CsgBoxParams before = f.brush->GetParams();
+    const Vector3 delta(0.1f, 0.0f, 0.2f);
+
+    // Edge 30 has the corners 0 and 1. The corner 1 is also selected.
+    REQUIRE(f.brush->MoveHandles({30, 1}, delta));
+    CHECK(CountChangedCorners(before, f.brush->GetParams()) == 2);
+    CHECK(IsNear(f.brush->GetCorner(1), before.corners_[1] + delta));
+    CHECK(IsNear(f.brush->GetCorner(0), before.corners_[0] + delta));
+
+    // Edge 30 (corners 0, 1) and edge 34 (corners 0, 2) share the corner 0: 3 corners move, once each.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({30, 34}, delta));
+    CHECK(CountChangedCorners(before, f.brush->GetParams()) == 3);
+    for (unsigned i = 0; i < 3; ++i)
+        CHECK(IsNear(f.brush->GetCorner(i), before.corners_[i] + delta));
+
+    // Edge 30 and the +X face (corners 1, 3, 5, 7) share the corner 1. The face adds its axis part.
+    f.brush->SetParams(before);
+    REQUIRE(f.brush->MoveHandles({30, 21}, delta));
+    CHECK(IsNear(f.brush->GetCorner(0), before.corners_[0] + delta));
+    CHECK(IsNear(f.brush->GetCorner(1), before.corners_[1] + delta + Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK(IsNear(f.brush->GetCorner(3), before.corners_[3] + Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK(CountChangedCorners(before, f.brush->GetParams()) == 5);
 }
 
 TEST_CASE("Box corner handle positions equal the generated corners and face handles lie on the faces",
@@ -809,6 +970,28 @@ TEST_CASE("Box recenter keeps the world corners", "[shapes][handles][recenter]")
         CheckBoxRecenter(f);
     }
     CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Recenter after an edge move keeps world positions and the events work for edges",
+    "[shapes][handles][box][edges]")
+{
+    HandleFixture<CsgBoxBrush> f;
+    f.brush->GetNode()->SetRotation(Quaternion(20.0f, Vector3(0, 1, 1)));
+    f.brush->GetNode()->SetPosition(Vector3(1, 2, 3));
+    REQUIRE(f.brush->MoveHandles({32}, Vector3(0.4f, 0.3f, -0.2f)));
+    CheckBoxRecenter(f);
+
+    // The event round trip.
+    HandleFixture<CsgBoxBrush>& g = f;
+    g.brush->SetParams(CsgBoxParams());
+    const VariantMap data = Query(g.brush);
+    CHECK(data.at(CsgShapeQueryHandles::P_HANDLES).GetVariantVector().size() == 26);
+    CHECK(SendMove(g.brush, {37}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK(CountChangedCorners(CsgBoxParams(), g.brush->GetParams()) == 2);
+    CHECK_FALSE(SendMove(g.brush, {37}, Vector3(0.0f, 0.0f, 0.0f)));
+    CHECK_FALSE(SendMove(g.brush, {42}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK_FALSE(SendMove(g.brush, {26}, Vector3(0.1f, 0.0f, 0.0f)));
+    CHECK(g.errors.GetCount() == 0);
 }
 
 TEST_CASE("Box recenter keeps the shape valid and tilted boxes work", "[shapes][handles][recenter]")

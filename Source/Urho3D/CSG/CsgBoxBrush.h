@@ -47,15 +47,20 @@ public:
     /// Handles: ids 0 to 7 are the corners (points). Ids 20 to 25 are the faces (axes), in the order
     /// -X, +X, -Y, +Y, -Z, +Z. The id is 20 plus the face group index. The ids are a file contract.
     /// A face handle is at the mean of the 4 corner positions. Its axis is the nominal outward axis.
+    /// Ids 30 to 41 are the 12 edges (points) at the midpoint of the 2 corner positions. The id is 30
+    /// plus 4 * A plus K. A is the axis of the edge (0 X, 1 Y, 2 Z). K is bit 0 and bit 1 of the
+    /// positions on the other two axes, in ascending axis order (0 is the minus side). The ids are a file contract.
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
     /// A corner handle adds delta / size to the corner. A face handle moves its 4 corners along the axis by
-    /// dot(delta, axis) / size. If a corner is in two given handles, both handles move it.
+    /// dot(delta, axis) / size. An edge handle adds delta / size to its 2 corners. A corner is moved by the
+    /// delta only once, also if a corner handle and an edge handle name it. A face handle adds on top.
     /// A move that makes the box not valid returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;
     /// The center is the mean of the 8 positions Size * Corner. Each corner moves by -center / Size.
     bool Recenter(Vector3& localOffset) override;
 
     static constexpr unsigned FirstFaceHandle = 20;
+    static constexpr unsigned FirstEdgeHandle = 30;
 
 protected:
     void SanitizeParameters() override;
