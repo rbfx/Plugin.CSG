@@ -124,6 +124,9 @@ namespace
 {
 
 constexpr unsigned BulgeHandle = 10;
+constexpr unsigned BottomScaleHandle = 11;
+constexpr unsigned TopScaleHandle = 12;
+constexpr double ExactPi = 3.14159265358979323846;
 /// The minimum mean X radius for the bulge handle.
 constexpr float MinBulgeRadius = 0.001f;
 
@@ -138,6 +141,39 @@ const char* const BottomRadiusNames[4] = {"Bottom Radius +X", "Bottom Radius -X"
 const char* const TopRadiusNames[4] = {"Top Radius +X", "Top Radius -X", "Top Radius +Z", "Top Radius -Z"};
 
 bool IsApex(const Vector2& radius) { return radius.x_ <= 0.0f && radius.y_ <= 0.0f; }
+
+/// Return the distance from the center to the boundary of the unit polygon along the angle (in XZ, from +X to +Z).
+/// The unit polygon has its corners at the Start Angle. Its corner distance is 1, or 1 / cos(pi / n) with Face Radius.
+/// A ray through a corner returns the corner distance exactly.
+double GetPolygonRayDistance(const CsgCylinderParams& params, double angle)
+{
+    const double n = params.segments_;
+    const double step = 2.0 * ExactPi / n;
+    const double corner = params.faceRadius_ ? 1.0 / std::cos(ExactPi / n) : 1.0;
+    const double apothem = params.faceRadius_ ? 1.0 : std::cos(ExactPi / n);
+    const double position = (angle - static_cast<double>(params.startAngle_) * ExactPi / 180.0) / step;
+    const double side = std::floor(position);
+    const double fraction = position - side;
+    if (fraction < 1e-9 || fraction > 1.0 - 1e-9)
+        return corner;
+    const double normalAngle = (side + 0.5) * step + static_cast<double>(params.startAngle_) * ExactPi / 180.0;
+    return apothem / std::cos(angle - normalAngle);
+}
+
+/// The angle of the direction of a radius handle: +X, -X, +Z, -Z.
+double GetRadiusAngle(unsigned index)
+{
+    constexpr double angles[4] = {0.0, ExactPi, 0.5 * ExactPi, 1.5 * ExactPi};
+    return angles[index];
+}
+
+/// The unit polygon point (x, z) of the scale handle, on the rim at 45 degrees.
+Vector2 GetScalePoint(const CsgCylinderParams& params)
+{
+    const double k = GetPolygonRayDistance(params, 0.25 * ExactPi);
+    const double c = std::cos(0.25 * ExactPi);
+    return Vector2(static_cast<float>(k * c), static_cast<float>(k * c));
+}
 
 float GetMeanRadiusX(const CsgCylinderParams& params)
 {
@@ -172,7 +208,8 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
             handle.name_ = end ? TopRadiusNames[i] : BottomRadiusNames[i];
             handle.kind_ = CsgShapeHandleKind::Axis;
             handle.axis_ = GetRadiusDirection(i);
-            handle.position_ = centers[end] + handle.axis_ * (i < 2 ? radii[end].x_ : radii[end].y_);
+            const float reach = static_cast<float>(GetPolygonRayDistance(params_, GetRadiusAngle(i)));
+            handle.position_ = centers[end] + handle.axis_ * ((i < 2 ? radii[end].x_ : radii[end].y_) * reach);
             handles.push_back(handle);
         }
     }
@@ -186,6 +223,27 @@ void CsgCylinderBrush::GetHandles(ea::vector<CsgShapeHandle>& handles) const
         handle.axis_ = Vector3(1, 0, 0);
         handle.position_ = (params_.bottomCenter_ + params_.topCenter_) * 0.5f
             + handle.axis_ * (radiusMid * (1.0f + params_.bulge_));
+        handles.push_back(handle);
+    }
+    // The scale handles sit on the rim at 45 degrees. At an apex the handle sits at the end center.
+    const Vector2 scalePoint = GetScalePoint(params_);
+    for (unsigned end = 0; end < 2; ++end)
+    {
+        CsgShapeHandle handle;
+        handle.id_ = end ? TopScaleHandle : BottomScaleHandle;
+        handle.name_ = end ? "Top Scale" : "Bottom Scale";
+        handle.kind_ = CsgShapeHandleKind::Axis;
+        if (IsApex(radii[end]))
+        {
+            handle.axis_ = Vector3(1, 0, 1).Normalized();
+            handle.position_ = centers[end];
+        }
+        else
+        {
+            const Vector3 offset(radii[end].x_ * scalePoint.x_, 0.0f, radii[end].y_ * scalePoint.y_);
+            handle.axis_ = offset.Normalized();
+            handle.position_ = centers[end] + offset;
+        }
         handles.push_back(handle);
     }
 }
@@ -211,11 +269,35 @@ bool CsgCylinderBrush::MoveHandles(const ea::vector<unsigned>& ids, const Vector
             // An apex end has no radius handle.
             if (IsApex(end ? params_.topRadius_ : params_.bottomRadius_))
                 return false;
-            const float change = localDelta.DotProduct(GetRadiusDirection(index));
+            // The handle sits at the radius times the ray distance of the polygon.
+            const float reach = static_cast<float>(GetPolygonRayDistance(params_, GetRadiusAngle(index)));
+            const float change = localDelta.DotProduct(GetRadiusDirection(index)) / reach;
             if (index < 2)
                 radius.x_ += change;
             else
                 radius.y_ += change;
+        }
+        else if (id == BottomScaleHandle || id == TopScaleHandle)
+        {
+            const bool top = id == TopScaleHandle;
+            const Vector2 current = top ? params_.topRadius_ : params_.bottomRadius_;
+            Vector2& radius = top ? params.topRadius_ : params.bottomRadius_;
+            const Vector2 scalePoint = GetScalePoint(params_);
+            if (IsApex(current))
+            {
+                // The apex grows back. The handle stays under the cursor: the distance along the axis is r * reach.
+                const float along = localDelta.DotProduct(Vector3(1, 0, 1).Normalized());
+                const float size = ea::max(along / (scalePoint.x_ * 1.41421356f), 0.0f);
+                radius = Vector2(size, size);
+            }
+            else
+            {
+                // Both components scale by the same factor. The new handle position is the old one plus the delta.
+                const Vector3 offset(current.x_ * scalePoint.x_, 0.0f, current.y_ * scalePoint.y_);
+                const float length = offset.Length();
+                const float factor = (length + localDelta.DotProduct(offset / length)) / length;
+                radius = current * factor;
+            }
         }
         else if (id == BulgeHandle)
         {

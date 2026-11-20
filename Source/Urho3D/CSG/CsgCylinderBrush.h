@@ -80,11 +80,19 @@ public:
     /// - 0 the bottom center and 1 the top center (points).
     /// - 2 to 5 the bottom radius at +X, -X, +Z, -Z and 6 to 9 the top radius at the same places (axes).
     ///   The +X and -X handles of one end edit the same component.
+    ///   A handle sits on the polygon boundary along its axis: center + axis * radius * k.
+    ///   k is the distance from the center to the unit polygon along the axis. For the default cylinder k is 1.
     ///   An end that is an apex (radius pair (0, 0)) has no radius handle. The other ids do not shift.
     /// - 10 the bulge (axis +X, at the middle of the center line). It is absent if the mean X radius
     ///   is not above 0.001.
+    /// - 11 the bottom scale and 12 the top scale (axes). Each sits on the rim of its end at 45 degrees in XZ.
+    ///   The axis points from the center to the handle. At an apex the handle sits at the end center
+    ///   and the axis is normalize(1, 0, 1). The handle count is 13 at most.
     void GetHandles(ea::vector<CsgShapeHandle>& handles) const override;
-    /// A center moves by the full delta. A radius component grows by dot(delta, axis).
+    /// A center moves by the full delta. A radius component grows by dot(delta, axis) / k.
+    /// A scale handle multiplies both radius components by the same factor, so the handle follows the delta.
+    /// If both components fall below 0.001 the end becomes an apex. A drag of an apex handle sets the radius pair
+    /// to (r, r) with r from the distance along the axis, or keeps the apex.
     /// The bulge grows by dot(delta, axis) divided by the mean X radius.
     /// The sanitizer clamps the result. A shape that is not valid, or no change, returns false.
     bool MoveHandles(const ea::vector<unsigned>& ids, const Vector3& localDelta) override;

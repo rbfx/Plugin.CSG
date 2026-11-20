@@ -1223,7 +1223,7 @@ TEST_CASE("QueryShapeHandles and MoveShapeHandles work on a sphere, a cylinder a
     CHECK_FALSE(MoveShapeHandles(sphere, {0}, Vector3(M_INFINITY, 0.0f, 0.0f)));
 
     auto* cylinder = AddShapeBrush<CsgCylinderBrush>(f);
-    CHECK(QueryShapeHandles(cylinder).handles_.size() == 11);
+    CHECK(QueryShapeHandles(cylinder).handles_.size() == 13);
     CHECK(MoveShapeHandles(cylinder, {1}, Vector3(0.0f, 0.5f, 0.0f)));
     CHECK(cylinder->GetAttribute("Top Center").GetVector3().Equals(Vector3(0.0f, 1.0f, 0.0f)));
     // The top center on the bottom center gives no height.

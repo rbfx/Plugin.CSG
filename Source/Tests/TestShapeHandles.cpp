@@ -682,7 +682,7 @@ TEST_CASE("The cylinder brush has center, radius and bulge handles", "[shapes][h
 {
     HandleFixture<CsgCylinderBrush> f;
     auto handles = f.Handles();
-    CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+    CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
     CHECK(FindHandle(handles, 0)->kind_ == CsgShapeHandleKind::Point);
     CHECK(FindHandle(handles, 1)->position_ == Vector3(0.0f, 0.5f, 0.0f));
     CHECK(FindHandle(handles, 2)->position_ == Vector3(0.5f, -0.5f, 0.0f));
@@ -754,7 +754,7 @@ TEST_CASE("Cylinder handle moves", "[shapes][handles]")
         CHECK(f.brush->GetTopCenter() == before.topCenter_);
         CHECK_FALSE(f.brush->IsDirty());
         CHECK_FALSE(f.brush->MoveHandles({1}, Vector3(std::nanf(""), 0.0f, 0.0f)));
-        CHECK_FALSE(f.brush->MoveHandles({11}, Vector3(0.1f, 0.0f, 0.0f)));
+        CHECK_FALSE(f.brush->MoveHandles({13}, Vector3(0.1f, 0.0f, 0.0f)));
     }
 
     SECTION("A radius at zero becomes the minimum of the pair rule")
@@ -770,7 +770,7 @@ TEST_CASE("Cylinder handle moves", "[shapes][handles]")
         f.brush->SetParams(cone);
         REQUIRE(f.brush->IsShapeValid());
         const auto handles = f.Handles();
-        CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 6, 7, 8, 9, 10});
+        CHECK(GetIds(handles) == ea::vector<unsigned>{0, 1, 6, 7, 8, 9, 10, 11, 12});
         CHECK(FindHandle(handles, 10)->position_ == Vector3(0.25f, 0.0f, 0.0f));
         CHECK_FALSE(f.brush->MoveHandles({2}, Vector3(0.1f, 0.0f, 0.0f)));
         CHECK(f.brush->GetBottomRadius() == Vector2::ZERO);
@@ -781,7 +781,7 @@ TEST_CASE("Cylinder handle moves", "[shapes][handles]")
         cone.bottomRadius_ = Vector2(0.5f, 0.5f);
         cone.topRadius_ = Vector2::ZERO;
         f.brush->SetParams(cone);
-        CHECK(GetIds(f.Handles()) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 10});
+        CHECK(GetIds(f.Handles()) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 10, 11, 12});
     }
     CHECK(f.errors.GetCount() == 0);
 }
@@ -1562,5 +1562,237 @@ TEST_CASE("The cylinder brush saves and loads Start Angle and Face Radius, an ol
         CHECK(brush->GetStartAngle() == 0.0f);
         CHECK_FALSE(brush->GetFaceRadius());
     }
+    CHECK(f.errors.GetCount() == 0);
+}
+
+namespace
+{
+
+/// The distance from the XZ point to the closed polygon (a ring of XZ points).
+float DistanceToPolygon(const Vector2& p, const ea::vector<Vector2>& ring)
+{
+    float best = 1e9f;
+    for (unsigned i = 0; i < ring.size(); ++i)
+    {
+        const Vector2 a = ring[i];
+        const Vector2 b = ring[(i + 1) % ring.size()];
+        const Vector2 ab = b - a;
+        const float t = Clamp((p - a).DotProduct(ab) / ab.DotProduct(ab), 0.0f, 1.0f);
+        best = ea::min(best, (a + ab * t - p).Length());
+    }
+    return best;
+}
+
+/// The XZ positions of the corners of one end ring, in the order of the angle.
+ea::vector<Vector2> GetEndRing(const CsgCylinderParams& params, bool top)
+{
+    CsgShapeMesh mesh;
+    REQUIRE(CsgGenerateCylinder(params, mesh));
+    ea::vector<ea::pair<float, Vector2>> corners;
+    for (unsigned i = 0; i < mesh.groups_[0].indexCount_; ++i)
+    {
+        const ModelVertex& vertex = mesh.vertices_[mesh.indices_[i]];
+        if (vertex.uv_[0].y_ != (top ? 1.0f : 0.0f) || vertex.uv_[0].x_ >= 1.0f)
+            continue;
+        bool known = false;
+        for (const auto& corner : corners)
+            known = known || corner.first == vertex.uv_[0].x_;
+        if (!known)
+            corners.push_back({vertex.uv_[0].x_, Vector2(vertex.GetPosition().x_, vertex.GetPosition().z_)});
+    }
+    ea::sort(corners.begin(), corners.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    ea::vector<Vector2> ring;
+    for (const auto& corner : corners)
+        ring.push_back(corner.second);
+    return ring;
+}
+
+} // namespace
+
+TEST_CASE("Cylinder radius and scale handles lie on the polygon boundary", "[shapes][handles]")
+{
+    for (const int segments : {3, 4, 5, 6, 8, 24})
+    {
+        for (const float start : {0.0f, 45.0f, 17.0f})
+        {
+            for (const bool face : {false, true})
+            {
+                HandleFixture<CsgCylinderBrush> f;
+                CsgCylinderParams params;
+                params.segments_ = segments;
+                params.startAngle_ = start;
+                params.faceRadius_ = face;
+                params.bottomRadius_ = Vector2(0.75f, 0.5f);
+                params.topRadius_ = Vector2(0.3f, 0.6f);
+                f.brush->SetParams(params);
+                INFO("Segments " << segments << " start " << start << " face " << face);
+                const auto handles = f.Handles();
+                REQUIRE(handles.size() == 13);
+                for (const bool top : {false, true})
+                {
+                    const ea::vector<Vector2> ring = GetEndRing(f.brush->GetParams(), top);
+                    REQUIRE(ring.size() == static_cast<unsigned>(segments));
+                    const Vector3 center = top ? params.topCenter_ : params.bottomCenter_;
+                    for (unsigned i = 0; i < 5; ++i)
+                    {
+                        const unsigned id = i < 4 ? 2 + (top ? 4 : 0) + i : (top ? 12 : 11);
+                        const Vector3 p = FindHandle(handles, id)->position_ - center;
+                        CHECK(p.y_ == 0.0f);
+                        CHECK(DistanceToPolygon(Vector2(p.x_, p.z_), ring) < 1e-5f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Cylinder radius handles follow the face in a pyramid", "[shapes][handles]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    CsgCylinderParams params;
+    params.segments_ = 4;
+    params.startAngle_ = 45.0f;
+    params.faceRadius_ = true;
+    params.topRadius_ = Vector2::ZERO;
+    f.brush->SetParams(params);
+    auto handles = f.Handles();
+    // The radius reaches the middle of the face: +X is on the face x = 0.5, between the corners (0.5, +-0.5).
+    const Vector3 plusX = FindHandle(handles, 2)->position_;
+    CHECK(plusX.x_ == Catch::Approx(0.5f).margin(1e-6f));
+    CHECK(plusX.z_ == Catch::Approx(0.0f).margin(1e-6f));
+    CHECK(IsNear(FindHandle(handles, 4)->position_, Vector3(0.0f, -0.5f, 0.5f), 1e-6f));
+    // The scale handle is on the corner at 45 degrees.
+    CHECK(IsNear(FindHandle(handles, 11)->position_, Vector3(0.5f, -0.5f, 0.5f), 1e-6f));
+    // A drag along +X by 0.25 gives the radius 0.75 on that component.
+    REQUIRE(f.brush->MoveHandles({2}, Vector3(0.25f, 9.0f, 9.0f)));
+    CHECK(f.brush->GetBottomRadius().x_ == Catch::Approx(0.75f).margin(1e-6f));
+    CHECK(f.brush->GetBottomRadius().y_ == 0.5f);
+}
+
+TEST_CASE("Cylinder scale handles keep the ratio and stay under the cursor", "[shapes][handles]")
+{
+    for (const int segments : {4, 6, 24})
+    {
+        for (const bool face : {false, true})
+        {
+            HandleFixture<CsgCylinderBrush> f;
+            CsgCylinderParams params;
+            params.segments_ = segments;
+            params.startAngle_ = 17.0f;
+            params.faceRadius_ = face;
+            params.bottomRadius_ = Vector2(0.8f, 0.4f);
+            params.topRadius_ = Vector2(0.6f, 0.3f);
+            f.brush->SetParams(params);
+            INFO("Segments " << segments << " face " << face);
+            for (const unsigned id : {11u, 12u})
+            {
+                f.brush->SetParams(params);
+                const CsgShapeHandle old = *FindHandle(f.Handles(), id);
+                const Vector3 delta(0.3f, 0.7f, -0.2f);
+                REQUIRE(f.brush->MoveHandles({id}, delta));
+                const CsgShapeHandle moved = *FindHandle(f.Handles(), id);
+                // The new position minus the old one is the delta projected on the axis.
+                const Vector3 expected = old.axis_ * delta.DotProduct(old.axis_);
+                CHECK(IsNear(moved.position_ - old.position_, expected, 1e-5f));
+                const Vector2 before = id == 11 ? params.bottomRadius_ : params.topRadius_;
+                const Vector2 after = id == 11 ? f.brush->GetBottomRadius() : f.brush->GetTopRadius();
+                CHECK(after.x_ / after.y_ == Catch::Approx(before.x_ / before.y_).epsilon(1e-5));
+                // The other end does not change.
+                CHECK((id == 11 ? f.brush->GetTopRadius() : f.brush->GetBottomRadius())
+                    == (id == 11 ? params.topRadius_ : params.bottomRadius_));
+            }
+        }
+    }
+}
+
+TEST_CASE("Cylinder scale handle collapses to an apex and grows back", "[shapes][handles]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    CsgCylinderParams params;
+    params.segments_ = 6;
+    params.startAngle_ = 30.0f;
+    params.faceRadius_ = true;
+    f.brush->SetParams(params);
+
+    const CsgShapeHandle top = *FindHandle(f.Handles(), 12);
+    const float length = (top.position_ - params.topCenter_).Length();
+    // A drag by minus the length gives radius 0 (an apex). A longer drag gives the same.
+    REQUIRE(f.brush->MoveHandles({12}, top.axis_ * -length));
+    CHECK(f.brush->GetTopRadius() == Vector2::ZERO);
+    f.brush->SetParams(params);
+    REQUIRE(f.brush->MoveHandles({12}, top.axis_ * (-2.0f * length)));
+    CHECK(f.brush->GetTopRadius() == Vector2::ZERO);
+    // A drag that leaves both components below 0.001 gives the apex too.
+    f.brush->SetParams(params);
+    REQUIRE(f.brush->MoveHandles({12}, top.axis_ * (-length + 0.0001f)));
+    CHECK(f.brush->GetTopRadius() == Vector2::ZERO);
+
+    // The apex: no radius handles for the top, and the scale handle sits at the end center.
+    const auto apexHandles = f.Handles();
+    CHECK(GetIds(apexHandles) == ea::vector<unsigned>{0, 1, 2, 3, 4, 5, 10, 11, 12});
+    const CsgShapeHandle apex = *FindHandle(apexHandles, 12);
+    CHECK(apex.position_ == params.topCenter_);
+    CHECK(IsNear(apex.axis_, Vector3(1.0f, 0.0f, 1.0f).Normalized(), 1e-6f));
+    // A drag against the axis keeps the apex (no change).
+    CHECK_FALSE(f.brush->MoveHandles({12}, -apex.axis_ * 0.2f));
+    CHECK(f.brush->GetTopRadius() == Vector2::ZERO);
+
+    // A drag along the axis grows the radius to (r, r). The handle stays under the cursor.
+    const Vector3 delta = apex.axis_ * 0.3f + Vector3(0.4f, 0.0f, -0.4f);
+    REQUIRE(f.brush->MoveHandles({12}, delta));
+    const Vector2 radius = f.brush->GetTopRadius();
+    CHECK(radius.x_ == radius.y_);
+    CHECK(radius.x_ > 0.0f);
+    const CsgShapeHandle grown = *FindHandle(f.Handles(), 12);
+    CHECK(IsNear(grown.position_ - apex.position_, apex.axis_ * 0.3f, 1e-5f));
+    CHECK(f.Handles().size() == 13);
+
+    // Both ends: the bottom becomes an apex too, then the shape is not valid and the move returns false.
+    f.brush->SetParams(params);
+    REQUIRE(f.brush->MoveHandles({12}, top.axis_ * -length));
+    const CsgShapeHandle bottom = *FindHandle(f.Handles(), 11);
+    const CsgCylinderParams before = f.brush->GetParams();
+    CHECK_FALSE(f.brush->MoveHandles({11}, bottom.axis_ * -10.0f));
+    CHECK(f.brush->GetParams() == before);
+    CHECK(f.errors.GetCount() == 0);
+}
+
+TEST_CASE("Cylinder handles restore without state and recenter keeps start and face radius", "[shapes][handles][recenter]")
+{
+    HandleFixture<CsgCylinderBrush> f;
+    CsgCylinderParams params;
+    params.segments_ = 5;
+    params.startAngle_ = 17.0f;
+    params.faceRadius_ = true;
+    params.bottomCenter_ = Vector3(1.0f, 0.0f, 0.5f);
+    params.topCenter_ = Vector3(2.0f, 2.0f, 0.5f);
+    f.brush->SetParams(params);
+    const auto original = f.Handles();
+    const CsgCylinderParams before = f.brush->GetParams();
+
+    // A move then the saved params give the same handles: the handles have no state.
+    REQUIRE(f.brush->MoveHandles({11, 12}, Vector3(0.1f, 0.0f, 0.2f)));
+    CHECK(f.brush->GetParams() != before);
+    f.brush->SetParams(before);
+    const auto restored = f.Handles();
+    REQUIRE(restored.size() == original.size());
+    for (unsigned i = 0; i < original.size(); ++i)
+    {
+        CHECK(restored[i].id_ == original[i].id_);
+        CHECK(restored[i].position_ == original[i].position_);
+        CHECK(restored[i].axis_ == original[i].axis_);
+    }
+
+    // Recenter moves the centers and keeps the rest. The handles move by minus the offset.
+    Vector3 offset;
+    REQUIRE(f.brush->Recenter(offset));
+    CHECK(IsNear(offset, Vector3(1.5f, 1.0f, 0.5f)));
+    CHECK(f.brush->GetStartAngle() == 17.0f);
+    CHECK(f.brush->GetFaceRadius());
+    CHECK(f.brush->GetSegments() == 5);
+    const auto recentered = f.Handles();
+    REQUIRE(recentered.size() == original.size());
+    for (unsigned i = 0; i < original.size(); ++i)
+        CHECK(IsNear(recentered[i].position_, original[i].position_ - offset, 1e-5f));
     CHECK(f.errors.GetCount() == 0);
 }
