@@ -4,7 +4,6 @@
 
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 
-#include "Urho3D/CSG/CsgCylinderBrush.h"
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
 #include <Urho3D/Core/ObjectReflection.h>
@@ -149,37 +148,32 @@ Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* mo
     return node;
 }
 
+/// The editor does not link the CSG library, so the configure functions use the attributes of the brush.
 /// The cone: the cylinder with the top radius (0, 0). The side is smooth, as in the cylinder.
 void ConfigureCone(Component* brush)
 {
-    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
-    CsgCylinderParams params = cylinder->GetParams();
-    params.topRadius_ = Vector2::ZERO;
-    cylinder->SetParams(params);
+    brush->SetAttribute("Top Radius", Vector2::ZERO);
+    brush->ApplyAttributes();
 }
 
 /// The pyramid: 4 sides, the first corner at 45 degrees and the radius at the middle of each face.
 /// The base fits a box of the size (2 * radius x, 2 * radius z). The faces are flat.
 void ConfigurePyramid(Component* brush)
 {
-    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
-    CsgCylinderParams params = cylinder->GetParams();
-    params.segments_ = 4;
-    params.startAngle_ = 45.0f;
-    params.faceRadius_ = true;
-    params.topRadius_ = Vector2::ZERO;
-    params.smoothNormals_ = false;
-    cylinder->SetParams(params);
+    brush->SetAttribute("Segments", 4);
+    brush->SetAttribute("Start Angle", 45.0f);
+    brush->SetAttribute("Face Radius", true);
+    brush->SetAttribute("Top Radius", Vector2::ZERO);
+    brush->SetAttribute("Smooth Normals", false);
+    brush->ApplyAttributes();
 }
 
 /// The hex prism: 6 flat sides.
 void ConfigureHexPrism(Component* brush)
 {
-    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
-    CsgCylinderParams params = cylinder->GetParams();
-    params.segments_ = 6;
-    params.smoothNormals_ = false;
-    cylinder->SetParams(params);
+    brush->SetAttribute("Segments", 6);
+    brush->SetAttribute("Smooth Normals", false);
+    brush->ApplyAttributes();
 }
 
 /// The procedural box, sphere, cylinder, cone, pyramid, hex prism, ring, wedge, stairs and arch are first. The model presets use the CoreData models.
