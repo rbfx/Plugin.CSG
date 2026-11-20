@@ -4,6 +4,7 @@
 
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
 
+#include "Urho3D/CSG/CsgCylinderBrush.h"
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
 #include <Urho3D/Core/ObjectReflection.h>
@@ -113,7 +114,7 @@ namespace
 
 /// Create the brush node. A null model name means a brush without a "Model" attribute.
 Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* modelName, int operation,
-    const Vector3& worldPosition, bool enabled)
+    const Vector3& worldPosition, bool enabled, void (*configure)(Component*) = nullptr)
 {
     if (!IsRootNode(rootNode))
         return nullptr;
@@ -131,6 +132,9 @@ Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* mo
         brush->SetAttribute("Model", MakeModelRef(*modelName));
     brush->SetAttribute("Operation", operation);
     brush->ApplyAttributes();
+    // The first build then has the shape of the preset.
+    if (configure)
+        configure(brush);
 
     // The world position is correct for a root with any transform.
     node->SetPosition(rootNode->WorldToLocal(worldPosition));
@@ -145,12 +149,48 @@ Node* AddBrushNodeInternal(Node* rootNode, StringHash type, const ea::string* mo
     return node;
 }
 
-/// The procedural box, sphere, cylinder, ring, wedge, stairs and arch are first. The model presets use the CoreData models.
+/// The cone: the cylinder with the top radius (0, 0). The side is smooth, as in the cylinder.
+void ConfigureCone(Component* brush)
+{
+    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
+    CsgCylinderParams params = cylinder->GetParams();
+    params.topRadius_ = Vector2::ZERO;
+    cylinder->SetParams(params);
+}
+
+/// The pyramid: 4 sides, the first corner at 45 degrees and the radius at the middle of each face.
+/// The base fits a box of the size (2 * radius x, 2 * radius z). The faces are flat.
+void ConfigurePyramid(Component* brush)
+{
+    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
+    CsgCylinderParams params = cylinder->GetParams();
+    params.segments_ = 4;
+    params.startAngle_ = 45.0f;
+    params.faceRadius_ = true;
+    params.topRadius_ = Vector2::ZERO;
+    params.smoothNormals_ = false;
+    cylinder->SetParams(params);
+}
+
+/// The hex prism: 6 flat sides.
+void ConfigureHexPrism(Component* brush)
+{
+    auto* cylinder = static_cast<CsgCylinderBrush*>(brush);
+    CsgCylinderParams params = cylinder->GetParams();
+    params.segments_ = 6;
+    params.smoothNormals_ = false;
+    cylinder->SetParams(params);
+}
+
+/// The procedural box, sphere, cylinder, cone, pyramid, hex prism, ring, wedge, stairs and arch are first. The model presets use the CoreData models.
 /// Tests.CSG checks that CSG accepts each model as a closed mesh.
 const CsgBrushPreset BrushPresets[] = {
     {"Box", nullptr, "CsgBoxBrush"},
     {"Sphere", nullptr, "CsgSphereBrush"},
     {"Cylinder", nullptr, "CsgCylinderBrush"},
+    {"Cone", nullptr, "CsgCylinderBrush", ConfigureCone},
+    {"Pyramid", nullptr, "CsgCylinderBrush", ConfigurePyramid},
+    {"Hex Prism", nullptr, "CsgCylinderBrush", ConfigureHexPrism},
     {"Ring", nullptr, "CsgRingBrush"},
     {"Wedge", nullptr, "CsgWedgeBrush"},
     {"Stairs", nullptr, "CsgStairsBrush"},
@@ -200,7 +240,13 @@ Node* AddPresetBrushNode(
     Node* rootNode, const CsgBrushPreset& preset, int operation, const Vector3& worldPosition, bool enabled)
 {
     if (preset.typeName_)
-        return AddBrushNodeOfType(rootNode, preset.typeName_, operation, worldPosition, enabled);
+    {
+        // The check comes first: the factory logs an error for an unknown type.
+        if (!rootNode || !IsBrushTypeRegistered(rootNode->GetContext(), preset.typeName_))
+            return nullptr;
+        return AddBrushNodeInternal(
+            rootNode, StringHash(preset.typeName_), nullptr, operation, worldPosition, enabled, preset.configure_);
+    }
     return AddBrushNode(rootNode, preset.model_ ? preset.model_ : "", operation, worldPosition, enabled);
 }
 

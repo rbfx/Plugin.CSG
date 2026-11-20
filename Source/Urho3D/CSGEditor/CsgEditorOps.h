@@ -64,10 +64,12 @@ struct CsgBrushPreset
     const char* model_;
     /// The brush type of a procedural preset, or null.
     const char* typeName_;
+    /// Sets the first parameters of the new brush, or null. The editor calls it before the node goes under the root.
+    void (*configure_)(Component*) = nullptr;
 };
 
-/// Return the brush presets. The first presets are the procedural box, sphere, cylinder, ring, wedge, stairs
-/// and arch.
+/// Return the brush presets. The first presets are the procedural box, sphere, cylinder, cone, pyramid, hex prism,
+/// ring, wedge, stairs and arch. The cone, the pyramid and the hex prism are cylinder brushes with other parameters.
 ea::span<const CsgBrushPreset> GetBrushPresets();
 /// Return true if the editor can use the preset. A procedural preset needs its registered type.
 bool IsBrushPresetAvailable(Context* context, const CsgBrushPreset& preset);

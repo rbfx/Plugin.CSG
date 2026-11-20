@@ -625,7 +625,7 @@ TEST_CASE("The brush presets have the procedural box and the model presets", "[e
         CHECK(IsBrushPresetAvailable(f.context, preset));
     }
     CHECK(names == ea::vector<ea::string>{
-        "Box", "Sphere", "Cylinder", "Ring", "Wedge", "Stairs", "Arch", "Box.mdl", "Sphere.mdl", "Cylinder.mdl", "Cone.mdl", "Pyramid.mdl", "Torus.mdl"});
+        "Box", "Sphere", "Cylinder", "Cone", "Pyramid", "Hex Prism", "Ring", "Wedge", "Stairs", "Arch", "Box.mdl", "Sphere.mdl", "Cylinder.mdl", "Cone.mdl", "Pyramid.mdl", "Torus.mdl"});
     CHECK(ea::string(presets[0].typeName_) == "CsgBoxBrush");
 
     Node* rootNode = f.MakeRoot();
@@ -644,31 +644,72 @@ TEST_CASE("The brush presets have the procedural box and the model presets", "[e
     REQUIRE(cylinder);
     CHECK(cylinder->GetComponent<CsgCylinderBrush>());
     CHECK(DescribeRoot(rootNode).find("CsgCylinderBrush") != ea::string::npos);
-    CHECK(ea::string(presets[3].name_) == "Ring");
-    CHECK(ea::string(presets[3].typeName_) == "CsgRingBrush");
-    Node* ring = AddPresetBrushNode(rootNode, presets[3], 0, Vector3::ZERO);
+    // The cone, the pyramid and the hex prism are cylinder brushes. The first build already has the shape.
+    CHECK(ea::string(presets[3].name_) == "Cone");
+    CHECK(ea::string(presets[4].name_) == "Pyramid");
+    CHECK(ea::string(presets[5].name_) == "Hex Prism");
+    for (unsigned i = 3; i < 6; ++i)
+        CHECK(ea::string(presets[i].typeName_) == "CsgCylinderBrush");
+    CHECK(presets[2].configure_ == nullptr);
+    CHECK(presets[6].configure_ == nullptr);
+    {
+        Node* node = AddPresetBrushNode(rootNode, presets[3], 0, Vector3::ZERO);
+        REQUIRE(node);
+        const CsgCylinderParams params = node->GetComponent<CsgCylinderBrush>()->GetParams();
+        CHECK(params.topRadius_ == Vector2::ZERO);
+        CHECK(params.bottomRadius_ == Vector2(0.5f, 0.5f));
+        CHECK(params.segments_ == 24);
+        CHECK(params.smoothNormals_);
+        CHECK(params.startAngle_ == 0.0f);
+        CHECK_FALSE(params.faceRadius_);
+        CHECK(node->GetComponent<CsgCylinderBrush>()->IsShapeValid());
+    }
+    {
+        Node* node = AddPresetBrushNode(rootNode, presets[4], 0, Vector3::ZERO);
+        REQUIRE(node);
+        const CsgCylinderParams params = node->GetComponent<CsgCylinderBrush>()->GetParams();
+        CHECK(params.segments_ == 4);
+        CHECK(params.startAngle_ == 45.0f);
+        CHECK(params.faceRadius_);
+        CHECK(params.topRadius_ == Vector2::ZERO);
+        CHECK(params.bottomRadius_ == Vector2(0.5f, 0.5f));
+        CHECK_FALSE(params.smoothNormals_);
+        CHECK(node->GetComponent<CsgCylinderBrush>()->IsShapeValid());
+    }
+    {
+        Node* node = AddPresetBrushNode(rootNode, presets[5], 0, Vector3::ZERO);
+        REQUIRE(node);
+        const CsgCylinderParams params = node->GetComponent<CsgCylinderBrush>()->GetParams();
+        CHECK(params.segments_ == 6);
+        CHECK_FALSE(params.smoothNormals_);
+        CHECK(params.topRadius_ == Vector2(0.5f, 0.5f));
+        CHECK(node->GetComponent<CsgCylinderBrush>()->IsShapeValid());
+    }
+    CHECK(ea::string(presets[6].name_) == "Ring");
+    CHECK(ea::string(presets[6].typeName_) == "CsgRingBrush");
+    Node* ring = AddPresetBrushNode(rootNode, presets[6], 0, Vector3::ZERO);
     REQUIRE(ring);
     CHECK(ring->GetComponent<CsgRingBrush>());
     CHECK(DescribeRoot(rootNode).find("CsgRingBrush") != ea::string::npos);
-    CHECK(ea::string(presets[4].name_) == "Wedge");
-    CHECK(ea::string(presets[4].typeName_) == "CsgWedgeBrush");
-    Node* wedge = AddPresetBrushNode(rootNode, presets[4], 0, Vector3::ZERO);
+    CHECK(ea::string(presets[7].name_) == "Wedge");
+    CHECK(ea::string(presets[7].typeName_) == "CsgWedgeBrush");
+    Node* wedge = AddPresetBrushNode(rootNode, presets[7], 0, Vector3::ZERO);
     REQUIRE(wedge);
     CHECK(wedge->GetComponent<CsgWedgeBrush>());
     CHECK(DescribeRoot(rootNode).find("CsgWedgeBrush") != ea::string::npos);
-    CHECK(ea::string(presets[5].name_) == "Stairs");
-    CHECK(ea::string(presets[5].typeName_) == "CsgStairsBrush");
-    Node* stairs = AddPresetBrushNode(rootNode, presets[5], 0, Vector3::ZERO);
+    CHECK(ea::string(presets[8].name_) == "Stairs");
+    CHECK(ea::string(presets[8].typeName_) == "CsgStairsBrush");
+    Node* stairs = AddPresetBrushNode(rootNode, presets[8], 0, Vector3::ZERO);
     REQUIRE(stairs);
     CHECK(stairs->GetComponent<CsgStairsBrush>());
     CHECK(DescribeRoot(rootNode).find("CsgStairsBrush") != ea::string::npos);
-    CHECK(ea::string(presets[6].name_) == "Arch");
-    CHECK(ea::string(presets[6].typeName_) == "CsgArchBrush");
-    Node* arch = AddPresetBrushNode(rootNode, presets[6], 0, Vector3::ZERO);
+    CHECK(ea::string(presets[9].name_) == "Arch");
+    CHECK(ea::string(presets[9].typeName_) == "CsgArchBrush");
+    Node* arch = AddPresetBrushNode(rootNode, presets[9], 0, Vector3::ZERO);
     REQUIRE(arch);
     CHECK(arch->GetComponent<CsgArchBrush>());
     CHECK(DescribeRoot(rootNode).find("CsgArchBrush") != ea::string::npos);
-    Node* model = AddPresetBrushNode(rootNode, presets[7], 0, Vector3::ZERO);
+    Node* model = AddPresetBrushNode(rootNode, presets[10], 0, Vector3::ZERO);
     REQUIRE(model);
     CHECK(model->GetComponent<CsgBrush>()->GetModelAttr().name_ == "Models/Box.mdl");
 }

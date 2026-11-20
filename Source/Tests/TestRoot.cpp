@@ -7238,3 +7238,58 @@ TEST_CASE("CsgRoot answers the stats query event", "[root][stats]")
         CHECK(data.find(P_VERSION) == data.end());
     }
 }
+
+TEST_CASE("A pyramid on a box merges with the face and a pyramid cut from a box is valid", "[root][procedural]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+
+    ErrorCounter errors(context);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+
+    // The Pyramid preset: 4 sides, start 45, Face Radius, top (0, 0), flat faces.
+    CsgCylinderParams pyramid;
+    pyramid.segments_ = 4;
+    pyramid.startAngle_ = 45.0f;
+    pyramid.faceRadius_ = true;
+    pyramid.smoothNormals_ = false;
+
+    SECTION("A pyramid on the top face of the box")
+    {
+        // The base box is the cube from -1 to 1. The pyramid base is the square from -1 to 1 at y = 1.
+        CsgRoot* root = MakeBoxRoot(scene, "Union");
+        pyramid.bottomRadius_ = Vector2(1.0f, 1.0f);
+        pyramid.topRadius_ = Vector2::ZERO;
+        AddProceduralCylinder(root, "Pyramid", pyramid, CsgOperation::Union, Vector3(0.0f, 1.5f, 0.0f));
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        const CsgBuildStats& stats = root->GetLastBuildStats();
+        CHECK(stats.valid_);
+        CHECK(stats.closed_);
+        CHECK(stats.openEdges_ == 0);
+        // The pyramid volume is 4 * rx * rz * h / 3 = 4 / 3 with h = 1. The shared face adds no volume.
+        // The result is closed with no open edge, so the base of the pyramid has no gap and no overlap.
+        // The kernel keeps the shared face for a fan cap: the result has 2 components that touch.
+        CHECK(stats.volume_ == Catch::Approx(8.0 + 4.0 / 3.0).epsilon(1e-4));
+        CHECK(stats.componentCount_ <= 2);
+    }
+
+    SECTION("A pyramid cut from the top face of the box")
+    {
+        // The apex points down. The wide end is at y = 1, in the plane of the top face.
+        CsgRoot* root = MakeBoxRoot(scene, "Cut");
+        pyramid.bottomRadius_ = Vector2::ZERO;
+        pyramid.topRadius_ = Vector2(0.5f, 0.5f);
+        AddProceduralCylinder(root, "Pyramid", pyramid, CsgOperation::DifferenceAB, Vector3(0.0f, 0.5f, 0.0f));
+        BuildFully(root, workQueue);
+        CHECK(!root->GetLastBuildFailed());
+        const CsgBuildStats& stats = root->GetLastBuildStats();
+        CHECK(stats.valid_);
+        CHECK(stats.closed_);
+        CHECK(stats.openEdges_ == 0);
+        CHECK(stats.volume_ == Catch::Approx(8.0 - 4.0 * 0.25 / 3.0).epsilon(1e-4));
+    }
+    CHECK(errors.GetCount() == 0);
+}
