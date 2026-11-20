@@ -232,7 +232,7 @@ In C++ the same function is `CsgRoot::Pick`.
   `P_REUSEDOPERANDS` (unsigned, operands from the cached prefix), `P_BUILDING` (bool, a job runs) and `P_ERROR` (string).
 - The numbers describe the last applied build. A root that built nothing has zeros and `P_VALID` false.
 - `P_ERROR` is empty for a valid result. Else it tells the reason: a failed build, an open solid, open edges, duplicate or degenerate triangles, or no volume.
-- The root does not know the brush that caused a problem, so the event has no brush ID. The overlay has no "Select offending brush" button.
+- The root does not know the brush that caused a problem, so the event has no brush ID. The toolbar has no "Select offending brush" button.
 - A component that is not a root keeps `P_VERSION` unchanged.
 
 ## UV projection
@@ -285,7 +285,22 @@ The hotkeys work in the scene view. You can bind them again on the "Key Bindings
 | `Csg.MoveLater` | ] | Move the active brush one operand later. |
 | `Csg.ToggleBrush` | H | Toggle "Is Enabled" of all selected brushes. |
 
-The toolbar has the add and operation commands. The toolbar "add" buttons put the brush at the center of the view. The operation buttons show the operation of the active brush. The toolbar tooltips show the build status of the active root. The "CSG" menu of the tab context menu has all commands.
+The toolbar has all controls. It has no overlay in the view. The "CSG" menu of the tab context menu has all commands.
+
+The CSG toolbar items show only if the active node is a `CsgRoot` node, a brush node (a child of a root) or the temporary result node of a root. For other selections, and for no selection, the addon draws no toolbar items. The "CSG" menu stays. Use it to add a brush when nothing is selected.
+
+| Group | Visible when | Items |
+| --- | --- | --- |
+| Root | A root, its result or one of its brushes is active. | The preset combo, "add union" and "add subtract" (the brush goes to the center of the view), "Bake to Asset". The bake button is off while the result builds or a rebuild is pending. Its tooltip gives the reason. |
+| Brush | A brush is active. | The three operation buttons (the active brush shows the operation), "toggle brush", "move earlier", "move later". They change all selected brushes. |
+| Shape | A brush with a procedural shape is active. | The handle mode buttons (only for a shape with 2 or more modes), the toggles "Show handles", "Show cage" and "Recenter pivot after drag", the button "Recenter pivot" and the "Shape settings" popup with the "Snap step" field. |
+| Info | A root, its result or a brush is active. | The info button. |
+
+The mode buttons are one group. Each button has the first letter of the mode: F, S, E, C and A for "Face", "Size", "Edge", "Corner" and "All". The active mode is highlighted. The tooltip has the name, the handle count and the hotkeys M and Shift+M. The buttons are off during a drag or if "Show handles" is off. The tooltips of the operation and add buttons show the build status of the active root.
+
+The info button shows a tooltip when the cursor is over it. For a root or a brush, the tooltip has the root name, the build status, the line "Brushes N, tris N, last build X ms, reused K/N", the vertex count and the reason of an invalid result. For a shape brush, it adds the type, "Valid" or "Invalid", the size, the selected handles and the row of materials.
+
+During a handle drag, a small tooltip near the cursor shows the live "Delta" and "Size".
 
 ### Brush presets
 
@@ -415,16 +430,14 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - Validity: the volume must be positive, no triangle can have two equal positions and each front quad needs a good diagonal. A very small arch far from the origin is not valid. Then it gives no operand and logs one warning.
 - A value that is not finite gets its default value.
 
-### Operation colors and operand overlay
+### Operation colors
 
 - The debug shape of a brush has the color of its operation: `Union` green, `DifferenceAB` red, `Intersection` blue. The table is in `CsgOperationColor.h`.
 - The selection renderer of the editor draws the debug shape of a selected brush, and of all brushes of a selected root. If a brush is active, the addon adds the debug shapes of the other operands of its root. Each shape is drawn one time.
 - The addon follows the "Draw Debug Geometry" option of the tab context menu. If the option is off, the addon draws no debug shapes.
 - The addon draws at most 64 operand shapes in a frame. It skips the other operands.
 - A brush keeps its debug model. A frame does no resource lookup. A missing model is looked up again only after a model change.
-- An overlay in the top right corner of the view lists the brushes of the active root in operand order. Each line has the index, a color mark for the operation and the node name. A disabled brush shows "(off)". The build status of the root is at the top.
-- A click on a line selects the brush. The line of the active brush is highlighted.
-- The overlay height is at most 40 percent of the view height. A longer list scrolls.
+- The view has no list of the brushes. The scene hierarchy shows the brushes of the root in operand order. A click on a face of the result selects the brush that made the face.
 - A move with [ or ] is one undo step. The move skips the children that are not brushes. Undo and redo make the root rebuild.
 - A held [ or ] repeats. Each repeat is one move and one undo step.
 - The [ and ] bindings accept Ctrl and Alt. Some keyboard layouts need AltGr for these keys, and on Windows AltGr is Ctrl+Alt.
@@ -490,9 +503,9 @@ A texture: the addon makes a material for the texture, then uses the same edit r
 
 During the drag, the tooltip shows the hint line of the mode and one line with the modifiers. A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step.
 
-The "Shape" section of the overlay of the active procedural brush shows one row "Materials: <face>: <name or none>, ...". The face names come from the face handles of the box. Other slots show "Face <n>".
+The info tooltip of the active procedural brush shows one row "Materials: <face>: <name or none>, ...". The face names come from the face handles of the box. Other slots show "Face <n>".
 
-Later: an outline of the target face, an eyedropper, and drop targets on the overlay rows.
+Later: an outline of the target face, an eyedropper.
 
 The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the texture projection. See "UV projection".
 
@@ -520,11 +533,11 @@ The handles change the shape of a procedural brush (`CsgBoxBrush`, `CsgSphereBru
 - Two handles on the same screen point (for example the -Z and +Z faces seen along Z): the click picks the handle nearer to the camera.
 - The result of the root updates during the drag. One undo step reverts a full drag.
 - Recenter pivot: a drag moves a face or a corner, so the shape goes off the origin of its node. Then the node gizmo and the rotation pivot are in the wrong place. "Recenter pivot" moves the shape parameters so the shape is centered around the origin of the node. It moves the node by the same amount, so the shape in the world does not change.
-- The editor recenters at the end of a drag if the check box "Recenter pivot after drag" is set (default on, setting `CsgEditor.AutoRecenter`). It does not recenter during the drag, after a cancelled drag or after a drag that changed nothing. The command "Recenter pivot" in the "Shape" section and in the CSG menu does it for the active brush at any time.
+- The editor recenters at the end of a drag if the check box "Recenter pivot after drag" is set (default on, setting `CsgEditor.AutoRecenter`). It does not recenter during the drag, after a cancelled drag or after a drag that changed nothing. The toolbar button "Recenter pivot" and the command in the CSG menu does it for the active brush at any time.
 - The drag and the recenter are one undo step. Ctrl+Z reverts the shape and the node position together. The handle selection stays valid after a recenter.
 - A sphere and a ring are always centered, so they do not recenter.
 - A brush with "UV Mode" `Local` can shift its UV after a recenter, because the UV is in the local coordinates of the brush. The default `Root` is not changed.
-- The overlay of the root has a "Shape" section: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. It has the "Show handles" and "Recenter pivot after drag" check boxes, the "Recenter pivot" command and the "Snap step" field. The CSG menu of the tab context menu has the same items. The editor settings keep them.
+- The info tooltip of the toolbar has a shape part: the brush type, "Valid" or "Invalid", the number of selected handles and the name of the selected handle. The toolbar has the toggles "Show handles" and "Recenter pivot after drag", the button "Recenter pivot" and the "Snap step" field in the "Shape settings" popup. The CSG menu of the tab context menu has the same items. The editor settings keep them.
 
 The handles of each shape:
 
@@ -553,7 +566,7 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 
 - The editor adds the mode "All" at the end. It shows all handles. A shape with fewer than 2 groups has no modes: all handles show.
 - Push M for the next mode and Shift+M for the previous mode. The list wraps. The hotkeys are "Csg.NextHandleMode" and "Csg.PreviousHandleMode". They do nothing during a drag or while the right mouse button is down.
-- The "Shape" section of the overlay has the mode bar, for example "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29". A click on a button sets the mode. The tooltip names the hotkeys. The bar is off during a drag or if "Show handles" is off. A narrow overlay wraps the bar.
+- The toolbar has the mode buttons F, S, E, C and A. The tooltip of a button shows the handle count, for example "Face (6 handles)". A click on a button sets the mode. The tooltip names the hotkeys. The buttons are off during a drag or if "Show handles" is off.
 - The mode is a UI state. It is not in the undo stack. Each shape type keeps its own mode. The setting `CsgEditor.HandleModes` saves them as `CsgBoxBrush=Face;CsgCylinderBrush=Ends`. An unknown mode gives the default mode.
 - The draw, the pick, the hover and the click on a face use only the handles of the active mode. A click on a face in the mode Size selects the Size handle of the axis. The modes Corner and Edge have no axis handle: the click selects the brush and no handle. The editor does not change the mode by itself.
 - The selection is parked for each mode. A mode switch keeps the selected handles of the old mode and loads those of the new mode. A new active brush clears all of them. Escape clears only the list of the active mode.
@@ -562,7 +575,7 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 - All handles draw as round dots. A dot is light gray, brighter if hovered. A selected dot is white and larger.
   An axis handle also has a short axis line.
 - The cage is a faint dashed wire between the dots. It uses all handles of the shape, also the ones that the mode hides.
-  So the Face mode shows the cage with only the face dots. The check box "Show cage" in the overlay sets it
+  So the Face mode shows the cage with only the face dots. The toggle "Show cage" in the toolbar sets it
   (default on, setting `CsgEditor.ShowCage`). The cage draws only if the handles show. A line is skipped if an end is behind the camera.
 - The gizmo of a selected handle is the translate gizmo of the editor with the 3 arrows and the 3 plane squares.
   A drag on a plane square moves the handle on two axes.
@@ -570,7 +583,7 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 ### Bake to asset
 
 - `CsgRoot::SaveResultModel(Serializer&)` saves the applied result with `Model::Save`. It returns false if the root has no result. The materials stay outside the file.
-- The command "Bake to Asset" is in the CSG menu and in the overlay of the root. It needs a root with a result and a parent node.
+- The command "Bake to Asset" is in the CSG menu and in the toolbar. It needs a root with a result and a parent node.
 - The file is `Models/<root name>_Baked.mdl` in the resource directory of the scene file. If the scene has no resource file name, the data directory of the project is used. Without both, the command logs an error.
 - The command never overwrites a file. It appends _1, _2 and so on to the name.
 - One undo step adds the sibling node "<root name> Baked" and disables the `CsgRoot` component. The node has the local transform of the root and the same parent, so the world transforms are equal. Its `StaticModel` has the saved model and the materials of the result.
@@ -579,13 +592,13 @@ A shape has many handles. A mode shows only one group of them. The brush declare
 - The command refuses while the root builds or has a pending rebuild. It logs the warning "Bake to Asset: the result is still building. Try again." and changes nothing.
 - The baked node has no collision. Add a `CollisionShape` or a `RigidBody` to the baked node if you need collision.
 
-### Stats and dimensions in the overlay
+### Stats and dimensions
 
-- The overlay of the root has a collapsible "CSG stats" header. It shows "Brushes N, tris N, last build X ms, reused K/N" and the vertex count. The data comes from `E_CSGROOTQUERYSTATS`.
-- An invalid result shows a red "Invalid: <reason>" line. The line stays when the header is closed.
-- The "Shape" section of a selected procedural brush shows "Size X x Y x Z". It is the local bounds of the generated mesh times the world scale of the node. The tooltip says so.
+- The info tooltip of the toolbar shows "Brushes N, tris N, last build X ms, reused K/N" and the vertex count. The data comes from `E_CSGROOTQUERYSTATS`.
+- An invalid result adds the line "Invalid: <reason>" to the info tooltip.
+- The info tooltip of a selected procedural brush shows "Size X x Y x Z". It is the local bounds of the generated mesh times the world scale of the node. The tooltip says so.
 - The size comes from `E_CSGSHAPEQUERYBOUNDS` of `CsgShapeProtocol.h` (out: `P_VALID`, `P_MIN`, `P_MAX`, local space). The event does not change the protocol version. The pure function is `ComputeShapeWorldSize`.
-- While a handle drag runs, the section shows "Delta: x y z", the total delta in the local space of the brush.
+- While a handle drag runs, a tooltip near the cursor shows "Delta: x y z", the total delta in the local space of the brush, and the "Size".
 
 ### Manual check list
 
@@ -611,26 +624,26 @@ The editor has no test harness for addons. Do these checks by hand:
 18. Select a root with the scale (72, 1, 82). Push B. The new brush has about the size of the box model, not 72 units.
 19. Remove `Plugin.CSG` from the loaded plugins. Make sure that the toolbar buttons are not visible and that B does nothing.
 20. Select "Sphere.mdl" in the preset combo. Push B. The new brush is a sphere. Restart the editor. The combo shows "Sphere.mdl".
-21. Select a brush of a root with two brushes. The overlay shows the root name, the build status and two lines. The union brush has a green mark and a green wireframe. The subtract brush has red. Each wireframe has one color layer, not two.
+21. Select a brush of a root with two brushes. The info tooltip shows the root name, the build status and the stats. The hierarchy shows two brushes. The union brush has a green mark and a green wireframe. The subtract brush has red. Each wireframe has one color layer, not two.
 22. Push [ on the second brush. It moves to line 0 and the build status changes. Push Ctrl+Z. The old order comes back and the root rebuilds. Push Ctrl+Y. The move comes back.
 23. Push H. The line shows "(off)" and the result loses the brush. Push Ctrl+Z. The brush comes back.
-24. Click a line of the overlay. The brush of the line is selected. The node under the overlay is not selected.
+24. Click a brush in the hierarchy. The brush is selected and the brush controls of the toolbar show.
 25. Hover a CSG toolbar button. The tooltip shows the build status of the active root.
 26. Turn off "Draw Debug Geometry" in the tab context menu. No brush wireframes show.
-27. Add more brushes than the overlay can show. The overlay stops at 40 percent of the view height and scrolls.
-28. Select "Box" in the preset combo. Push B. A `CsgBoxBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgBoxBrush".
+27. Add many brushes. The view shows no overlay and no list. The toolbar does not change its size.
+28. Select "Box" in the preset combo. Push B. A `CsgBoxBrush` appears as a wireframe and the root rebuilds. The hierarchy shows "CsgBoxBrush" on the new node.
 29. Change "Size" of the box in the inspector. The wireframe and the result change at once.
 30. Move "Corner 7" to (-1, 0.5, 0.5). The box is not valid: the wireframe goes, the result loses the brush and the log shows one warning. Set the corner back. The brush comes back.
 31. Set a material in slot 3 (+Y) of the box. Only the top face of the box gets the material. Clear slot 3. The top face uses the default material.
 32. Select a box brush and drop a model on it. The box does not change.
-33. Select "Sphere" in the preset combo. Push B. A `CsgSphereBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgSphereBrush".
+33. Select "Sphere" in the preset combo. Push B. A `CsgSphereBrush` appears as a wireframe and the root rebuilds. The hierarchy shows "CsgSphereBrush" on the new node.
 34. Change "Radius", "Segments", "Rings" and "Smooth Normals" in the inspector. The wireframe and the result change at once. A value outside the range is clamped.
 35. Set a material in the slot of the sphere. The whole sphere gets the material. Drop a model on the sphere. The sphere does not change.
-36. Select "Cylinder" in the preset combo. Push B. A `CsgCylinderBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgCylinderBrush".
+36. Select "Cylinder" in the preset combo. Push B. A `CsgCylinderBrush` appears as a wireframe and the root rebuilds. The hierarchy shows "CsgCylinderBrush" on the new node.
 37. Set "Top Radius" to (0, 0). The brush is a cone and the top cap goes. Set a material in slot 1 and in slot 2. Only the bottom cap gets the slot 2 material.
 38. Move "Top Center" to (1, 1, 0). The axis tilts and the result stays closed. Swap the two centers in Y. The shape stays solid and is not inside out.
 39. Set "Bulge" to 2 and "Height Segments" to 4. The body bulges. Set both centers to the same point. The wireframe goes and the log shows one warning.
-40. Select "Ring" in the preset combo. Push B. A `CsgRingBrush` appears as a wireframe and the root rebuilds. The overlay line shows "CsgRingBrush".
+40. Select "Ring" in the preset combo. Push B. A `CsgRingBrush` appears as a wireframe and the root rebuilds. The hierarchy shows "CsgRingBrush" on the new node.
 41. Set "Arc" to 180. The ring opens and the two end caps appear. Set a material in slot 4 and in slot 5. Each cap gets its own material.
 42. Set "Tube Segments" to 4 and "Tube Angle" to 45. The tube section is a square. Set "Tube Angle" to 0. The section is a diamond. Set a material in slot 3. Only the bottom of the ring gets it.
 43. Set "Tube Radius" to (5, 0.1). The radial radius goes down to 0.99 times "Radius". The ring stays solid. Subtract the ring from a box. The cut stays closed.
@@ -644,27 +657,27 @@ The editor has no test harness for addons. Do these checks by hand:
 51. Drag a `.png` that has no `<name>.png.material` file next to it. The tooltip shows the name of the new material. Release. The file `<name>.png.material` appears in the resource browser and the brush shows the texture. Drop the same texture again. The file does not change.
 52. Select only a CSG root. Drag a material over a face of the result. The brush of that face gets the material, as the selection does not matter.
 53. Select a brush, then drag a material onto another model that is not the CSG result. The stock editor assigns the material to that model, as before. Also select a plain node with a `StaticModel` and drag a material onto it. The stock editor assigns the material, as before.
-54. Select "Box" in the preset combo. Push B. The new box shows 8 white squares and 6 orange circles. The overlay shows "Shape: CsgBoxBrush" and "Valid".
+54. Select "Box" in the preset combo. Push B. The new box shows 8 white squares and 6 orange circles. The info tooltip shows "Shape: CsgBoxBrush" and "Valid".
 55. Click a corner. It turns cyan and a gizmo shows at the corner. The gizmo of the node goes. Drag the X arrow. The corner and the result follow. Push Ctrl+Z. The box comes back. Push Ctrl+Y. The move comes back.
-56. Shift+click two more corners. The overlay shows "Selected handles: 3". Drag the gizmo. The three corners move together.
+56. Shift+click two more corners. The info tooltip shows "Selected handles: 3". Drag the gizmo. The three corners move together.
 57. Click a face circle. Only the face is selected and a long line shows along its axis. Drag a gizmo arrow at an angle to the line. The face moves only along the line.
 58. Hold Ctrl and drag a corner. The corner stops on multiples of "Snap step" in the brush space. Set "Snap step" to 0. Ctrl does not snap.
 59. Start a drag and push Escape before the release. The box goes back to its shape before the drag. No undo step is added.
 60. Drag a face through the opposite face. The box keeps the last valid shape. Drag back to the start. The box gets its start shape. The log shows no error.
 61. Click on empty floor. The handle selection clears and the scene selection changes as usual. Select two brushes. No handles show.
 62. Repeat step 54 with the "Sphere", "Cylinder" and "Ring" presets. Each brush shows the handles of the table above.
-63. Clear "Show handles" in the overlay. The handles go. Restart the editor. The check box stays clear.
-64. Select the root. Click a cut face of a subtract brush in the view. The brush becomes the selection. For a box, the face handle is cyan and the overlay shows "Selected handles: 1". Alt+click selects the root.
+63. Clear "Show handles" in the toolbar. The handles go. Restart the editor. The check box stays clear.
+64. Select the root. Click a cut face of a subtract brush in the view. The brush becomes the selection. For a box, the face handle is cyan and the info tooltip shows "Selected handles: 1". Alt+click selects the root.
 65. Add a box. Drag a face handle by some distance. At the release the node gizmo and the handles show at the center of the box (check box on). Ctrl+Z restores the shape and the node position. Ctrl+Y gives the centered state again.
-66. Clear "Recenter pivot after drag". Drag a face. The box stays off the node origin. Use "Recenter pivot" in the "Shape" section. The origin goes to the center and the box does not move. Ctrl+Z reverts it. Restart the editor. The check box keeps its state.
+66. Clear "Recenter pivot after drag". Drag a face. The box stays off the node origin. Use "Recenter pivot" in the toolbar. The origin goes to the center and the box does not move. Ctrl+Z reverts it. Restart the editor. The check box keeps its state.
 67. Push Escape during a drag. The shape and the node position stay as before the drag.
-68. Select "Wedge" in the preset combo. Push B. A `CsgWedgeBrush` appears as a wireframe ramp and the root rebuilds. The overlay line shows "CsgWedgeBrush".
+68. Select "Wedge" in the preset combo. Push B. A `CsgWedgeBrush` appears as a wireframe ramp and the root rebuilds. The hierarchy shows "CsgWedgeBrush" on the new node.
 69. Drag the +Y handle of the wedge up. The slope gets steeper and the bottom stays on its plane. Drag the -Z handle. The front edge moves and the back face stays.
 70. Set a material in slot 2. Only the slope gets it. Subtract the wedge from a box. The ramp cut stays closed.
-71. Select "Stairs" in the preset combo. Push B. A `CsgStairsBrush` appears as a wireframe with 5 steps and the root rebuilds. The overlay line shows "CsgStairsBrush".
+71. Select "Stairs" in the preset combo. Push B. A `CsgStairsBrush` appears as a wireframe with 5 steps and the root rebuilds. The hierarchy shows "CsgStairsBrush" on the new node.
 72. Set "Steps" to 1, then to 64. The wireframe follows at once. Set a material in slot 0. Only the treads get it.
 73. Drag the +Z handle of the stairs. The treads get deeper and the front riser stays. Subtract the stairs from a box. The stair-shaped cut stays closed.
-74. Select "Arch" in the preset combo. Push B. A `CsgArchBrush` appears as a wireframe half ring and the root rebuilds. The overlay line shows "CsgArchBrush".
+74. Select "Arch" in the preset combo. Push B. A `CsgArchBrush` appears as a wireframe half ring and the root rebuilds. The hierarchy shows "CsgArchBrush" on the new node.
 75. Drag the thickness handle down into the hole. The wall gets thicker. At the full radius the arch is a filled half ellipse and the inner face goes.
 76. Drag the arc end handle. Both ends of the arch move and the handle stays under the cursor. The arc stops at 1 and at 180 degrees.
 77. Put a box wall in a root. Subtract an arch with "Thickness" equal to the radius and a box under it. The door cut stays closed. Set a material in slot 1. Only the inner face gets it.
@@ -677,13 +690,13 @@ The editor has no test harness for addons. Do these checks by hand:
 84. Save the scene in a resource directory. Add a box brush with B. Choose "Bake to Asset" in the CSG menu. The file `Models/CSG_Baked.mdl` appears in the resource directory. A node "CSG Baked" with the same shape appears and is selected. The root result is gone.
 85. Choose "Bake to Asset" again after you enable the root. The new file is `Models/CSG_Baked_1.mdl`. The first file stays.
 86. Push Ctrl+Z. The node "CSG Baked" goes and the root result comes back. The file stays. Push Ctrl+Y. The node and the disabled root come back.
-87. Select a root with a brush. The overlay shows "CSG stats" with "Brushes 1, tris N, last build X ms, reused 0/1". Add a second brush. The line shows "Brushes 2" and "reused 1/2". Click the header. The block closes.
-88. Set the base model of a root to a model with an open face. Add a subtract brush. The overlay shows a red "Invalid:" line with the reason, also when the "CSG stats" header is closed.
-89. Add a box. The "Shape" section shows "Size 1.000 x 1.000 x 1.000". Scale the node to 1, 2, 3. The size shows 1.000 x 2.000 x 3.000.
-90. Drag a face handle. While the mouse is down, the section shows "Delta: x y z". After the release, the line is gone.
+87. Select a root with a brush. The info tooltip shows "Brushes 1, tris N, last build X ms, reused 0/1". Add a second brush. The line shows "Brushes 2" and "reused 1/2".
+88. Set the base model of a root to a model with an open face. Add a subtract brush. The info tooltip shows an "Invalid:" line with the reason.
+89. Add a box. The info tooltip shows "Size 1.000 x 1.000 x 1.000". Scale the node to 1, 2, 3. The size shows 1.000 x 2.000 x 3.000.
+90. Drag a face handle. While the mouse is down, a tooltip near the cursor shows "Delta: x y z" and "Size". After the release, the tooltip is gone.
 91. Add a box. The box shows 26 handles: 8 corners, 6 faces and 12 edges. The edge handles are squares at the midpoints of the edges.
 92. Drag an edge handle with the gizmo. The 2 corners of the edge move together and the other 6 corners stay. Select an edge and one of its corners with Shift+click. The shared corner moves once.
-93. Add a box. The "Shape" section shows one row "Materials: Left: none, Right: none, ..." with six faces.
+93. Add a box. The info tooltip shows one row "Materials: Left: none, Right: none, ..." with six faces.
 94. Drop a material on the box in the view. The whole box shows the material. The row shows its name on each face. Drop a second material. The whole box changes again.
 95. Hold Ctrl over the +Y face of the box and drop a third material on it. Only the top face changes. The row shows the third material for "Top". Drop a plain material again. All faces, also the top, get it.
 96. Hold Ctrl and drop a material on one face. Only that face changes. Ctrl+Z restores the old materials in one step.
@@ -692,7 +705,7 @@ The editor has no test harness for addons. Do these checks by hand:
 99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
 100. Hold Ctrl and aim at the empty space beside a sphere face. Drop. Nothing changes and the tooltip shows "No face under the cursor".
 101. Open a scene whose box has only slot 0 set. Only the -X face shows the material. Drop a plain material. The box shows the new material on all faces.
-102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The overlay line shows "CsgCylinderBrush".
+102. Select "Pyramid" in the preset combo. Push B. A pyramid appears as a wireframe with 4 flat faces. The base is a square of the size 1 by 1. The hierarchy shows "CsgCylinderBrush" on the new node.
 103. Select the pyramid. Select "Cone" and push B. A cone with a smooth side appears. Select "Hex Prism" and push B. A prism with 6 flat sides appears.
 104. Select the pyramid. Set "Face Radius" off and "Start Angle" to 0. The base becomes a diamond that touches the old square in the middle of its sides. Set "Start Angle" to 45 and "Face Radius" on. The square comes back.
 105. Select the pyramid. Drag the handle "Bottom Radius +X". It stays on the face of the base. Drag "Bottom Scale". Both radii change with one ratio and the handle follows the cursor.
@@ -701,16 +714,16 @@ The editor has no test harness for addons. Do these checks by hand:
 108. Drag a material over a box and hold Ctrl over one face, then release Ctrl while the mouse stays down. The preview goes from "only that face" back to "all faces". Push Escape. The box has its original materials, also a box with only slot 0 set.
 109. Select a box. Drag a material over the box and press Ctrl, then release Ctrl. Push Escape. The box has its original materials.
 110. Repeat check 109 and drop the material while Ctrl is down. Push Ctrl+Z. The box has its original materials.
-111. Add a box with B. The view shows 6 face handles. The overlay "Shape" section shows "Face 6 | Size 3 | Edge 12 | Corner 8 | All 29".
+111. Add a box with B. The view shows 6 face handles. The toolbar has the mode buttons F, S, E, C and A. The tooltips show 6, 3, 12, 8 and 29 handles.
 112. Push M three times. The view shows the size handles, then the edges, then the corners. Push M two times more. All handles show, then the Face mode comes back.
 113. Push Shift+M. The mode "All" shows. Click a button of the mode bar. The mode changes. Drag a handle, push M during the drag. The mode does not change.
 114. In the Size mode, drag "Size X" by 0.5. The box grows by 1 on X and the center stays. Ctrl+Z reverts it.
 115. In the Face mode, click the +Y face handle. Push M until Corner shows, then until Face shows. The +Y handle is still selected. Drag a material over the +Y face with Ctrl: only the +Y face changes.
-116. Select a sphere. The overlay has no mode bar. M does nothing. Select a box again. The mode of the box is the same as before.
+116. Select a sphere. The toolbar has no mode buttons. M does nothing. Select a box again. The mode of the box is the same as before.
 117. Close the editor and open it again. The mode of the box and of the cylinder are the same as before.
 118. Add a box with B. The view shows 6 round gray face dots and a faint dashed cage with a cross on each face. Push M until "All" shows. Corner, edge and face dots are round and the dashed lines pass through the edge dots.
 119. Click a dot. The dot is white and larger. The gizmo shows 3 arrows and 3 small plane squares (red, green, blue). Drag a plane square. The handle moves on two axes.
-120. Clear "Show cage" in the overlay. The dashed lines go and the dots stay. Restart the editor. The check box stays clear. Clear "Show handles". Set "Show cage": no line shows.
+120. Clear "Show cage" in the toolbar. The dashed lines go and the dots stay. Restart the editor. The check box stays clear. Clear "Show handles". Set "Show cage": no line shows.
 121. Select a cylinder. A dashed line joins the two center dots. Select a sphere. No dashed line shows.
 
 ## How to try the sample scene
@@ -738,6 +751,14 @@ popd
 123. Repeat check 122 and hold Ctrl over the top face. Only the top face shows the material and the hint shows "Ctrl: only face Top". Move to the front face. The top face goes back and the front face changes. Release Ctrl. The whole box shows the material again. Push Escape. The box has its original materials.
 124. Hold Ctrl and drop on a face. Push Ctrl+Z. Only that face goes back. Hold Ctrl and aim at the empty space beside a result face: the hint shows "No face under the cursor" and the drop changes nothing.
 125. Drag a material over a normal model (not CSG) in a scene that has a CSG root. The model shows the material. Drop. Push Ctrl+Z. The old material comes back.
+126. Select nothing, or a node that is not CSG. The toolbar shows no CSG items and the view shows no overlay.
+127. Select a root. The toolbar shows the preset combo, the add buttons, "Bake to Asset" and the info button. It shows no operation, toggle, move or shape buttons.
+128. Select the result node of a root (click the result in the view with Alt). The toolbar shows the same items as for the root.
+129. Select a model brush. The toolbar shows the root items and the operation, toggle and move buttons. It shows no shape buttons and no mode buttons.
+130. Select a box brush. The toolbar also shows the mode buttons F, S, E, C and A and the toggles and buttons of the shape. Select a sphere: the mode buttons go.
+131. Hover the info button on a box brush. The tooltip shows the root stats and the shape lines. On a root it shows only the root stats.
+132. Hover "Bake to Asset" while the result builds. The button is off and the tooltip gives the reason.
+133. Open "Shape settings", change "Snap step" and restart the editor. The value stays.
 
 ## Screenshots
 
