@@ -7333,3 +7333,34 @@ TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root
         CHECK(data[P_SLOTNAME].GetString() == names[face]);
     }
 }
+
+TEST_CASE("A subtract procedural brush owns the carved wall and its shape material shows there", "[root][pick][alt]")
+{
+    auto context = MakeCsgTestContext();
+    auto* workQueue = context->GetSubsystem<WorkQueue>();
+    context->RegisterSubsystem<VirtualFileSystem>();
+    auto material = MakeShared<Material>(context);
+    material->SetName("Materials/Carve.xml");
+    context->GetSubsystem<ResourceCache>()->AddManualResource(material);
+    AddBoxModel(context, "Csg/BoxA.mdl", Vector3::ONE);
+    auto scene = MakeShared<Scene>(context);
+    scene->CreateComponent<Octree>();
+    CsgRoot* root = MakeBoxRoot(scene, "Root");
+    Node* cutNode = root->GetNode()->CreateChild("Cut");
+    cutNode->SetPosition(Vector3(0.0f, 0.0f, 1.0f));
+    cutNode->SetScale(0.5f);
+    auto* cut = cutNode->CreateComponent<CsgBoxBrush>();
+    cut->SetOperation(CsgOperation::DifferenceAB);
+    cut->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Carve.xml"));
+    BuildFully(root, workQueue);
+
+    // The floor of the pocket is a face of the subtract brush.
+    const CsgPickHit hit = root->Pick(Vector3(0.0f, 0.0f, 5.0f), Vector3(0.0f, 0.0f, -1.0f));
+    REQUIRE(hit.hit_);
+    CHECK(hit.source_ == IdOf(cut));
+    CHECK(hit.position_.Equals(Vector3(0.0f, 0.0f, 0.75f), 1e-4f));
+
+    // The carved faces use the shape material of the subtract brush.
+    const auto& names = GetOutput(root)->GetMaterialsAttr().names_;
+    CHECK(ea::find(names.begin(), names.end(), ea::string("Materials/Carve.xml")) != names.end());
+}

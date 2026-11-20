@@ -327,6 +327,7 @@ const ResourceFileDescriptor* GetModelResource(DragDropPayload* payload)
 }
 
 bool IsShiftDown() { return ui::IsKeyDown(KEY_LSHIFT) || ui::IsKeyDown(KEY_RSHIFT); }
+bool IsAltDown() { return ui::IsKeyDown(KEY_LALT) || ui::IsKeyDown(KEY_RALT); }
 bool IsCtrlDown() { return ui::IsKeyDown(KEY_LCTRL) || ui::IsKeyDown(KEY_RCTRL); }
 
 } // namespace
@@ -758,15 +759,22 @@ CsgEditorAddon::DropMode CsgEditorAddon::GetDropMode(SceneViewPage& page, DragDr
     if (!IsAvailable() || page.IsSimulationActive() || kind == DropPayloadKind::Other)
         return DropMode::None;
 
-    switch (EvaluateDrop(page, kind).decision_.action_)
+    const DropAction action = EvaluateDrop(page, kind).decision_.action_;
+    if (kind == DropPayloadKind::Material || kind == DropPayloadKind::Texture)
+    {
+        // The whole drag goes to one addon, chosen on the first frame. The mode follows the cursor in each frame.
+        bool sceneHasRoot = IsRootNode(page.scene_);
+        for (Node* child : page.scene_->GetChildren(true))
+            sceneHasRoot = sceneHasRoot || IsRootNode(child);
+        if (!ClaimsMaterialDrag(kind, sceneHasRoot, action))
+            return DropMode::None;
+        return kind == DropPayloadKind::Material ? DropMode::AssignMaterial : DropMode::AssignTexture;
+    }
+    switch (action)
     {
     case DropAction::NewBrush: return DropMode::NewBrush;
     case DropAction::ReplaceModel: return DropMode::ReplaceModel;
-    case DropAction::AssignMaterial: return DropMode::AssignMaterial;
-    case DropAction::AssignTexture: return DropMode::AssignTexture;
-    case DropAction::HintSelectBrush: return DropMode::Hint;
-    case DropAction::HintNoBrush: return DropMode::HintNoBrush;
-    case DropAction::None: break;
+    default: break;
     }
     return DropMode::None;
 }
@@ -789,10 +797,20 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
     {
         // The result of any root counts. The source brush comes from the pick event.
         const auto hits = QueryGeometriesFromScene(page.scene_, page.cameraRay_);
-        if (!hits.empty() && hits[0].node_ && hits[0].node_->IsTemporary())
+        // A brush node of the editor does not hide the result. Another geometry in front does.
+        ea::vector<DropHitKind> kinds;
+        for (const auto& hit : hits)
         {
-            Node* rootNode = hits[0].node_->GetParent();
-            if (IsResultNodeOfRoot(hits[0].node_, rootNode) && IsRootNode(rootNode))
+            Node* hitNode = hit.node_;
+            kinds.push_back(hitNode && hitNode->IsTemporary() && hitNode->GetName() == "CsgResult"
+                    ? DropHitKind::Result
+                    : (hitNode && IsBrushNode(hitNode) ? DropHitKind::Brush : DropHitKind::Other));
+        }
+        const int resultIndex = ChooseResultHit(kinds);
+        if (resultIndex >= 0)
+        {
+            Node* rootNode = hits[resultIndex].node_->GetParent();
+            if (IsResultNodeOfRoot(hits[resultIndex].node_, rootNode) && IsRootNode(rootNode))
             {
                 selection.hoveringResult_ = true;
                 const PickResult pick = PickRootSource(rootNode->GetComponent(StringHash("CsgRoot")), page.cameraRay_);
@@ -802,11 +820,22 @@ CsgEditorAddon::DropEvaluation CsgEditorAddon::EvaluateDrop(SceneViewPage& page,
                     selection.hoverBrush_ = true;
                     selection.hoverBrushSelected_ = page.selection_.IsSelected(brushNode);
                     evaluation.hoverBrushNode_ = brushNode;
+                    // Alt targets the face under the cursor. Only then the slot query runs.
+                    if (IsAltDown())
+                    {
+                        const auto face = FindMaterialSlotForHit(
+                            FindShapeBrush(brushNode), pick.position_, pick.normal_);
+                        if (face)
+                        {
+                            selection.hoverSlot_ = face->slot_;
+                            evaluation.hoverFaceName_ = face->name_;
+                        }
+                    }
                 }
             }
         }
     }
-    evaluation.decision_ = DecideDrop(kind, selection, IsShiftDown(), IsCtrlDown());
+    evaluation.decision_ = DecideDrop(kind, selection, IsShiftDown(), IsCtrlDown(), IsAltDown());
     return evaluation;
 }
 
@@ -837,7 +866,18 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
 
     unsigned slot = 0;
     bool noFace = false;
-    if (decision.scope_ == MaterialScope::Slot && !nodes.empty())
+    if (decision.faceFromHit_)
+    {
+        // Alt edits one face of the brush under the cursor. Other brushes stay.
+        nodes.clear();
+        if (decision.slot_ && evaluation.hoverBrushNode_)
+        {
+            slot = *decision.slot_;
+            nodes.push_back(evaluation.hoverBrushNode_);
+        }
+        noFace = nodes.empty();
+    }
+    else if (decision.scope_ == MaterialScope::Slot && !nodes.empty())
     {
         // Ctrl edits one face of the brush with the selected face handle. Other brushes stay.
         ea::vector<Node*> single;
@@ -854,13 +894,22 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
         noFace = nodes.empty();
     }
 
+    // The hint follows the cursor, Alt, Ctrl and Shift.
+    dropHint_ = DescribeMaterialDrop(decision, !noFace, evaluation.hoverFaceName_);
+    if (decision.action_ == DropAction::HintNoBrush)
+        dropHint_ = "No brush under the cursor";
+    else if (decision.action_ == DropAction::HintSelectBrush)
+        dropHint_ = "Select a brush to assign a material";
+    dropHasTargets_ = !nodes.empty();
+    UpdateStockPreview(page, decision.action_ == DropAction::None && dropMode_ == DropMode::AssignMaterial);
+
     // Keep the preview if nothing changed.
     if (materialPreview_.Matches(nodes, decision.scope_, slot) && noFace == dropNoFace_)
         return;
 
     // SetTargets restores the old preview first. The baseline is then the original state.
     materialPreview_.SetTargets(nodes, decision.scope_, slot);
-    if (noFace && !dropNoFace_)
+    if (noFace && !dropNoFace_ && !decision.faceFromHit_)
         URHO3D_LOGINFO("Select a face handle first");
     dropNoFace_ = noFace;
 
@@ -868,6 +917,47 @@ void CsgEditorAddon::RefreshDropTargets(SceneViewPage& page)
     // The drop never makes a file before the user releases the button.
     if (dropMode_ == DropMode::AssignMaterial || GetSubsystem<ResourceCache>()->Exists(dropResourceName_))
         materialPreview_.Apply(dropResourceName_);
+}
+
+void CsgEditorAddon::UpdateStockPreview(SceneViewPage& page, bool active)
+{
+    // The geometry under the cursor when no result is there. It is the stock behavior of a material drop.
+    Drawable* target = nullptr;
+    unsigned index = 0;
+    if (active)
+    {
+        const auto hits = QueryGeometriesFromScene(page.scene_, page.cameraRay_);
+        if (!hits.empty() && hits[0].drawable_ && hits[0].drawable_->GetScene())
+        {
+            const Variant& value = hits[0].drawable_->GetAttribute("Material");
+            if (value.GetType() == VAR_RESOURCEREF || value.GetType() == VAR_RESOURCEREFLIST)
+            {
+                target = hits[0].drawable_;
+                index = hits[0].subObject_;
+            }
+        }
+    }
+    if (target == stockPreview_.drawable_ && index == stockPreview_.index_)
+        return;
+    if (stockPreview_.drawable_)
+        stockPreview_.drawable_->SetAttribute("Material", stockPreview_.old_);
+    stockPreview_ = {};
+    if (!target)
+        return;
+    stockPreview_.drawable_ = target;
+    stockPreview_.index_ = index;
+    stockPreview_.old_ = target->GetAttribute("Material");
+    if (stockPreview_.old_.GetType() == VAR_RESOURCEREFLIST)
+    {
+        ResourceRefList list = stockPreview_.old_.GetResourceRefList();
+        const unsigned at = ea::min(index, ea::max(static_cast<unsigned>(list.names_.size()), 1u) - 1u);
+        if (at < list.names_.size())
+            list.names_[at] = dropResourceName_;
+        stockPreview_.new_ = list;
+    }
+    else
+        stockPreview_.new_ = ResourceRef(Material::GetTypeStatic(), dropResourceName_);
+    target->SetAttribute("Material", stockPreview_.new_);
 }
 
 bool CsgEditorAddon::IsDragDropPayloadSupported(SceneViewPage& page, DragDropPayload* payload) const
@@ -897,9 +987,6 @@ void CsgEditorAddon::BeginDragDrop(SceneViewPage& page, DragDropPayload* payload
         RefreshDropTargets(page);
         return;
     }
-    if (dropMode_ == DropMode::Hint || dropMode_ == DropMode::HintNoBrush)
-        return;
-
     if (dropMode_ == DropMode::ReplaceModel)
     {
         // The live preview sets the model now. CancelDragDrop restores the old models.
@@ -973,20 +1060,17 @@ void CsgEditorAddon::UpdateDragDrop(DragDropPayload* payload)
 {
     if (dropMode_ == DropMode::NewBrush)
         UpdateDropBrushPosition();
-    else if (dropMode_ == DropMode::Hint)
-        ui::SetTooltip("Select a brush to assign a material");
-    else if (dropMode_ == DropMode::HintNoBrush)
-        ui::SetTooltip("No brush under the cursor");
     else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
     {
         // The cursor, Shift and Ctrl change the targets. The preview follows them.
         if (dropPage_)
             RefreshDropTargets(*dropPage_);
-        if (dropNoFace_)
-            ui::SetTooltip("Select a face handle first");
+        if (stockPreview_.drawable_)
+            ui::SetTooltip("Drop: set the material of the geometry");
         else
-            ui::SetTooltip("Drop: shape material. Ctrl: selected face only. "
-                           "Shift: shape material and clear face overrides.");
+            ui::SetTooltip("%s\nAlt: only the face under the cursor. Ctrl: only the selected face. "
+                           "Shift: all faces, clear face overrides.",
+                dropHint_.c_str());
     }
 }
 
@@ -1016,16 +1100,31 @@ void CsgEditorAddon::CompleteDragDrop(DragDropPayload* payload)
     }
     else if ((dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture) && scene)
     {
+        // The cursor decides again at the drop. The first frame of the drag does not.
+        if (dropPage_)
+            RefreshDropTargets(*dropPage_);
+        if (stockPreview_.drawable_)
+        {
+            // No result is under the cursor. The material goes to the geometry under the cursor, as the stock handler does.
+            Drawable* drawable = stockPreview_.drawable_;
+            owner_->PushAction<ChangeComponentAttributesAction>(scene, "Material",
+                ea::vector<Component*>{drawable}, VariantVector{stockPreview_.old_}, VariantVector{stockPreview_.new_});
+            stockPreview_ = {};
+            ResetDrop();
+            return;
+        }
+
         // The texture case makes its material file now. It reuses an existing file.
+        // A drop with no target makes no file.
         ea::string materialName = dropResourceName_;
-        if (dropMode_ == DropMode::AssignTexture)
+        if (!dropHasTargets_)
+            materialName.clear();
+        else if (dropMode_ == DropMode::AssignTexture)
         {
             const auto* resource = GetFirstResource(payload);
             materialName = resource ? EnsureTextureMaterial(context_, resource->resourceName_) : EMPTY_STRING;
         }
 
-        if (dropPage_)
-            RefreshDropTargets(*dropPage_);
         materialPreview_.Restore();
         if (!materialName.empty())
         {
@@ -1121,6 +1220,8 @@ void CsgEditorAddon::CancelDragDrop()
     else if (dropMode_ == DropMode::AssignMaterial || dropMode_ == DropMode::AssignTexture)
     {
         materialPreview_.Clear();
+        if (dropPage_)
+            UpdateStockPreview(*dropPage_, false);
     }
 
     ResetDrop();
@@ -1140,6 +1241,9 @@ void CsgEditorAddon::ResetDrop()
     materialPreview_.Forget();
     dropResourceName_.clear();
     dropNoFace_ = false;
+    dropHint_.clear();
+    dropHasTargets_ = false;
+    stockPreview_ = {};
 }
 
 void CsgEditorAddon::Render(SceneViewPage& page)

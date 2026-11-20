@@ -2392,3 +2392,170 @@ TEST_CASE("DashSegments cuts a line into dashes", "[editorops][cage]")
         CHECK(dashes[1].first.x_ == Catch::Approx(6.0f));
     }
 }
+
+TEST_CASE("DecideDrop with Alt gives the slot of the hit face", "[editorops][materials][alt]")
+{
+    DropSelection hover;
+    hover.hoveringResult_ = hover.hoverBrush_ = true;
+    hover.hoverBrushSelected_ = true;
+    hover.hoverSlot_ = 2u;
+    for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
+    {
+        // Alt wins over Ctrl and Shift. The target is only the hovered brush.
+        for (const bool shift : {false, true})
+        {
+            for (const bool ctrl : {false, true})
+            {
+                const DropDecision d = DecideDrop(kind, hover, shift, ctrl, true);
+                CHECK(d.scope_ == MaterialScope::Slot);
+                CHECK(d.faceFromHit_);
+                CHECK(d.slot_ == 2u);
+                CHECK(d.target_ == DropTarget::Hovered);
+            }
+        }
+        // Without Alt, the hit slot is not used.
+        const DropDecision plain = DecideDrop(kind, hover, false, true, false);
+        CHECK_FALSE(plain.faceFromHit_);
+        CHECK_FALSE(plain.slot_.has_value());
+        CHECK(DecideDrop(kind, hover, false, false, false).scope_ == MaterialScope::Shape);
+
+        // No face under the cursor: the scope is Slot with no slot, so nothing changes.
+        hover.hoverSlot_ = ea::nullopt;
+        const DropDecision miss = DecideDrop(kind, hover, false, false, true);
+        CHECK(miss.faceFromHit_);
+        CHECK_FALSE(miss.slot_.has_value());
+        hover.hoverSlot_ = 2u;
+    }
+    // Alt away from a result: a texture has no face, a material goes to the stock handler.
+    DropSelection away;
+    away.anySelectedBrush_ = true;
+    CHECK(DecideDrop(DropPayloadKind::Material, away, false, false, true).action_ == DropAction::None);
+    const DropDecision texture = DecideDrop(DropPayloadKind::Texture, away, false, false, true);
+    CHECK(texture.action_ == DropAction::AssignTexture);
+    CHECK(texture.faceFromHit_);
+    CHECK_FALSE(texture.slot_.has_value());
+}
+
+TEST_CASE("DescribeMaterialDrop names the mode", "[editorops][materials][alt]")
+{
+    DropDecision decision;
+    CHECK(DescribeMaterialDrop(decision, true, "") == "Drop: all unassigned faces");
+    decision.scope_ = MaterialScope::ShapeClearOverrides;
+    CHECK(DescribeMaterialDrop(decision, true, "") == "Shift: all faces, clear face overrides");
+    decision.scope_ = MaterialScope::Slot;
+    CHECK(DescribeMaterialDrop(decision, true, "") == "Ctrl: only the selected face");
+    CHECK(DescribeMaterialDrop(decision, false, "") == "Select a face handle first");
+    decision.faceFromHit_ = true;
+    CHECK(DescribeMaterialDrop(decision, true, "Top") == "Alt: only face Top");
+    CHECK(DescribeMaterialDrop(decision, false, "") == "No face under the cursor");
+}
+
+TEST_CASE("FindMaterialSlotForHit maps a world hit to a face of a scaled box", "[editorops][materials][alt]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* node = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3(3.0f, 0.0f, 0.0f));
+    node->SetScale(Vector3(1.0f, 2.0f, 3.0f));
+    Component* brush = FindBrushComponent(node);
+    REQUIRE(brush);
+
+    const Vector3 normals[6] = {Vector3(-1, 0, 0), Vector3(1, 0, 0), Vector3(0, -1, 0), Vector3(0, 1, 0),
+        Vector3(0, 0, -1), Vector3(0, 0, 1)};
+    const char* names[6] = {"Left", "Right", "Bottom", "Top", "Back", "Front"};
+    const Vector3 halfSize = node->GetWorldScale() * 0.5f;
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        INFO("Face " << face);
+        const auto hit = FindMaterialSlotForHit(brush, node->GetWorldPosition() + normals[face] * halfSize, normals[face]);
+        REQUIRE(hit);
+        CHECK(hit->slot_ == face);
+        CHECK(hit->name_ == names[face]);
+    }
+    // A point away from the box, or a zero normal, gives no face.
+    CHECK_FALSE(FindMaterialSlotForHit(brush, Vector3(20.0f, 0.0f, 0.0f), Vector3(1, 0, 0)).has_value());
+    CHECK_FALSE(FindMaterialSlotForHit(brush, node->GetWorldPosition(), Vector3::ZERO).has_value());
+    CHECK_FALSE(FindMaterialSlotForHit(nullptr, Vector3::ZERO, Vector3(1, 0, 0)).has_value());
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("The Alt preview follows the face and the keys and cancels to the original", "[editorops][materials][alt][preview]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* a = MakeBox(f, rootNode, {"", "", "", "T", "", ""}, "S");
+    const MaterialState original = GetState(a);
+    MaterialDropPreview preview;
+
+    // Hover: all unassigned faces. Then Alt over face 2. Then Alt off. Then cancel.
+    preview.SetTargets({a}, MaterialScope::Shape, 0);
+    preview.Apply("N");
+    CHECK(GetState(a).shape_ == "N");
+    preview.SetTargets({a}, MaterialScope::Slot, 2);
+    preview.Apply("N");
+    // Only slot 2 has the new material. The shape material is the original one.
+    CHECK(GetState(a).slots_[2] == "N");
+    CHECK(GetState(a).shape_ == original.shape_);
+    preview.SetTargets({a}, MaterialScope::Slot, 4);
+    preview.Apply("N");
+    CHECK(GetState(a).slots_[2].empty());
+    CHECK(GetState(a).slots_[4] == "N");
+    preview.SetTargets({a}, MaterialScope::Shape, 0);
+    preview.Apply("N");
+    CHECK(GetState(a).shape_ == "N");
+    CHECK(GetState(a).slots_[4].empty());
+    preview.Clear();
+    CHECK(GetState(a) == original);
+
+    // The drop with Alt changes only that slot. The undo values restore the original.
+    preview.SetTargets({a}, MaterialScope::Slot, 2);
+    preview.Apply("N");
+    preview.Restore();
+    preview.Apply("N");
+    REQUIRE(preview.GetEntries().size() == 1);
+    MaterialState expected = original;
+    expected.slots_[2] = "N";
+    CHECK(GetState(a) == expected);
+    const MaterialDropPreview::Entry entry = preview.GetEntries()[0];
+    CHECK(entry.oldMaterials_.GetResourceRefList().names_ == original.slots_);
+    Component* component = entry.component_;
+    component->SetAttribute("Materials", entry.oldMaterials_);
+    component->ApplyAttributes();
+    CHECK(GetState(a) == original);
+    CHECK(errors.GetCount() == 0);
+}
+
+TEST_CASE("A material drag is taken on the first frame and the hit list skips brush nodes", "[editorops][materials][drag]")
+{
+    // The tab gives the whole drag to one addon on the first frame. The stock handler takes any material.
+    // First frame over nothing: the addon takes a material if the scene has a root.
+    CHECK(ClaimsMaterialDrag(DropPayloadKind::Material, true, DropAction::None));
+    CHECK_FALSE(ClaimsMaterialDrag(DropPayloadKind::Material, false, DropAction::None));
+    CHECK(ClaimsMaterialDrag(DropPayloadKind::Material, false, DropAction::HintNoBrush));
+    CHECK_FALSE(ClaimsMaterialDrag(DropPayloadKind::Texture, true, DropAction::None));
+    CHECK(ClaimsMaterialDrag(DropPayloadKind::Texture, true, DropAction::AssignTexture));
+    CHECK_FALSE(ClaimsMaterialDrag(DropPayloadKind::Model, true, DropAction::NewBrush));
+
+    // The sequence: over nothing, over the base with no brush, over a brush. The decision follows the cursor.
+    DropSelection over;
+    over.anySelectedBrush_ = true;
+    CHECK(DecideDrop(DropPayloadKind::Material, over, false, false).action_ == DropAction::None);
+    over.hoveringResult_ = true;
+    CHECK(DecideDrop(DropPayloadKind::Material, over, false, false).action_ == DropAction::HintNoBrush);
+    over.hoverBrush_ = true;
+    const DropDecision decision = DecideDrop(DropPayloadKind::Material, over, false, false);
+    CHECK(decision.action_ == DropAction::AssignMaterial);
+    CHECK(decision.scope_ == MaterialScope::Shape);
+
+    using K = DropHitKind;
+    const K brushFirst[] = {K::Brush, K::Result};
+    CHECK(ChooseResultHit(brushFirst) == 1);
+    const K otherFirst[] = {K::Other, K::Result};
+    CHECK(ChooseResultHit(otherFirst) == -1);
+    const K resultFirst[] = {K::Result, K::Other};
+    CHECK(ChooseResultHit(resultFirst) == 0);
+    const K brushOnly[] = {K::Brush, K::Brush};
+    CHECK(ChooseResultHit(brushOnly) == -1);
+    CHECK(ChooseResultHit({}) == -1);
+}

@@ -417,7 +417,7 @@ bool IsResultNodeOfRoot(Node* node, Node* rootNode)
     return node && rootNode && node->IsTemporary() && node->GetParent() == rootNode && node->GetName() == "CsgResult";
 }
 
-DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl)
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl, bool alt)
 {
     DropDecision result;
     switch (kind)
@@ -433,7 +433,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
     {
         const DropAction assign =
             kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-        result.scope_ = ctrl ? MaterialScope::Slot : shift ? MaterialScope::ShapeClearOverrides : MaterialScope::Shape;
+        result.scope_ = alt || ctrl ? MaterialScope::Slot : shift ? MaterialScope::ShapeClearOverrides : MaterialScope::Shape;
         if (selection.hoveringResult_)
         {
             if (!selection.hoverBrush_)
@@ -443,13 +443,24 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
             }
             result.action_ = assign;
             result.target_ = selection.hoverBrushSelected_ ? DropTarget::Selected : DropTarget::Hovered;
+            if (alt)
+            {
+                // The slot of a face has a meaning only for the brush that has the face.
+                result.target_ = DropTarget::Hovered;
+                result.faceFromHit_ = true;
+                result.slot_ = selection.hoverSlot_;
+            }
             break;
         }
         // The stock handler assigns a material to the geometry under the cursor.
         if (kind == DropPayloadKind::Material)
             break;
         if (selection.anySelectedBrush_)
+        {
             result.action_ = assign;
+            // No face is under the cursor.
+            result.faceFromHit_ = alt;
+        }
         else if (selection.activeIsRoot_)
             result.action_ = DropAction::HintSelectBrush;
         break;
@@ -457,6 +468,40 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
     case DropPayloadKind::Other: break;
     }
     return result;
+}
+
+int ChooseResultHit(ea::span<const DropHitKind> hits)
+{
+    for (unsigned i = 0; i < hits.size(); ++i)
+    {
+        if (hits[i] == DropHitKind::Result)
+            return static_cast<int>(i);
+        if (hits[i] == DropHitKind::Other)
+            return -1;
+    }
+    return -1;
+}
+
+bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction action)
+{
+    if (kind == DropPayloadKind::Material)
+        return sceneHasRoot || action != DropAction::None;
+    if (kind == DropPayloadKind::Texture)
+        return action != DropAction::None;
+    return false;
+}
+
+ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, const ea::string& faceName)
+{
+    if (decision.faceFromHit_)
+        return hasFace ? Format("Alt: only face {}", faceName) : ea::string("No face under the cursor");
+    switch (decision.scope_)
+    {
+    case MaterialScope::Slot: return hasFace ? ea::string("Ctrl: only the selected face") : ea::string("Select a face handle first");
+    case MaterialScope::ShapeClearOverrides: return "Shift: all faces, clear face overrides";
+    case MaterialScope::Shape: break;
+    }
+    return "Drop: all unassigned faces";
 }
 
 bool PlanMaterialEdit(BrushMaterials& io, MaterialScope scope, unsigned slot, const ea::string& material)

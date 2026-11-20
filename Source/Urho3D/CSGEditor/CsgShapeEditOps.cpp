@@ -535,6 +535,29 @@ ea::optional<unsigned> ChooseFaceHandleForWorldHit(
     return ChooseFaceHandle(handles, localPoint, localNormal);
 }
 
+ea::optional<MaterialSlotHit> FindMaterialSlotForHit(
+    Component* brush, const Vector3& worldPoint, const Vector3& worldNormal)
+{
+    const Node* node = brush ? brush->GetNode() : nullptr;
+    if (!node)
+        return ea::nullopt;
+    Vector3 localNormal = node->GetWorldTransform().ToMatrix3().Transpose() * worldNormal;
+    if (localNormal.LengthSquared() <= 0.0f)
+        return ea::nullopt;
+    localNormal.Normalize();
+
+    using namespace CsgShapeQuerySlot;
+    VariantMap& eventData = brush->GetEventDataMap();
+    eventData[P_POSITION] = node->WorldToLocal(worldPoint);
+    eventData[P_NORMAL] = localNormal;
+    // A component that does not answer keeps P_VALID false.
+    eventData[P_VALID] = false;
+    brush->SendEvent(E_CSGSHAPEQUERYSLOT, eventData);
+    if (!eventData[P_VALID].GetBool())
+        return ea::nullopt;
+    return MaterialSlotHit{eventData[P_SLOT].GetUInt(), eventData[P_SLOTNAME].GetString()};
+}
+
 bool QueryRootStats(Component* root, RootStats& stats)
 {
     if (!root)

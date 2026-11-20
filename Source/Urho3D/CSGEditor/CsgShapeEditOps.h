@@ -186,6 +186,20 @@ ea::optional<unsigned> ChooseFaceHandle(
 ea::optional<unsigned> ChooseFaceHandleForWorldHit(
     const Node* brushNode, const ea::vector<ShapeHandle>& handles, const Vector3& worldPoint, const Vector3& worldNormal);
 
+/// The material slot of the face of a brush at a hit.
+struct MaterialSlotHit
+{
+    unsigned slot_{};
+    /// The name of the face, for example "Top".
+    ea::string name_;
+};
+
+/// Find the material slot of the face of the brush component at a world hit. The runtime answers with the event
+/// E_CSGSHAPEQUERYSLOT. The point and the normal are converted as in ChooseFaceHandleForWorldHit.
+/// Return none if the component is not a shape brush, the shape is not valid or no face is at the point.
+ea::optional<MaterialSlotHit> FindMaterialSlotForHit(
+    Component* brush, const Vector3& worldPoint, const Vector3& worldNormal);
+
 /// Return the index in `points` of the nearest visible point in the radius, or none.
 /// The nearest point wins. Screen distances within HandlePickTieEpsilon are a tie.
 /// A tie goes to the smaller depth, then to the lower id.

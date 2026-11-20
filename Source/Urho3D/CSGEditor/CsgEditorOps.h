@@ -134,6 +134,8 @@ struct DropSelection
     bool hoverBrush_{};
     /// The brush under the cursor is selected.
     bool hoverBrushSelected_{};
+    /// The material slot of the face under the cursor, from the slot query. Only needed with Alt.
+    ea::optional<unsigned> hoverSlot_;
 };
 
 /// What the addon does with a drop.
@@ -179,19 +181,52 @@ struct DropDecision
     DropAction action_{DropAction::None};
     DropTarget target_{DropTarget::Selected};
     MaterialScope scope_{MaterialScope::Shape};
+    /// True if the face is the face under the cursor (Alt). Then only the hovered brush gets the edit.
+    bool faceFromHit_{};
+    /// The slot of the face under the cursor. Set only with `faceFromHit_`. Empty means no face: no change.
+    ea::optional<unsigned> slot_;
 };
+
+/// The kind of a geometry that the cursor ray hits.
+enum class DropHitKind
+{
+    /// The temporary result node of a root.
+    Result,
+    /// A brush node. The ray passes through it: the brush is a helper of the editor, not a visible surface.
+    Brush,
+    /// Any other geometry. It hides the result behind it.
+    Other,
+};
+
+/// Return the index of the hit that is the result under the cursor, or -1. The hits are sorted by distance.
+/// A brush hit is skipped. A hit of another kind in front of the result hides it.
+int ChooseResultHit(ea::span<const DropHitKind> hits);
+
+/// Return true if the CSG addon takes a drag of a material or a texture. The function is pure.
+/// The tab gives the whole drag to ONE addon, chosen on the first frame. The stock handler for materials takes any
+/// material drag. So the addon must take it at once, also if the cursor is not over a result yet.
+/// A material: taken if the scene has a root or if the decision is not None.
+/// A texture: taken if the decision is not None. Other kinds are not handled here.
+bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction action);
 
 /// Return true if the node is the temporary result node "CsgResult" of the root node.
 bool IsResultNodeOfRoot(Node* node, Node* rootNode);
 
 /// Decide what to do with a drop. The function is pure.
-/// Material and texture: the default scope is the whole shape. Shift clears the face overrides. Ctrl sets one face.
-/// Ctrl wins over Shift.
+/// Material and texture: the default scope is the whole shape: all faces with no override.
+/// Shift clears the face overrides. Ctrl sets the face of the selected handle.
+/// Alt sets only the face under the cursor: the scope is Slot, `faceFromHit_` is set and the slot is `hoverSlot_`.
+/// Alt wins over Ctrl. Ctrl wins over Shift. With Alt, the target is only the brush under the cursor.
 /// - The cursor is over the result of any root and no brush made the face: hint, no change.
 /// - The brush under the cursor is selected: all selected brushes get the edit.
 /// - The brush under the cursor is not selected: only that brush gets the edit.
 /// - No result under the cursor: a texture goes to the selected brushes. A material goes to the stock handler.
-DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl);
+DropDecision DecideDrop(
+    DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl, bool alt = false);
+
+/// Return the text of the drag hint for the scope of a material drop. The function is pure.
+/// `faceName` is the name of the face under the cursor, or empty. `hasFace` is true if an Alt or Ctrl drop has a face.
+ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, const ea::string& faceName);
 
 /// The materials of a brush as the editor sees them.
 struct BrushMaterials

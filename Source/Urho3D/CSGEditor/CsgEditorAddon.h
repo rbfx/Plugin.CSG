@@ -113,6 +113,8 @@ private:
         DropDecision decision_;
         /// The brush node that made the face under the cursor, or null.
         Node* hoverBrushNode_{};
+        /// The name of the face under the cursor with Alt, or empty.
+        ea::string hoverFaceName_;
     };
 
     bool IsAvailable() const;
@@ -132,6 +134,8 @@ private:
     ea::optional<unsigned> GetCtrlFaceSlot(Component* brush) const;
     /// Find the target brush components for the cursor. Restore the old preview and set the new one.
     void RefreshDropTargets(SceneViewPage& page);
+    /// Preview the material on the geometry under the cursor if `active`, else restore. Used with no result under the cursor.
+    void UpdateStockPreview(SceneViewPage& page, bool active);
     /// Move the preview brush to the cursor hit point.
     void UpdateDropBrushPosition();
     /// Clear the drag and drop state. The function does not change the scene.
@@ -205,6 +209,18 @@ private:
     ea::string dropResourceName_;
     /// The material case: a Ctrl drop had no face handle. The hint shows.
     bool dropNoFace_{};
+    /// The material drop has a target brush in the last frame.
+    bool dropHasTargets_{};
+    /// The preview of the material on a geometry that is not a CSG result.
+    struct StockPreview
+    {
+        WeakPtr<Drawable> drawable_;
+        unsigned index_{};
+        Variant old_;
+        Variant new_;
+    } stockPreview_;
+    /// The text of the drag hint for the material drop.
+    ea::string dropHint_;
 
     /// The settings of the shape handles. A grid step of 0 turns off the Ctrl snap.
     bool showHandles_{true};
