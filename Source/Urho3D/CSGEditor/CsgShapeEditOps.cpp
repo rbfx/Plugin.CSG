@@ -589,6 +589,55 @@ ea::string FormatRootStatsLine(const RootStats& stats)
         stats.rebuildMs_, stats.reusedOperands_, stats.brushCount_);
 }
 
+ea::string BuildInfoTooltip(const InfoTooltipData& data)
+{
+    ea::string text;
+    const auto addLine = [&](const ea::string& line)
+    {
+        if (!text.empty())
+            text += "\n";
+        text += line;
+    };
+
+    if (data.hasRoot_)
+    {
+        addLine(Format("CSG root: {}", data.rootName_));
+        if (!data.buildStatus_.empty())
+            addLine(data.buildStatus_);
+        if (data.hasStats_)
+        {
+            addLine(FormatRootStatsLine(data.stats_));
+            addLine(Format("Vertices {}{}", data.stats_.vertices_, data.stats_.building_ ? ", building..." : ""));
+            if (!data.stats_.valid_ && !data.stats_.error_.empty())
+                addLine(Format("Invalid: {}", data.stats_.error_));
+        }
+    }
+
+    if (data.hasShape_)
+    {
+        if (!text.empty())
+            text += "\n";
+        addLine(Format("Shape: {}", data.shapeType_));
+        addLine(data.shapeValid_ ? ea::string("Valid") : ea::string("Invalid: parameters are not valid"));
+        if (data.hasSize_)
+        {
+            addLine(Format("Size {:.3f} x {:.3f} x {:.3f}", data.size_.x_, data.size_.y_, data.size_.z_));
+        }
+        addLine(Format("Selected handles: {}", data.selectedHandles_));
+        if (!data.selectedHandleName_.empty())
+        {
+            if (data.selectedHandles_ > 1)
+                addLine(Format("{} (+{})", data.selectedHandleName_, data.selectedHandles_ - 1));
+            else
+                addLine(data.selectedHandleName_);
+        }
+        if (!data.materials_.empty())
+            addLine(Format("Materials: {}", data.materials_));
+        addLine("Click a face to select its brush (Alt+click: select the root)");
+    }
+    return text;
+}
+
 bool ComputeShapeWorldSize(Component* brush, Vector3& size)
 {
     if (!brush || !brush->GetNode())

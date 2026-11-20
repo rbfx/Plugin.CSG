@@ -2529,3 +2529,105 @@ TEST_CASE("A material drag is taken on the first frame and the hit list skips br
     CHECK(ChooseDropStage(ea::span<const K>{}) == DropStage::None);
     CHECK(ChooseResultHit({}) == -1);
 }
+
+TEST_CASE("GetToolbarContext follows the active node", "[editorops][toolbar]")
+{
+    Fixture f;
+    Node* rootNode = f.MakeRoot();
+    f.AddGrowAndCut(rootNode);
+    Node* modelBrush = rootNode->GetChild("Grow");
+    Node* shapeNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", f.FindOperation("Union"), Vector3::ZERO);
+    REQUIRE(shapeNode);
+    Node* other = f.scene->CreateChild("Other");
+    RunFrames(f.scene, 60);
+    Node* result = rootNode->GetChild("CsgResult");
+    REQUIRE(result);
+
+    const auto none = GetToolbarContext(nullptr, 0);
+    CHECK_FALSE(none.root_);
+    CHECK_FALSE(none.brush_);
+    CHECK_FALSE(none.shape_);
+    CHECK(none.modeCount_ == 0);
+
+    const auto root = GetToolbarContext(rootNode, 5);
+    CHECK(root.root_);
+    CHECK_FALSE(root.brush_);
+    CHECK_FALSE(root.shape_);
+    CHECK(root.modeCount_ == 0);
+
+    const auto resultContext = GetToolbarContext(result, 0);
+    CHECK(resultContext.root_);
+    CHECK_FALSE(resultContext.brush_);
+    CHECK_FALSE(resultContext.shape_);
+
+    const auto nonCsg = GetToolbarContext(other, 5);
+    CHECK_FALSE(nonCsg.root_);
+    CHECK_FALSE(nonCsg.brush_);
+    CHECK_FALSE(nonCsg.shape_);
+    CHECK(nonCsg.modeCount_ == 0);
+
+    const auto brush = GetToolbarContext(modelBrush, 5);
+    CHECK(brush.root_);
+    CHECK(brush.brush_);
+    CHECK_FALSE(brush.shape_);
+    CHECK(brush.modeCount_ == 0);
+
+    const auto shape = GetToolbarContext(shapeNode, 5);
+    CHECK(shape.root_);
+    CHECK(shape.brush_);
+    CHECK(shape.shape_);
+    CHECK(shape.modeCount_ == 5);
+
+    // A shape with fewer than 2 modes has no mode buttons.
+    CHECK(GetToolbarContext(shapeNode, 1).shape_);
+    CHECK(GetToolbarContext(shapeNode, 1).modeCount_ == 0);
+}
+
+TEST_CASE("BuildInfoTooltip lists the stats and the shape lines", "[editorops][toolbar]")
+{
+    InfoTooltipData data;
+    CHECK(BuildInfoTooltip(data).empty());
+
+    data.hasRoot_ = true;
+    data.rootName_ = "CSG";
+    data.buildStatus_ = "Ready";
+    data.hasStats_ = true;
+    data.stats_.brushCount_ = 2;
+    data.stats_.triangles_ = 12;
+    data.stats_.vertices_ = 24;
+    data.stats_.rebuildMs_ = 1.5f;
+    data.stats_.reusedOperands_ = 1;
+    data.stats_.building_ = true;
+    data.stats_.valid_ = false;
+    data.stats_.error_ = "open face";
+
+    const ea::string rootOnly = BuildInfoTooltip(data);
+    CHECK(rootOnly.find("CSG root: CSG") != ea::string::npos);
+    CHECK(rootOnly.find("Ready") != ea::string::npos);
+    CHECK(rootOnly.find(FormatRootStatsLine(data.stats_)) != ea::string::npos);
+    CHECK(rootOnly.find("Vertices 24, building...") != ea::string::npos);
+    CHECK(rootOnly.find("Invalid: open face") != ea::string::npos);
+    CHECK(rootOnly.find("Shape:") == ea::string::npos);
+
+    data.hasShape_ = true;
+    data.shapeType_ = "CsgBoxBrush";
+    data.shapeValid_ = true;
+    data.hasSize_ = true;
+    data.size_ = Vector3(1.0f, 2.0f, 3.0f);
+    data.selectedHandles_ = 3;
+    data.selectedHandleName_ = "Face +X";
+    data.materials_ = "Face +X: none";
+    const ea::string both = BuildInfoTooltip(data);
+    CHECK(both.find("Shape: CsgBoxBrush") != ea::string::npos);
+    CHECK(both.find("Valid") != ea::string::npos);
+    CHECK(both.find("Size 1.000 x 2.000 x 3.000") != ea::string::npos);
+    CHECK(both.find("Selected handles: 3") != ea::string::npos);
+    CHECK(both.find("Face +X (+2)") != ea::string::npos);
+    CHECK(both.find("Materials: Face +X: none") != ea::string::npos);
+
+    // A shape brush without a root section gives only the shape lines.
+    data.hasRoot_ = false;
+    const ea::string shapeOnly = BuildInfoTooltip(data);
+    CHECK(shapeOnly.find("CSG root") == ea::string::npos);
+    CHECK(shapeOnly.find("Shape: CsgBoxBrush") == 0);
+}

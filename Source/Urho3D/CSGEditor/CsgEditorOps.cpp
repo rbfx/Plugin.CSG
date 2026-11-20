@@ -3,6 +3,7 @@
 // For a copy, see <https://opensource.org/licenses/MIT> or the accompanying LICENSE file.
 
 #include "Urho3D/CSGEditor/CsgEditorOps.h"
+#include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 
 #include <Urho3D/Core/Context.h>
 #include <Urho3D/Core/Format.h>
@@ -93,6 +94,16 @@ Node* FindActiveRoot(Node* selected)
 bool IsBrushNode(Node* node) { return GetBrushComponent(node) != nullptr; }
 
 bool IsRootNode(Node* node) { return GetRootComponent(node) != nullptr; }
+
+ToolbarContext GetToolbarContext(Node* activeNode, unsigned handleModeCount)
+{
+    ToolbarContext context;
+    context.brush_ = IsBrushNode(activeNode);
+    context.root_ = FindActiveRoot(activeNode) != nullptr;
+    context.shape_ = context.brush_ && FindShapeBrush(activeNode) != nullptr;
+    context.modeCount_ = context.shape_ && handleModeCount >= 2 ? handleModeCount : 0;
+    return context;
+}
 
 Node* CreateRootNode(Node* parent, const Vector3& worldPosition)
 {

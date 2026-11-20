@@ -239,6 +239,32 @@ bool QueryRootStats(Component* root, RootStats& stats);
 /// Return the line of the overlay: "Brushes N, tris N, last build X ms, reused K/N".
 ea::string FormatRootStatsLine(const RootStats& stats);
 
+/// The data of the info tooltip of the toolbar.
+struct InfoTooltipData
+{
+    /// The root section: the root name, the build status and the stats. Skipped if `hasRoot_` is false.
+    bool hasRoot_{};
+    ea::string rootName_;
+    ea::string buildStatus_;
+    /// The stats are valid only if the root answered the query.
+    bool hasStats_{};
+    RootStats stats_;
+    /// The shape section. Skipped if `hasShape_` is false.
+    bool hasShape_{};
+    ea::string shapeType_;
+    bool shapeValid_{};
+    bool hasSize_{};
+    Vector3 size_;
+    unsigned selectedHandles_{};
+    /// The name of the first selected handle. Empty if no handle is selected.
+    ea::string selectedHandleName_;
+    /// The materials row, for example "Face +X: none, ...". Empty if the brush has no materials.
+    ea::string materials_;
+};
+
+/// Return the text of the info tooltip: the stats of the root, then the lines of the shape. The function is pure.
+ea::string BuildInfoTooltip(const InfoTooltipData& data);
+
 /// Compute the size of the generated mesh of a procedural brush: the local axis aligned bounds of the mesh
 /// scaled by the world scale of the node. The size is not negative. It uses the event E_CSGSHAPEQUERYBOUNDS.
 /// Return false for a null component, a component that does not answer or a shape that is not valid.

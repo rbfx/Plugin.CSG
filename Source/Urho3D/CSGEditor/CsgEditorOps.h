@@ -39,6 +39,23 @@ bool IsBrushNode(Node* node);
 /// Return true if the node has a CsgRoot.
 bool IsRootNode(Node* node);
 
+/// The groups of toolbar items that the selection allows.
+struct ToolbarContext
+{
+    /// The root controls: the active node is a root, the result node of a root or a brush of a root.
+    bool root_{};
+    /// The brush controls: the active node is a brush.
+    bool brush_{};
+    /// The shape controls: the active node is a brush that has a procedural shape.
+    bool shape_{};
+    /// The number of handle modes of the active shape. It is 0 if the shape has fewer than 2 modes.
+    unsigned modeCount_{};
+};
+
+/// Return the toolbar groups for the active node. The function does not change the node.
+/// A node that is not a CSG node gives all false. `handleModeCount` counts the modes of the active shape.
+ToolbarContext GetToolbarContext(Node* activeNode, unsigned handleModeCount);
+
 /// Create a child node "CSG" with a CsgRoot at the world position.
 Node* CreateRootNode(Node* parent, const Vector3& worldPosition);
 /// Create a child node "Brush" at the end of the operand list. The model name may be empty.
