@@ -296,7 +296,7 @@ Tests.CSG builds a root with one union brush for each preset model. Each build s
 - "Size": the box size. Each component is in [0.001, 16384]. The default is (1, 1, 1).
 - "Corner 0" to "Corner 7": the corners. Index bit 0 is +X, bit 1 is +Y and bit 2 is +Z. Each component is in [-64, 64]. The default is (+-0.5, +-0.5, +-0.5). The local corner position is Size * Corner, per component.
 - The scale of the node applies as for a model brush. The operand transform is `rootFrame * brush world transform`, with the root frame equal to the metric scale of the root times the inverse world transform of the root. A box of size 1 on a node with the scale 0.5 under a root with the scale 1 has the volume 0.125. Under a root with the scale 2 it has the world scale 1, so the volume in the fold space is 1. The output model is in the node space of the root, so its volume there is 0.125.
-- "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot uses the material of slot 0. Faces with equal materials share one output geometry.
+- "Materials": 6 slots, one for each face, in this order: -X, +X, -Y, +Y, -Z, +Z. The order is a file contract. An empty slot uses the shape material, else the material of slot 0. Faces with equal materials share one output geometry.
 - Each face is two triangles with a fixed diagonal. A moved corner can make a face that is not planar. The CSG accepts this.
 - UV 0 is a planar projection in local units, so the texel density does not change with the size. UV 1 puts each face in one cell of a 3x2 atlas.
 - Validity: at each corner, the three edges to the neighbor corners must give a positive triple product, and the volume must be positive. A corner that goes through the opposite face makes the box not valid. A box that is not valid gives no operand and logs one warning.
@@ -431,16 +431,40 @@ During the drag, the scene shows a preview. The preview brush of the "add" case 
 
 ### Textures and materials
 
-Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.dds`, `.bmp`, `.webp`, `.ktx`) from the resource browser onto the scene view. The selected brushes get the material.
+A procedural brush has two material attributes:
 
-- A brush is selected: slot 0 of the attribute "Materials" of each selected brush gets the material. A model brush and a procedural brush work the same way. The other slots stay. Hold Shift to set all slots. One undo step restores all materials.
-- A texture: the addon makes a material for the texture, then assigns it. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten.
-- A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
-- A material drop is taken only when the cursor is over the CSG result of the root of the selection. Elsewhere the stock editor handler assigns the material to the geometry under the cursor, as before. A texture drop has no stock handler, so it works with any cursor position.
-- Only a CSG root is selected, with no brush: the drop does nothing. A tooltip shows "Select a brush to assign a material".
-- No selected brush and no root: the stock editor handlers take the drop, as before.
+- "Shape Material": the material of the whole shape. The default is empty.
+- "Materials": the face overrides. It keeps one slot for each face group. The slot count and the order do not change.
 
-During the drag, the tooltip shows "Material: <name>". A material shows as a live preview on the brushes. A texture shows the preview only if its material file exists. The addon makes the file when you release the button.
+A slot uses its own material if it is set. Else it uses the shape material. Else it uses slot 0. The last step is the legacy fallback: a scene that has no "Shape Material" renders as before, and it loads with no change. Equal materials merge into one output geometry. A model brush has no shape material. Its "Materials" slots work as before.
+
+Drag a material (`.material`) or a texture (`.png`, `.jpg`, `.jpeg`, `.tga`, `.dds`, `.bmp`, `.webp`, `.ktx`) from the resource browser onto the scene view. The default is the WHOLE SHAPE.
+
+| Modifier | Scope |
+| --- | --- |
+| none | Set the shape material. The face overrides stay. |
+| Shift | Set the shape material and clear all face overrides. |
+| Ctrl | Set the override of one face. Ctrl wins over Shift. |
+
+Targets:
+
+- The cursor is over the CSG result of any root, and the brush under the cursor is selected: all selected brushes get the edit.
+- The brush under the cursor is not selected: only that brush gets the edit. The selection does not change.
+- The cursor is over a result but no brush made the face (the base model, or a removed brush): the tooltip shows "No brush under the cursor". Nothing changes.
+- The cursor is not over a result: a texture goes to the selected brushes. A material goes to the stock editor handler, which assigns it to the geometry under the cursor. Only a CSG root is selected, with no brush: a texture drop shows "Select a brush to assign a material" and does nothing.
+- The target is found each frame. If the cursor goes off a result during a drag, the preview goes and the release changes nothing.
+
+Ctrl (face) in phase 1: the addon cannot find the face under the cursor yet. It uses the face handle that the last click selected on the brush. The face handle gives the slot through the face-group order. The box maps its face handles 20 to 25 to the slots 0 to 5. The other shapes have no mapping yet. With no mapping or no selected face handle, Ctrl changes nothing. The tooltip shows "Select a face handle first" and the log has the same hint once for each drag. A Ctrl drop edits only the brush with the selected face handle.
+
+An old brush (no shape material, slot 0 set) changes on the first write: slot 0 becomes the shape material, and the slots equal to it become empty. The render result stays the same. The edit then applies in the same undo step.
+
+A texture: the addon makes a material for the texture, then uses the same edit rules. The material file goes next to the texture file. Its name is the full texture file name plus `.material`. Example: `Textures/Brick.png` gives `Textures/Brick.png.material` in the same resource directory. `Brick.png` and `Brick.jpg` keep separate materials. The material uses the technique `Techniques/LitOpaque.xml`, the shader define `PBR` and the texture as the albedo (diffuse) texture. An existing `.material` file is reused and never overwritten. A texture that is not in a mounted resource directory (for example in a package): the addon logs one error and does nothing.
+
+During the drag, the tooltip shows "Drop: shape material. Ctrl: selected face only. Shift: shape material and clear face overrides." A material shows as a live preview. A texture shows the preview only if its material file exists. The addon makes the file when you release the button. One drop is one undo step, also when both attributes change.
+
+The "Shape" section of the overlay of the active procedural brush shows "Shape material: <name or none>" and "Face overrides: <n> (<names>)". The button "Clear face overrides" clears the overrides and keeps the shape material. It is one undo step.
+
+Phase 2 (later): find the face under the cursor, an outline of the target, an eyedropper, and drop targets on the overlay rows.
 
 The "UV Mode", "UV Scale" and "UV Offset" attributes of the brush control the texture projection. See "UV projection".
 
@@ -602,6 +626,15 @@ The editor has no test harness for addons. Do these checks by hand:
 90. Drag a face handle. While the mouse is down, the section shows "Delta: x y z". After the release, the line is gone.
 91. Add a box. The box shows 26 handles: 8 corners, 6 faces and 12 edges. The edge handles are squares at the midpoints of the edges.
 92. Drag an edge handle with the gizmo. The 2 corners of the edge move together and the other 6 corners stay. Select an edge and one of its corners with Shift+click. The shared corner moves once.
+93. Add a box. The "Shape" section shows "Shape material: none" and "Face overrides: 0".
+94. Drop a material on the box in the view. The whole box shows the material. The section shows its name. Drop a second material. The whole box changes again.
+95. Click the +Y face of the box to select its face handle. Hold Ctrl and drop a third material on the box. Only the top face changes. The section shows "Face overrides: 1 (...)". Drop a plain material again. The top face keeps the third material.
+96. Hold Shift and drop a material. The whole box shows it and "Face overrides: 0". Ctrl+Z restores the overrides in one step.
+97. Click "Clear face overrides" with one override. The overrides go, the shape material stays. Ctrl+Z brings the override back.
+98. Select box A. Drop a material on box B (not selected). Only B changes and the selection stays on A. Select A and B, then drop on A. Both change.
+99. Drop a material on the base model of a root (no brush). The tooltip shows "No brush under the cursor" and nothing changes.
+100. Hold Ctrl and drop on a sphere with no selected face handle. Nothing changes and the tooltip shows "Select a face handle first".
+101. Open an old scene whose box has only slot 0 set. It renders as before. Drop a plain material. The box shows the new material on all faces.
 
 ## How to try the sample scene
 
