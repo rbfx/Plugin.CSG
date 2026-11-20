@@ -873,67 +873,271 @@ TEST_CASE("EnsureTextureMaterial logs one error and leaves no file when the writ
     CHECK_FALSE(std::filesystem::is_regular_file(dir.path_ / "Textures/Brick.png.material"));
 }
 
-TEST_CASE("DecideDrop maps payload, selection and Shift to an action", "[editorops][material]")
+TEST_CASE("DecideDrop maps payload and selection to an action", "[editorops][material]")
 {
     DropSelection none;
     DropSelection model;
     model.activeIsModelBrush_ = model.activeIsBrush_ = model.anySelectedBrush_ = true;
-    DropSelection procedural;
-    procedural.activeIsBrush_ = procedural.anySelectedBrush_ = true;
     DropSelection root;
     root.activeIsRoot_ = true;
     DropSelection other;
-    // The cursor is over the result node. A material drop needs it.
-    model.hoveringResult_ = procedural.hoveringResult_ = root.hoveringResult_ = true;
 
-    // Models keep the rules of the model drop. Shift does not matter.
+    // Models keep the rules of the model drop. The modifiers do not matter.
     for (const bool shift : {false, true})
     {
-        CHECK(DecideDrop(DropPayloadKind::Model, model, shift).action_ == DropAction::ReplaceModel);
-        CHECK(DecideDrop(DropPayloadKind::Model, procedural, shift).action_ == DropAction::None);
-        CHECK(DecideDrop(DropPayloadKind::Model, root, shift).action_ == DropAction::NewBrush);
-        CHECK(DecideDrop(DropPayloadKind::Model, other, shift).action_ == DropAction::None);
-        CHECK(DecideDrop(DropPayloadKind::Model, none, shift).action_ == DropAction::None);
-        CHECK(DecideDrop(DropPayloadKind::Other, model, shift).action_ == DropAction::None);
-        CHECK(DecideDrop(DropPayloadKind::Other, root, shift).action_ == DropAction::None);
+        for (const bool ctrl : {false, true})
+        {
+            CHECK(DecideDrop(DropPayloadKind::Model, model, shift, ctrl).action_ == DropAction::ReplaceModel);
+            DropSelection procedural;
+            procedural.activeIsBrush_ = procedural.anySelectedBrush_ = true;
+            CHECK(DecideDrop(DropPayloadKind::Model, procedural, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Model, root, shift, ctrl).action_ == DropAction::NewBrush);
+            CHECK(DecideDrop(DropPayloadKind::Model, other, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Model, none, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Other, model, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Other, root, shift, ctrl).action_ == DropAction::None);
+        }
     }
-
-    for (const DropSelection* brush : {&model, &procedural})
-    {
-        CHECK(DecideDrop(DropPayloadKind::Material, *brush, false).action_ == DropAction::AssignMaterial);
-        CHECK_FALSE(DecideDrop(DropPayloadKind::Material, *brush, false).allSlots_);
-        CHECK(DecideDrop(DropPayloadKind::Material, *brush, true).allSlots_);
-        CHECK(DecideDrop(DropPayloadKind::Texture, *brush, false).action_ == DropAction::AssignTexture);
-        CHECK(DecideDrop(DropPayloadKind::Texture, *brush, true).allSlots_);
-    }
-
-    // A root with no selected brush shows a hint. Another selection leaves the drop to the stock handlers.
-    CHECK(DecideDrop(DropPayloadKind::Material, root, false).action_ == DropAction::HintSelectBrush);
-    CHECK(DecideDrop(DropPayloadKind::Texture, root, true).action_ == DropAction::HintSelectBrush);
-    CHECK(DecideDrop(DropPayloadKind::Material, other, false).action_ == DropAction::None);
-    CHECK(DecideDrop(DropPayloadKind::Texture, none, false).action_ == DropAction::None);
-
-    // A selected brush that is not the active node still counts.
-    DropSelection mixed = root;
-    mixed.anySelectedBrush_ = true;
-    CHECK(DecideDrop(DropPayloadKind::Material, mixed, false).action_ == DropAction::AssignMaterial);
 }
 
-TEST_CASE("DecideDrop leaves a material drop away from the result to the stock handler", "[editorops][material]")
+TEST_CASE("DecideDrop scope follows the modifiers", "[editorops][material]")
+{
+    DropSelection hover;
+    hover.hoveringResult_ = hover.hoverBrush_ = hover.hoverBrushSelected_ = true;
+    for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
+    {
+        CHECK(DecideDrop(kind, hover, false, false).scope_ == MaterialScope::Shape);
+        CHECK(DecideDrop(kind, hover, true, false).scope_ == MaterialScope::ShapeClearOverrides);
+        CHECK(DecideDrop(kind, hover, false, true).scope_ == MaterialScope::Slot);
+        // Ctrl wins over Shift.
+        CHECK(DecideDrop(kind, hover, true, true).scope_ == MaterialScope::Slot);
+    }
+}
+
+TEST_CASE("DecideDrop target follows the brush under the cursor", "[editorops][material]")
+{
+    for (const DropPayloadKind kind : {DropPayloadKind::Material, DropPayloadKind::Texture})
+    {
+        const DropAction assign = kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
+        // The hovered brush is selected: all selected brushes.
+        DropSelection selected;
+        selected.hoveringResult_ = selected.hoverBrush_ = selected.hoverBrushSelected_ = selected.anySelectedBrush_ = true;
+        CHECK(DecideDrop(kind, selected, false, false).action_ == assign);
+        CHECK(DecideDrop(kind, selected, false, false).target_ == DropTarget::Selected);
+
+        // The hovered brush is not selected: only that brush, with or without another selection.
+        DropSelection notSelected;
+        notSelected.hoveringResult_ = notSelected.hoverBrush_ = true;
+        CHECK(DecideDrop(kind, notSelected, false, false).action_ == assign);
+        CHECK(DecideDrop(kind, notSelected, false, false).target_ == DropTarget::Hovered);
+        notSelected.anySelectedBrush_ = true;
+        CHECK(DecideDrop(kind, notSelected, false, false).target_ == DropTarget::Hovered);
+        notSelected.activeIsRoot_ = true;
+        CHECK(DecideDrop(kind, notSelected, false, false).target_ == DropTarget::Hovered);
+
+        // A result with no brush (source 0 or a missing node): hint, no change.
+        DropSelection noBrush;
+        noBrush.hoveringResult_ = true;
+        noBrush.anySelectedBrush_ = true;
+        CHECK(DecideDrop(kind, noBrush, false, false).action_ == DropAction::HintNoBrush);
+        CHECK(DecideDrop(kind, noBrush, true, true).action_ == DropAction::HintNoBrush);
+    }
+}
+
+TEST_CASE("DecideDrop away from a result", "[editorops][material]")
 {
     DropSelection brush;
     brush.activeIsBrush_ = brush.anySelectedBrush_ = true;
     DropSelection root;
     root.activeIsRoot_ = true;
+    DropSelection none;
 
     for (const bool shift : {false, true})
     {
-        CHECK(DecideDrop(DropPayloadKind::Material, brush, shift).action_ == DropAction::None);
-        CHECK(DecideDrop(DropPayloadKind::Material, root, shift).action_ == DropAction::None);
-        // A texture has no stock handler. The hover does not matter.
-        CHECK(DecideDrop(DropPayloadKind::Texture, brush, shift).action_ == DropAction::AssignTexture);
-        CHECK(DecideDrop(DropPayloadKind::Texture, root, shift).action_ == DropAction::HintSelectBrush);
+        for (const bool ctrl : {false, true})
+        {
+            // A material goes to the stock handler.
+            CHECK(DecideDrop(DropPayloadKind::Material, brush, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Material, root, shift, ctrl).action_ == DropAction::None);
+            CHECK(DecideDrop(DropPayloadKind::Material, none, shift, ctrl).action_ == DropAction::None);
+            // A texture goes to the selected brushes. A root with no brush shows a hint.
+            CHECK(DecideDrop(DropPayloadKind::Texture, brush, shift, ctrl).action_ == DropAction::AssignTexture);
+            CHECK(DecideDrop(DropPayloadKind::Texture, brush, shift, ctrl).target_ == DropTarget::Selected);
+            CHECK(DecideDrop(DropPayloadKind::Texture, root, shift, ctrl).action_ == DropAction::HintSelectBrush);
+            CHECK(DecideDrop(DropPayloadKind::Texture, none, shift, ctrl).action_ == DropAction::None);
+        }
     }
+    // A selected brush that is not the active node still counts.
+    DropSelection mixed = root;
+    mixed.anySelectedBrush_ = true;
+    CHECK(DecideDrop(DropPayloadKind::Texture, mixed, false, false).action_ == DropAction::AssignTexture);
+}
+
+namespace
+{
+
+BrushMaterials Procedural(const ea::string& shape, ea::vector<ea::string> slots)
+{
+    BrushMaterials result;
+    result.procedural_ = true;
+    result.shape_ = shape;
+    result.slots_ = ea::move(slots);
+    return result;
+}
+
+ea::vector<ea::string> Slots6(ea::vector<ea::string> first)
+{
+    first.resize(6);
+    return first;
+}
+
+} // namespace
+
+TEST_CASE("PlanMaterialEdit on a procedural brush", "[editorops][materials]")
+{
+    SECTION("A fresh brush gets the shape material and no overrides")
+    {
+        BrushMaterials m = Procedural("", Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S"));
+        CHECK(m.shape_ == "S");
+        CHECK(GetOverriddenSlots(m).empty());
+        for (const ea::string& name : m.slots_)
+            CHECK(name.empty());
+    }
+    SECTION("A legacy brush with equal slots moves slot 0 to the shape material")
+    {
+        BrushMaterials m = Procedural("", Slots6({"A", "A", "A", "A", "A", "A"}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S"));
+        CHECK(m.shape_ == "S");
+        for (const ea::string& name : m.slots_)
+            CHECK(name.empty());
+    }
+    SECTION("A legacy brush with one different slot keeps that override")
+    {
+        // Old render: faces 0..5 are A, A, A, T, A, A (empty slots use slot 0).
+        BrushMaterials m = Procedural("", Slots6({"A", "", "", "T"}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S"));
+        CHECK(m.shape_ == "S");
+        CHECK(m.slots_[3] == "T");
+        CHECK(m.slots_[0].empty());
+        CHECK(GetOverriddenSlots(m) == ea::vector<unsigned>{3});
+    }
+    SECTION("A legacy slot edit keeps the other faces")
+    {
+        BrushMaterials m = Procedural("", Slots6({"A"}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 0, "B"));
+        // Faces 1..5 still render A through the shape material. Face 0 is B.
+        CHECK(m.shape_ == "A");
+        CHECK(m.slots_[0] == "B");
+        CHECK(GetOverriddenSlots(m) == ea::vector<unsigned>{0});
+    }
+    SECTION("Shift sets the shape and clears all overrides")
+    {
+        BrushMaterials m = Procedural("S0", Slots6({"", "X", "", "Y"}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::ShapeClearOverrides, 0, "S"));
+        CHECK(m.shape_ == "S");
+        for (const ea::string& name : m.slots_)
+            CHECK(name.empty());
+    }
+    SECTION("A slot 0 override on a brush with a shape material changes only slot 0")
+    {
+        BrushMaterials m = Procedural("S", Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 0, "O"));
+        CHECK(m.shape_ == "S");
+        CHECK(m.slots_[0] == "O");
+        CHECK(m.slots_[1].empty());
+        CHECK(GetOverriddenSlots(m) == ea::vector<unsigned>{0});
+    }
+    SECTION("An invalid slot returns false and keeps the brush")
+    {
+        BrushMaterials m = Procedural("S", Slots6({"", "X"}));
+        const BrushMaterials before = m;
+        CHECK_FALSE(PlanMaterialEdit(m, MaterialScope::Slot, 6, "O"));
+        CHECK(m.shape_ == before.shape_);
+        CHECK(m.slots_ == before.slots_);
+        BrushMaterials legacy = Procedural("", Slots6({"A"}));
+        CHECK_FALSE(PlanMaterialEdit(legacy, MaterialScope::Slot, 99, "O"));
+        CHECK(legacy.shape_.empty());
+        CHECK(legacy.slots_[0] == "A");
+    }
+    SECTION("Repeated plain drops keep the overrides")
+    {
+        BrushMaterials m = Procedural("", Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 2, "O"));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S1"));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S2"));
+        CHECK(m.shape_ == "S2");
+        CHECK(m.slots_[2] == "O");
+        CHECK(GetOverriddenSlots(m) == ea::vector<unsigned>{2});
+    }
+    SECTION("A plain drop after Shift keeps the whole shape expectation")
+    {
+        BrushMaterials m = Procedural("", Slots6({}));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 2, "O"));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::ShapeClearOverrides, 0, "S1"));
+        REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S2"));
+        CHECK(m.shape_ == "S2");
+        CHECK(GetOverriddenSlots(m).empty());
+    }
+}
+
+TEST_CASE("PlanMaterialEdit on a model brush sets geometry slots", "[editorops][materials]")
+{
+    BrushMaterials m;
+    m.slots_ = {"A", "B", ""};
+    REQUIRE(PlanMaterialEdit(m, MaterialScope::Shape, 0, "S"));
+    CHECK(m.shape_.empty());
+    for (const ea::string& name : m.slots_)
+        CHECK(name == "S");
+    CHECK(m.slots_.size() == 3);
+    REQUIRE(PlanMaterialEdit(m, MaterialScope::ShapeClearOverrides, 0, "T"));
+    for (const ea::string& name : m.slots_)
+        CHECK(name == "T");
+    REQUIRE(PlanMaterialEdit(m, MaterialScope::Slot, 1, "U"));
+    CHECK(m.slots_[1] == "U");
+    CHECK(m.slots_[0] == "T");
+    CHECK_FALSE(PlanMaterialEdit(m, MaterialScope::Slot, 3, "U"));
+    CHECK(GetOverriddenSlots(m).empty());
+}
+
+TEST_CASE("GetOverriddenSlots lists the slots that differ from the shape material", "[editorops][materials]")
+{
+    CHECK(GetOverriddenSlots(Procedural("S", Slots6({"S", "X", "", "Y"}))) == ea::vector<unsigned>{1, 3});
+    CHECK(GetOverriddenSlots(Procedural("", Slots6({"A", "A", "B"}))) == ea::vector<unsigned>{2});
+    CHECK(GetOverriddenSlots(Procedural("", Slots6({}))).empty());
+    CHECK(GetOverriddenSlots(Procedural("S", {})).empty());
+}
+
+TEST_CASE("GetFaceSlotOfHandle maps only the box faces", "[editorops][materials]")
+{
+    CHECK(GetFaceSlotOfHandle("CsgBoxBrush", 20) == 0u);
+    CHECK(GetFaceSlotOfHandle("CsgBoxBrush", 25) == 5u);
+    CHECK_FALSE(GetFaceSlotOfHandle("CsgBoxBrush", 26).has_value());
+    CHECK_FALSE(GetFaceSlotOfHandle("CsgBoxBrush", 3).has_value());
+    CHECK_FALSE(GetFaceSlotOfHandle("CsgCylinderBrush", 20).has_value());
+}
+
+TEST_CASE("EditBrushMaterial writes both attributes", "[editorops][materials]")
+{
+    Fixture f;
+    EditorErrorCounter errors(f.context);
+    Node* rootNode = f.MakeRoot();
+    Node* boxNode = AddBrushNodeOfType(rootNode, "CsgBoxBrush", 0, Vector3::ZERO);
+    REQUIRE(boxNode);
+    Component* brush = FindBrushComponent(boxNode);
+
+    CHECK(EditBrushMaterial(boxNode, MaterialScope::Slot, 3, "Materials/T.xml"));
+    CHECK(EditBrushMaterial(boxNode, MaterialScope::Shape, 0, "Materials/S.xml"));
+    CHECK(brush->GetAttribute("Shape Material").GetResourceRef().name_ == "Materials/S.xml");
+    CHECK(GetMaterialNames(boxNode)[3] == "Materials/T.xml");
+    // The same edit changes nothing.
+    CHECK_FALSE(EditBrushMaterial(boxNode, MaterialScope::Shape, 0, "Materials/S.xml"));
+    CHECK_FALSE(EditBrushMaterial(boxNode, MaterialScope::Slot, 6, "Materials/T.xml"));
+    CHECK(EditBrushMaterial(boxNode, MaterialScope::ShapeClearOverrides, 0, "Materials/S.xml"));
+    for (const ea::string& name : GetMaterialNames(boxNode))
+        CHECK(name.empty());
+    CHECK(brush->GetAttribute("Shape Material").GetResourceRef().name_ == "Materials/S.xml");
+    CHECK(errors.GetCount() == 0);
 }
 
 TEST_CASE("IsResultNodeOfRoot accepts only the temporary result child of the root", "[editorops][material]")

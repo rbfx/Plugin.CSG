@@ -377,7 +377,7 @@ bool IsResultNodeOfRoot(Node* node, Node* rootNode)
     return node && rootNode && node->IsTemporary() && node->GetParent() == rootNode && node->GetName() == "CsgResult";
 }
 
-DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift)
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl)
 {
     DropDecision result;
     switch (kind)
@@ -390,20 +390,154 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
         break;
     case DropPayloadKind::Material:
     case DropPayloadKind::Texture:
+    {
+        const DropAction assign =
+            kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
+        result.scope_ = ctrl ? MaterialScope::Slot : shift ? MaterialScope::ShapeClearOverrides : MaterialScope::Shape;
+        if (selection.hoveringResult_)
+        {
+            if (!selection.hoverBrush_)
+            {
+                result.action_ = DropAction::HintNoBrush;
+                break;
+            }
+            result.action_ = assign;
+            result.target_ = selection.hoverBrushSelected_ ? DropTarget::Selected : DropTarget::Hovered;
+            break;
+        }
         // The stock handler assigns a material to the geometry under the cursor.
-        if (kind == DropPayloadKind::Material && !selection.hoveringResult_)
+        if (kind == DropPayloadKind::Material)
             break;
         if (selection.anySelectedBrush_)
-        {
-            result.action_ = kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-            result.allSlots_ = shift;
-        }
+            result.action_ = assign;
         else if (selection.activeIsRoot_)
             result.action_ = DropAction::HintSelectBrush;
         break;
+    }
     case DropPayloadKind::Other: break;
     }
     return result;
+}
+
+bool PlanMaterialEdit(BrushMaterials& io, MaterialScope scope, unsigned slot, const ea::string& material)
+{
+    BrushMaterials plan = io;
+    if (!plan.procedural_)
+    {
+        // A model brush has no shape material. A shape edit sets all geometry slots.
+        if (plan.slots_.empty())
+            plan.slots_.resize(1);
+        if (scope == MaterialScope::Slot)
+        {
+            if (slot >= plan.slots_.size())
+                return false;
+            plan.slots_[slot] = material;
+        }
+        else
+        {
+            for (ea::string& name : plan.slots_)
+                name = material;
+        }
+        io = ea::move(plan);
+        return true;
+    }
+
+    if (scope == MaterialScope::Slot && slot >= plan.slots_.size())
+        return false;
+
+    // An old brush: slot 0 is the material of the whole shape. Move it, so a new edit keeps the render result.
+    if (plan.shape_.empty() && !plan.slots_.empty() && !plan.slots_[0].empty())
+    {
+        plan.shape_ = plan.slots_[0];
+        for (ea::string& name : plan.slots_)
+        {
+            if (name == plan.shape_)
+                name.clear();
+        }
+    }
+
+    switch (scope)
+    {
+    case MaterialScope::Shape: plan.shape_ = material; break;
+    case MaterialScope::ShapeClearOverrides:
+        plan.shape_ = material;
+        for (ea::string& name : plan.slots_)
+            name.clear();
+        break;
+    case MaterialScope::Slot: plan.slots_[slot] = material; break;
+    }
+    io = ea::move(plan);
+    return true;
+}
+
+ea::vector<unsigned> GetOverriddenSlots(const BrushMaterials& materials)
+{
+    ea::vector<unsigned> result;
+    if (!materials.procedural_)
+        return result;
+    const ea::string& shape = !materials.shape_.empty() ? materials.shape_
+        : materials.slots_.empty()                    ? materials.shape_
+                                                      : materials.slots_[0];
+    for (unsigned i = 0; i < materials.slots_.size(); ++i)
+    {
+        if (!materials.slots_[i].empty() && materials.slots_[i] != shape)
+            result.push_back(i);
+    }
+    return result;
+}
+
+ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsigned handleId)
+{
+    // The ids of the box are a file contract. See CsgBoxBrush.h.
+    constexpr unsigned firstFaceHandle = 20;
+    constexpr unsigned faceCount = 6;
+    if (shapeTypeName == "CsgBoxBrush" && handleId >= firstFaceHandle && handleId < firstFaceHandle + faceCount)
+        return handleId - firstFaceHandle;
+    return ea::nullopt;
+}
+
+namespace
+{
+bool HasShapeMaterialAttribute(Component* component)
+{
+    return component && component->GetAttribute("Shape Material").GetType() == VAR_RESOURCEREF;
+}
+} // namespace
+
+bool ReadBrushMaterials(Node* brush, BrushMaterials& materials)
+{
+    Component* component = GetBrushComponent(brush);
+    ResourceRefList list;
+    if (!ReadMaterialList(component, list))
+        return false;
+    materials = BrushMaterials{};
+    materials.procedural_ = HasShapeMaterialAttribute(component);
+    if (materials.procedural_)
+        materials.shape_ = component->GetAttribute("Shape Material").GetResourceRef().name_;
+    materials.slots_ = list.names_;
+    return true;
+}
+
+bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea::string& material)
+{
+    Component* component = GetBrushComponent(brush);
+    BrushMaterials before;
+    if (!ReadBrushMaterials(brush, before))
+        return false;
+    BrushMaterials after = before;
+    if (!PlanMaterialEdit(after, scope, slot, material))
+        return false;
+
+    bool changed = false;
+    if (after.procedural_ && after.shape_ != before.shape_)
+    {
+        changed |= component->SetAttribute("Shape Material", ResourceRef(Material::GetTypeStatic(), after.shape_));
+    }
+    if (after.slots_ != before.slots_)
+        changed |= component->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), after.slots_));
+    if (changed)
+        component->ApplyAttributes();
+    return changed;
 }
 
 ea::vector<Node*> GetAllBrushChildren(Node* rootNode)

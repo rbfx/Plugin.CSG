@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "Urho3D/CSGEditor/CsgEditorOps.h"
 #include "Urho3D/CSGEditor/CsgShapeEditOps.h"
 
 #include <Editor/Core/CommonEditorActionBuilders.h>
@@ -96,6 +97,16 @@ private:
         AssignTexture,
         /// The drop shows a hint and changes nothing.
         Hint,
+        /// The cursor is over a result but no brush made the face. The drop changes nothing.
+        HintNoBrush,
+    };
+
+    /// The drop state of the cursor: the decision and the brush under the cursor.
+    struct DropEvaluation
+    {
+        DropDecision decision_;
+        /// The brush node that made the face under the cursor, or null.
+        Node* hoverBrushNode_{};
     };
 
     bool IsAvailable() const;
@@ -109,11 +120,15 @@ private:
     void RenderOperandOverlay(SceneViewPage& page, Node* rootNode);
     /// Return the drop case for the payload and the selection of the page.
     DropMode GetDropMode(SceneViewPage& page, DragDropPayload* payload) const;
-    /// Return true if the nearest geometry under the cursor is the result node of a root of the selection.
-    bool IsHoveringSelectedResult(SceneViewPage& page) const;
-    /// Set the material on the brush components of the drop. Slot 0 only, or all slots.
-    void ApplyDropMaterial(const ea::string& materialName, bool allSlots);
-    /// Set the old "Materials" values back on the brush components of the drop.
+    /// Read the selection and the cursor and call DecideDrop. The pick uses the result of ANY root.
+    DropEvaluation EvaluateDrop(SceneViewPage& page, DropPayloadKind kind) const;
+    /// Return the face slot for a Ctrl drop on the brush: the slot of the selected face handle. Else nothing.
+    ea::optional<unsigned> GetCtrlFaceSlot(Component* brush) const;
+    /// Find the target brush components for the cursor. Restore the old preview and set the new one.
+    void RefreshDropTargets(SceneViewPage& page);
+    /// Set the material on the brush components of the drop with the scope and slot of the drop.
+    void ApplyDropMaterial(const ea::string& materialName);
+    /// Set the old "Shape Material" and "Materials" values back on the brush components of the drop.
     void RestoreDropMaterials();
     /// Move the preview brush to the cursor hit point.
     void UpdateDropBrushPosition();
@@ -158,6 +173,8 @@ private:
     /// Render the "Shape" section of the operand overlay.
     void RenderStatsSection(Node* rootNode);
     void RenderShapeSection();
+    /// Render the rows of the shape material and the face overrides of a shape brush.
+    void RenderMaterialRows(Component* brush);
     /// Render the settings of the shape handles.
     void RenderShapeSettings();
     /// Return true if the gizmo of the transform manipulator is in local space.
@@ -182,10 +199,15 @@ private:
     Variant dropNewModel_;
     /// The material case: the old "Materials" values of the components in dropComponents_.
     VariantVector dropOldMaterials_;
+    /// The material case: the old "Shape Material" values. Empty for a brush without the attribute.
+    VariantVector dropOldShape_;
     /// The material case: the material resource name, or the texture resource name.
     ea::string dropResourceName_;
-    /// The material case: the preview has this slot mode.
-    bool dropAllSlots_{};
+    /// The material case: the preview has this scope and slot.
+    MaterialScope dropScope_{MaterialScope::Shape};
+    unsigned dropSlot_{};
+    /// The material case: a Ctrl drop had no face handle. The hint shows.
+    bool dropNoFace_{};
     /// The material case: the preview material is set on the brushes.
     bool dropPreviewApplied_{};
 
