@@ -417,7 +417,7 @@ bool IsResultNodeOfRoot(Node* node, Node* rootNode)
     return node && rootNode && node->IsTemporary() && node->GetParent() == rootNode && node->GetName() == "CsgResult";
 }
 
-DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl, bool alt)
+DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bool ctrl, bool alt)
 {
     DropDecision result;
     switch (kind)
@@ -433,7 +433,7 @@ DropDecision DecideDrop(DropPayloadKind kind, const DropSelection& selection, bo
     {
         const DropAction assign =
             kind == DropPayloadKind::Material ? DropAction::AssignMaterial : DropAction::AssignTexture;
-        result.scope_ = alt || ctrl ? MaterialScope::Slot : shift ? MaterialScope::ShapeClearOverrides : MaterialScope::Shape;
+        result.scope_ = alt || ctrl ? MaterialScope::Slot : MaterialScope::All;
         if (selection.hoveringResult_)
         {
             if (!selection.hoverBrush_)
@@ -498,77 +498,29 @@ ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, cons
     switch (decision.scope_)
     {
     case MaterialScope::Slot: return hasFace ? ea::string("Ctrl: only the selected face") : ea::string("Select a face handle first");
-    case MaterialScope::ShapeClearOverrides: return "Shift: all faces, clear face overrides";
-    case MaterialScope::Shape: break;
+    case MaterialScope::All: break;
     }
-    return "Drop: all unassigned faces";
+    return "Drop: all faces";
 }
 
 bool PlanMaterialEdit(BrushMaterials& io, MaterialScope scope, unsigned slot, const ea::string& material)
 {
     BrushMaterials plan = io;
-    if (!plan.procedural_)
+    if (plan.slots_.empty() && (scope == MaterialScope::All || slot == 0))
+        plan.slots_.resize(1);
+    if (scope == MaterialScope::Slot)
     {
-        // A model brush has no shape material. A shape edit sets all geometry slots.
-        if (plan.slots_.empty())
-            plan.slots_.resize(1);
-        if (scope == MaterialScope::Slot)
-        {
-            if (slot >= plan.slots_.size())
-                return false;
-            plan.slots_[slot] = material;
-        }
-        else
-        {
-            for (ea::string& name : plan.slots_)
-                name = material;
-        }
-        io = ea::move(plan);
-        return true;
+        if (slot >= plan.slots_.size())
+            return false;
+        plan.slots_[slot] = material;
     }
-
-    if (scope == MaterialScope::Slot && slot >= plan.slots_.size())
-        return false;
-
-    // An old brush: slot 0 is the material of the whole shape. Move it, so a new edit keeps the render result.
-    if (plan.shape_.empty() && !plan.slots_.empty() && !plan.slots_[0].empty())
+    else
     {
-        plan.shape_ = plan.slots_[0];
         for (ea::string& name : plan.slots_)
-        {
-            if (name == plan.shape_)
-                name.clear();
-        }
-    }
-
-    switch (scope)
-    {
-    case MaterialScope::Shape: plan.shape_ = material; break;
-    case MaterialScope::ShapeClearOverrides:
-        plan.shape_ = material;
-        for (ea::string& name : plan.slots_)
-            name.clear();
-        break;
-    case MaterialScope::Slot: plan.slots_[slot] = material; break;
+            name = material;
     }
     io = ea::move(plan);
     return true;
-}
-
-ea::vector<unsigned> GetOverriddenSlots(const BrushMaterials& materials)
-{
-    ea::vector<unsigned> result;
-    if (!materials.procedural_)
-        return result;
-    const ea::string& shape = !materials.shape_.empty() ? materials.shape_
-        : materials.slots_.empty()                    ? materials.shape_
-                                                      : materials.slots_[0];
-    for (unsigned i = 0; i < materials.slots_.size(); ++i)
-    {
-        if (!materials.slots_[i].empty() && materials.slots_[i] != shape)
-            result.push_back(i);
-    }
-    return result;
 }
 
 ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsigned handleId)
@@ -581,14 +533,6 @@ ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsi
     return ea::nullopt;
 }
 
-namespace
-{
-bool HasShapeMaterialAttribute(Component* component)
-{
-    return component && component->GetAttribute("Shape Material").GetType() == VAR_RESOURCEREF;
-}
-} // namespace
-
 bool ReadBrushMaterials(Node* brush, BrushMaterials& materials)
 {
     Component* component = GetBrushComponent(brush);
@@ -596,9 +540,6 @@ bool ReadBrushMaterials(Node* brush, BrushMaterials& materials)
     if (!ReadMaterialList(component, list))
         return false;
     materials = BrushMaterials{};
-    materials.procedural_ = HasShapeMaterialAttribute(component);
-    if (materials.procedural_)
-        materials.shape_ = component->GetAttribute("Shape Material").GetResourceRef().name_;
     materials.slots_ = list.names_;
     return true;
 }
@@ -614,10 +555,6 @@ bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea
         return false;
 
     bool changed = false;
-    if (after.procedural_ && after.shape_ != before.shape_)
-    {
-        changed |= component->SetAttribute("Shape Material", ResourceRef(Material::GetTypeStatic(), after.shape_));
-    }
     if (after.slots_ != before.slots_)
         changed |= component->SetAttribute("Materials", ResourceRefList(Material::GetTypeStatic(), after.slots_));
     if (changed)
@@ -638,9 +575,7 @@ void MaterialDropPreview::SetTargets(const ea::vector<Node*>& brushes, MaterialS
         ResourceRefList list;
         if (!ReadMaterialList(component, list))
             continue;
-        const Variant shape = component->GetAttribute("Shape Material");
-        entries_.push_back(Entry{WeakPtr<Component>(component), shape.GetType() == VAR_RESOURCEREF ? shape : Variant::EMPTY,
-            component->GetAttribute("Materials")});
+        entries_.push_back(Entry{WeakPtr<Component>(component), component->GetAttribute("Materials")});
     }
 }
 
@@ -664,8 +599,6 @@ void MaterialDropPreview::Restore()
         Component* component = entry.component_;
         if (!component)
             continue;
-        if (entry.oldShape_.GetType() == VAR_RESOURCEREF)
-            component->SetAttribute("Shape Material", entry.oldShape_);
         component->SetAttribute("Materials", entry.oldMaterials_);
         component->ApplyAttributes();
     }
@@ -681,7 +614,7 @@ void MaterialDropPreview::Clear()
 void MaterialDropPreview::Forget()
 {
     entries_.clear();
-    scope_ = MaterialScope::Shape;
+    scope_ = MaterialScope::All;
     slot_ = 0;
     applied_ = false;
 }

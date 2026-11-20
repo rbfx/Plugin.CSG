@@ -3235,36 +3235,29 @@ TEST_CASE("CsgBoxBrush has one material slot for each face and no Model attribut
     CHECK(errors.GetCount() == 0);
 }
 
-TEST_CASE("ResolveSlotMaterial uses override, shape material, then slot 0", "[shapes][materials]")
+TEST_CASE("ResolveSlotMaterial uses the slot, then slot 0", "[shapes][materials]")
 {
     const ResourceRefList faces(Material::GetTypeStatic(), {"A", "", "C", ""});
     const ResourceRefList noneSet(Material::GetTypeStatic(), {"", "", "", ""});
     const ResourceRefList empty(Material::GetTypeStatic());
 
-    // An override wins over the shape material.
-    CHECK(ResolveSlotMaterial("S", faces, 0) == "A");
-    CHECK(ResolveSlotMaterial("S", faces, 2) == "C");
-    // An empty slot inherits the shape material.
-    CHECK(ResolveSlotMaterial("S", faces, 1) == "S");
-    CHECK(ResolveSlotMaterial("S", faces, 3) == "S");
-    // Without a shape material an empty slot uses slot 0 (old scenes).
-    CHECK(ResolveSlotMaterial("", faces, 1) == "A");
-    CHECK(ResolveSlotMaterial("", faces, 2) == "C");
+    CHECK(ResolveSlotMaterial(faces, 0) == "A");
+    CHECK(ResolveSlotMaterial(faces, 2) == "C");
+    // An empty slot uses slot 0 (old scenes).
+    CHECK(ResolveSlotMaterial(faces, 1) == "A");
+    CHECK(ResolveSlotMaterial(faces, 3) == "A");
     // All empty.
-    CHECK(ResolveSlotMaterial("", noneSet, 2).empty());
-    CHECK(ResolveSlotMaterial("S", noneSet, 2) == "S");
-    CHECK(ResolveSlotMaterial("", empty, 0).empty());
-    CHECK(ResolveSlotMaterial("S", empty, 0) == "S");
-    // A slot out of range has no override.
-    CHECK(ResolveSlotMaterial("S", faces, 9) == "S");
-    CHECK(ResolveSlotMaterial("", faces, 9) == "A");
+    CHECK(ResolveSlotMaterial(noneSet, 2).empty());
+    CHECK(ResolveSlotMaterial(empty, 0).empty());
+    // A slot out of range uses slot 0.
+    CHECK(ResolveSlotMaterial(faces, 9) == "A");
 }
 
-TEST_CASE("The shape material of a box brush has a default, saves and loads", "[shapes][materials]")
+TEST_CASE("A box brush has no Shape Material attribute and ignores a saved one", "[shapes][materials]")
 {
     auto context = MakeCsgTestContext();
     context->RegisterSubsystem<VirtualFileSystem>();
-    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml", "Materials/Shape.xml"})
+    for (const char* name : {"Materials/Box.xml", "Materials/Top.xml"})
     {
         auto material = MakeShared<Material>(context);
         material->SetName(name);
@@ -3277,42 +3270,15 @@ TEST_CASE("The shape material of a box brush has a default, saves and loads", "[
     CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
     Component* component = box;
 
-    SECTION("The default is an empty material")
+    SECTION("The attribute is gone")
     {
-        CHECK(box->GetShapeMaterial().empty());
-        const Variant value = component->GetAttribute("Shape Material");
-        REQUIRE(value.GetType() == VAR_RESOURCEREF);
-        CHECK(value.GetResourceRef().name_.empty());
-        CHECK(value.GetResourceRef().type_ == Material::GetTypeStatic());
-        // The attribute comes before "Materials".
-        int shapeIndex = -1;
-        int materialsIndex = -1;
-        int index = 0;
         for (const AttributeInfo& info : *component->GetAttributes())
-        {
-            if (info.name_ == "Shape Material")
-                shapeIndex = index;
-            if (info.name_ == "Materials")
-                materialsIndex = index;
-            ++index;
-        }
-        CHECK(shapeIndex >= 0);
-        CHECK(shapeIndex < materialsIndex);
+            CHECK(info.name_ != "Shape Material");
     }
 
-    SECTION("A setter marks the brush dirty")
+    SECTION("A save and a load keep the materials")
     {
-        box->ClearDirty();
-        box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
-        CHECK(box->IsDirty());
-        CHECK(box->GetShapeMaterial() == "Materials/Shape.xml");
-    }
-
-    SECTION("A save and a load keep the shape material and the overrides")
-    {
-        box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
-        box->SetMaterials(ResourceRefList(
-            Material::GetTypeStatic(), {"", "", "", "Materials/Top.xml", "", ""}));
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"", "", "", "Materials/Top.xml", "", ""}));
         VectorBuffer buffer;
         REQUIRE(scene->Save(buffer));
         auto loaded = MakeShared<Scene>(context);
@@ -3320,44 +3286,35 @@ TEST_CASE("The shape material of a box brush has a default, saves and loads", "[
         REQUIRE(loaded->Load(buffer));
         auto* loadedBox = loaded->GetChild("Root")->GetChild("Box")->GetComponent<CsgBoxBrush>();
         REQUIRE(loadedBox);
-        CHECK(loadedBox->GetShapeMaterial() == "Materials/Shape.xml");
         CHECK(loadedBox->GetMaterialsAttr().names_ == box->GetMaterialsAttr().names_);
     }
 
-    SECTION("An old XML brush without the attribute resolves as before")
+    SECTION("An old XML scene with only slot 0 set resolves as before")
     {
         box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Box.xml", "", "", "Materials/Top.xml"}));
         VectorBuffer buffer;
         REQUIRE(scene->SaveXML(buffer));
         buffer.Seek(0);
         const ea::string text = buffer.ReadString();
-        ea::string old;
-        for (const ea::string& line : text.split('\n', true))
-        {
-            if (!line.contains("Shape Material"))
-                old += line + "\n";
-        }
-        CHECK_FALSE(old.contains("Shape Material"));
         VectorBuffer oldBuffer;
-        oldBuffer.Write(old.c_str(), old.length());
+        oldBuffer.Write(text.c_str(), text.length());
         oldBuffer.Seek(0);
         auto loaded = MakeShared<Scene>(context);
         REQUIRE(loaded->LoadXML(oldBuffer));
         auto* loadedBox = loaded->GetChild("Root")->GetChild("Box")->GetComponent<CsgBoxBrush>();
         REQUIRE(loadedBox);
-        CHECK(loadedBox->GetShapeMaterial().empty());
         const ResourceRefList& faces = loadedBox->GetMaterialsAttr();
         REQUIRE(faces.names_.size() == 6);
         // Slot 0 fills the empty slots, as before.
-        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 1) == "Materials/Box.xml");
-        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 3) == "Materials/Top.xml");
-        CHECK(ResolveSlotMaterial(loadedBox->GetShapeMaterial(), faces, 5) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(faces, 1) == "Materials/Box.xml");
+        CHECK(ResolveSlotMaterial(faces, 3) == "Materials/Top.xml");
+        CHECK(ResolveSlotMaterial(faces, 5) == "Materials/Box.xml");
     }
 
     CHECK(errors.GetCount() == 0);
 }
 
-TEST_CASE("The root applies the shape material to the faces of a box", "[root][materials]")
+TEST_CASE("The root applies the slot materials to the faces of a box", "[root][materials]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
@@ -3374,18 +3331,20 @@ TEST_CASE("The root applies the shape material to the faces of a box", "[root][m
     scene->CreateComponent<Octree>();
     CsgRoot* root = MakeEmptyBaseRoot(scene, "Root");
     CsgBoxBrush* box = AddProceduralBox(root, "Box", Vector3::ZERO, Vector3::ONE, CsgOperation::Union);
-    box->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Shape.xml"));
 
-    SECTION("The shape material alone gives one geometry")
+    SECTION("All slots equal give one geometry")
     {
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(6u, ea::string("Materials/Shape.xml"))));
         BuildFully(root, workQueue);
         CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
         CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Shape.xml"});
     }
 
-    SECTION("An override reaches only its group")
+    SECTION("A different slot reaches only its group")
     {
-        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"", "", "", "Materials/Top.xml", "", ""}));
+        ea::vector<ea::string> slots(6u, ea::string("Materials/Shape.xml"));
+        slots[3] = "Materials/Top.xml";
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), slots));
         BuildFully(root, workQueue);
         const Model* output = GetOutput(root)->GetModel();
         REQUIRE(output->GetNumGeometries() == 2);
@@ -3402,10 +3361,11 @@ TEST_CASE("The root applies the shape material to the faces of a box", "[root][m
         }
     }
 
-    SECTION("A shape material without any slot list still applies")
+    SECTION("An old brush with only slot 0 set renders slot 0 on all faces")
     {
-        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"", "", "", "", "", ""}));
+        box->SetMaterials(ResourceRefList(Material::GetTypeStatic(), {"Materials/Shape.xml", "", "", "", "", ""}));
         BuildFully(root, workQueue);
+        CHECK(GetOutput(root)->GetModel()->GetNumGeometries() == 1);
         CHECK(GetOutput(root)->GetMaterialsAttr().names_ == ea::vector<ea::string>{"Materials/Shape.xml"});
     }
 
@@ -7334,7 +7294,7 @@ TEST_CASE("The pick of a procedural box gives the slot of each hit face", "[root
     }
 }
 
-TEST_CASE("A subtract procedural brush owns the carved wall and its shape material shows there", "[root][pick][alt]")
+TEST_CASE("A subtract procedural brush owns the carved wall and its material shows there", "[root][pick][alt]")
 {
     auto context = MakeCsgTestContext();
     auto* workQueue = context->GetSubsystem<WorkQueue>();
@@ -7351,7 +7311,7 @@ TEST_CASE("A subtract procedural brush owns the carved wall and its shape materi
     cutNode->SetScale(0.5f);
     auto* cut = cutNode->CreateComponent<CsgBoxBrush>();
     cut->SetOperation(CsgOperation::DifferenceAB);
-    cut->SetShapeMaterialAttr(ResourceRef(Material::GetTypeStatic(), "Materials/Carve.xml"));
+    cut->SetMaterials(ResourceRefList(Material::GetTypeStatic(), ea::vector<ea::string>(6u, ea::string("Materials/Carve.xml"))));
     BuildFully(root, workQueue);
 
     // The floor of the pocket is a face of the subtract brush.
@@ -7360,7 +7320,7 @@ TEST_CASE("A subtract procedural brush owns the carved wall and its shape materi
     CHECK(hit.source_ == IdOf(cut));
     CHECK(hit.position_.Equals(Vector3(0.0f, 0.0f, 0.75f), 1e-4f));
 
-    // The carved faces use the shape material of the subtract brush.
+    // The carved faces use the material of the subtract brush.
     const auto& names = GetOutput(root)->GetMaterialsAttr().names_;
     CHECK(ea::find(names.begin(), names.end(), ea::string("Materials/Carve.xml")) != names.end());
 }

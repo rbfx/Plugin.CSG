@@ -1770,22 +1770,20 @@ bool CsgRoot::SetupOperandStaticModel(StaticModel* staticModel, const CsgBrush* 
         staticModel->SetModel(generatedModel);
         // A generated model has no name, so it has no material list file. Empty materials clear the old ones.
         const ResourceRefList& materialsAttr = brush->GetMaterialsAttr();
-        const auto* procedural = brush->Cast<CsgProceduralBrush>();
-        const ea::string shapeMaterial = procedural ? procedural->GetShapeMaterial() : ea::string();
-        if (materialsAttr.names_.empty() && shapeMaterial.empty())
+        if (materialsAttr.names_.empty())
         {
             staticModel->SetMaterial(nullptr);
             return true;
         }
 
-        // The face override wins, then the shape material, then the material of slot 0. This is done before
+        // The slot material wins, then the material of slot 0. This is done before
         // the material names are compared for the output geometries, so equal faces merge into one output geometry.
         ResourceRefList resolved(materialsAttr.type_);
         const unsigned numGeometries = generatedModel->GetNumGeometries();
         resolved.names_.resize(numGeometries);
         for (unsigned i = 0; i < numGeometries; ++i)
         {
-            resolved.names_[i] = ResolveSlotMaterial(shapeMaterial, materialsAttr, i);
+            resolved.names_[i] = ResolveSlotMaterial(materialsAttr, i);
         }
         staticModel->SetMaterialsAttr(resolved);
         return true;

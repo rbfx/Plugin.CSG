@@ -179,7 +179,7 @@ private:
     /// Render the "Shape" section of the operand overlay.
     void RenderStatsSection(Node* rootNode);
     void RenderShapeSection();
-    /// Render the rows of the shape material and the face overrides of a shape brush.
+    /// Render the row of the material slots of a shape brush.
     void RenderMaterialRows(Component* brush);
     /// Render the settings of the shape handles.
     void RenderShapeSettings();

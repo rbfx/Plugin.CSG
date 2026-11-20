@@ -167,11 +167,9 @@ enum class DropTarget
 /// What a material edit changes on a brush.
 enum class MaterialScope
 {
-    /// Set the shape material. Keep the face overrides.
-    Shape,
-    /// Set the shape material and clear all face overrides.
-    ShapeClearOverrides,
-    /// Set one face override.
+    /// Set all slots.
+    All,
+    /// Set one slot.
     Slot,
 };
 
@@ -180,7 +178,7 @@ struct DropDecision
 {
     DropAction action_{DropAction::None};
     DropTarget target_{DropTarget::Selected};
-    MaterialScope scope_{MaterialScope::Shape};
+    MaterialScope scope_{MaterialScope::All};
     /// True if the face is the face under the cursor (Alt). Then only the hovered brush gets the edit.
     bool faceFromHit_{};
     /// The slot of the face under the cursor. Set only with `faceFromHit_`. Empty means no face: no change.
@@ -213,44 +211,31 @@ bool ClaimsMaterialDrag(DropPayloadKind kind, bool sceneHasRoot, DropAction acti
 bool IsResultNodeOfRoot(Node* node, Node* rootNode);
 
 /// Decide what to do with a drop. The function is pure.
-/// Material and texture: the default scope is the whole shape: all faces with no override.
-/// Shift clears the face overrides. Ctrl sets the face of the selected handle.
+/// Material and texture: the default scope is all slots of the shape. Ctrl sets the face of the selected handle.
 /// Alt sets only the face under the cursor: the scope is Slot, `faceFromHit_` is set and the slot is `hoverSlot_`.
-/// Alt wins over Ctrl. Ctrl wins over Shift. With Alt, the target is only the brush under the cursor.
+/// Alt wins over Ctrl. With Alt, the target is only the brush under the cursor.
 /// - The cursor is over the result of any root and no brush made the face: hint, no change.
 /// - The brush under the cursor is selected: all selected brushes get the edit.
 /// - The brush under the cursor is not selected: only that brush gets the edit.
 /// - No result under the cursor: a texture goes to the selected brushes. A material goes to the stock handler.
 DropDecision DecideDrop(
-    DropPayloadKind kind, const DropSelection& selection, bool shift, bool ctrl, bool alt = false);
+    DropPayloadKind kind, const DropSelection& selection, bool ctrl, bool alt = false);
 
 /// Return the text of the drag hint for the scope of a material drop. The function is pure.
 /// `faceName` is the name of the face under the cursor, or empty. `hasFace` is true if an Alt or Ctrl drop has a face.
 ea::string DescribeMaterialDrop(const DropDecision& decision, bool hasFace, const ea::string& faceName);
 
-/// The materials of a brush as the editor sees them.
+/// The material slots of a brush as the editor sees them.
 struct BrushMaterials
 {
-    /// True for a brush with a generated shape. It has the shape material and the face overrides.
-    bool procedural_{};
-    /// The shape material. Always empty for a model brush.
-    ea::string shape_;
-    /// The face overrides of a procedural brush, or the material slots of a model brush.
+    /// The material of each slot. A procedural brush always has one entry for each slot.
     ea::vector<ea::string> slots_;
 };
 
 /// Plan one material edit. The function is pure. Return false and keep `io` if the slot is not valid.
-/// - Shape: set the shape material and keep the overrides. A model brush gets all slots.
-/// - ShapeClearOverrides: set the shape material and clear all overrides.
-/// - Slot: set one slot. The slot must be in range, but slot 0 of an empty model list grows the list.
-/// A procedural brush with no shape material and a set slot 0 is an old brush. The plan first moves
-/// slot 0 to the shape material and clears the slots equal to it. The render result stays the same.
+/// - All: set all slots. An empty list grows to one slot.
+/// - Slot: set one slot. The slot must be in range, but slot 0 of an empty list grows the list.
 bool PlanMaterialEdit(BrushMaterials& io, MaterialScope scope, unsigned slot, const ea::string& material);
-
-/// Return the slots of a procedural brush that differ from the shape material.
-/// A slot counts if it is not empty and not equal to the shape material.
-/// With no shape material, slot 0 is the shape material (old brush). A model brush gives none.
-ea::vector<unsigned> GetOverriddenSlots(const BrushMaterials& materials);
 
 /// The live preview of a material drop. It keeps the original attribute values of the target brushes.
 /// The baseline is always the state before the first preview. A change of the targets restores the
@@ -258,11 +243,10 @@ ea::vector<unsigned> GetOverriddenSlots(const BrushMaterials& materials);
 class MaterialDropPreview
 {
 public:
-    /// The original values of one target brush. The shape value is empty for a brush without "Shape Material".
+    /// The original values of one target brush.
     struct Entry
     {
         WeakPtr<Component> component_;
-        Variant oldShape_;
         Variant oldMaterials_;
     };
 
@@ -287,7 +271,7 @@ public:
 
 private:
     ea::vector<Entry> entries_;
-    MaterialScope scope_{MaterialScope::Shape};
+    MaterialScope scope_{MaterialScope::All};
     unsigned slot_{};
     bool applied_{};
 };
@@ -298,7 +282,7 @@ ea::optional<unsigned> GetFaceSlotOfHandle(const ea::string& shapeTypeName, unsi
 
 /// Read the materials of the brush node. Return false if the node has no brush or no material list.
 bool ReadBrushMaterials(Node* brush, BrushMaterials& materials);
-/// Plan the edit on the attributes of the brush node and write the attributes "Shape Material" and "Materials".
+/// Plan the edit on the attributes of the brush node and write the attribute "Materials".
 /// Return true if an attribute changed. Return false with no change for an invalid edit.
 bool EditBrushMaterial(Node* brush, MaterialScope scope, unsigned slot, const ea::string& material);
 
